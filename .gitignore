@@ -1,0 +1,8 @@
+.venv/
+.env
+.env.secret
+.env.local
+.env.*.local
+maze_memory.sqlite3
+__pycache__/
+*.pyc

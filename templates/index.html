@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Assistant</title>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --card: #ffffff;
+        --text: #17202a;
+        --accent: #0b6efd;
+        --error: #b42318;
+        --border: #d0d7e2;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top right, #e9f2ff, var(--bg));
+        color: var(--text);
+      }
+
+      .container {
+        max-width: 760px;
+        margin: 40px auto;
+        padding: 24px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 10px 24px rgba(23, 32, 42, 0.08);
+      }
+
+      h1 {
+        margin-top: 0;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 130px;
+        resize: vertical;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        padding: 12px;
+        font: inherit;
+        box-sizing: border-box;
+      }
+
+      button {
+        margin-top: 12px;
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 16px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .error {
+        color: var(--error);
+        margin-top: 16px;
+      }
+
+      .answer {
+        margin-top: 20px;
+        border-top: 1px solid var(--border);
+        padding-top: 16px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>AI Assistant</h1>
+        <form id="prompt-form" method="post">
+          <label for="prompt">Enter text</label>
+          <textarea id="prompt" name="prompt" placeholder="Ask anything..."></textarea>
+          <button id="submit-btn" type="submit">Send</button>
+        </form>
+
+        <div id="error" class="error" hidden></div>
+
+        <div id="answer" class="answer" hidden>
+          <strong>Response</strong>
+          <div id="answer-text"></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      const form = document.getElementById("prompt-form");
+      const submitBtn = document.getElementById("submit-btn");
+      const errorEl = document.getElementById("error");
+      const answerEl = document.getElementById("answer");
+      const answerTextEl = document.getElementById("answer-text");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        errorEl.hidden = true;
+        answerEl.hidden = true;
+
+        submitBtn.disabled = true;
+        const originalText = submitBtn.textContent;
+        submitBtn.textContent = "Sending...";
+
+        try {
+          const formData = new FormData(form);
+          const response = await fetch("/ask", {
+            method: "POST",
+            body: formData,
+          });
+
+          const payload = await response.json();
+
+          if (!response.ok || payload.error) {
+            errorEl.textContent = payload.error || "Request failed.";
+            errorEl.hidden = false;
+            return;
+          }
+
+          answerTextEl.textContent = payload.answer || "No text response returned.";
+          answerEl.hidden = false;
+        } catch (error) {
+          errorEl.textContent = `Request failed: ${error}`;
+          errorEl.hidden = false;
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalText;
+        }
+      });
+    </script>
+  </body>
+</html>
