@@ -75,6 +75,8 @@ LOGIC_CONFIDENCE_THRESHOLD=0.55
 REPEAT_CONFIDENCE_THRESHOLD=0.6
 # Optional: max repeat-goal execution count parsed from prompts/plans.
 MAX_REPEAT_EXECUTIONS=25
+# Optional: default maze-run count prefilled in the Enter text box as "solve X mazes".
+DEFAULT_MAZE_RUN_LENGTH=10
 # Optional: contradiction-triggered map-doubt mode to re-enable exploration when fully-mapped routing stalls.
 MAZE_MAP_DOUBT_ENABLE=1
 MAZE_MAP_DOUBT_REPEAT_THRESHOLD=3
@@ -292,6 +294,28 @@ FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN=120
 # Optional: prevent forced frontier-lock/continuity moves when local score gap is too large.
 FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE=1
 FRONTIER_LOCK_FORCE_SCORE_MARGIN=120
+# Optional: verification-priority routing (favor direct branch/corridor verification over speculative guesses).
+VERIFICATION_PRIORITY_ENABLE=1
+VERIFICATION_PRIORITY_UNKNOWN_THRESHOLD=3
+VERIFICATION_PRIORITY_FRONTIER_THRESHOLD=1
+VERIFICATION_PRIORITY_MIN_SIGNAL=1.2
+VERIFICATION_PRIORITY_SCORE_MARGIN=44
+VERIFICATION_PRIORITY_CONTINUITY_BONUS=1.6
+# Optional: downscale prediction authority while verification-priority mode is active.
+VERIFICATION_PRIORITY_PREDICTION_SCALE=0.3
+# Optional: when uncertainty is nearly resolved, force commit to the best unresolved verification branch.
+LAST_UNCERTAINTY_COMMIT_ENABLE=1
+LAST_UNCERTAINTY_UNKNOWN_THRESHOLD=2
+LAST_UNCERTAINTY_FRONTIER_THRESHOLD=1
+LAST_UNCERTAINTY_SCORE_MARGIN=64
+# Optional: treat visible corridor progress like traversal progress in frontier scoring.
+VISION_PROGRESS_CREDIT_ENABLE=1
+VISION_PROGRESS_CREDIT_SCALE=1.0
+VISION_PROGRESS_CREDIT_MIN_CLEAR_RUN=1
+# Optional: longer-lived trap memory penalties for repeated catastrophic transition/cell re-entry.
+LONG_TRAP_MEMORY_PENALTY_WEIGHT=18.0
+LONG_TRAP_MEMORY_MAX_PENALTY=180
+LONG_TRAP_MEMORY_MAX_HITS=8
 # Optional: feature vector size used for cause-effect similarity retrieval.
 CAUSE_EFFECT_VECTOR_DIM=24
 # Optional: top-k similar cause-effect memories retrieved per move scoring.
@@ -324,6 +348,32 @@ MACHINE_VISION_UNSEEN_RANDOM_EXPLORE_CHANCE=0.2
 MACHINE_VISION_KERNEL_HINT_ENABLE=1
 MACHINE_VISION_KERNEL_HINT_MIN_CONF=0.08
 MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT=3.0
+# Optional: adaptive neural controller (online learner with growth/prune and persistent weights).
+ADAPTIVE_CONTROLLER_ENABLE=1
+# Optional: temporarily isolate adaptive learning from MV hint bias during early training.
+ADAPTIVE_DISABLE_MV_HINTS=1
+ADAPTIVE_SCORE_BLEND=28.0
+ADAPTIVE_MAX_SCORE_ADJUST=120
+ADAPTIVE_OUTCOME_SCALE=120.0
+ADAPTIVE_SAVE_INTERVAL_STEPS=120
+ADAPTIVE_HIDDEN_MIN=20
+ADAPTIVE_HIDDEN_MAX=128
+ADAPTIVE_GROWTH_STEP=4
+ADAPTIVE_GROWTH_PATIENCE=120
+ADAPTIVE_GROWTH_ERROR_THRESHOLD=0.22
+ADAPTIVE_PRUNE_INTERVAL=500
+ADAPTIVE_PRUNE_IMPORTANCE_THRESHOLD=0.008
+ADAPTIVE_LEARNING_RATE=0.018
+ADAPTIVE_L2=0.0008
+ADAPTIVE_POLICY_MODE=hybrid
+ADAPTIVE_POLICY_MIN_STEPS=120
+ADAPTIVE_POLICY_SCORE_MARGIN=40
+ADAPTIVE_POLICY_MIN_PRED_GAP=0.05
+ADAPTIVE_POLICY_EPSILON=0.06
+ADAPTIVE_REPLAY_ENABLE=1
+ADAPTIVE_REPLAY_BUFFER_SIZE=6000
+ADAPTIVE_REPLAY_BATCH=6
+ADAPTIVE_REPLAY_UPDATES=2
 # Optional: blend weight for cross-maze priors when predicting unseen cells (0..1).
 PREDICTION_PRIOR_BLEND=0.35
 # Optional: score reward when an unseen-structure prediction is correct.
@@ -461,6 +511,7 @@ Then open `http://127.0.0.1:5050`.
 - Layout recalls now support biological-style reconsolidation: each recall has a small configurable mutation chance (`LAYOUT_RECALL_MUTATION_CHANCE`), and the recalled block is written back as the latest memory version.
 - Reconsolidation mutation is now soft: it decays one recalled cell's recency metadata (`LAYOUT_RECALL_MUTATION_DECAY_STEPS`) instead of removing known open/wall occupancy from the recalled map.
 - Machine-vision localization training is available as side-channels (`MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE`, `MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE`): it predicts player and exit cell coordinates from local perception, the maze memory pipeline logs/grades exact-hit and Manhattan error accuracy, and the board renders yellow-green overlays for both (`MV` for player prediction, `MV-E` for exit prediction). Optional kernel-hint knobs (`MACHINE_VISION_KERNEL_HINT_ENABLE`, `MACHINE_VISION_KERNEL_HINT_MIN_CONF`, `MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT`) now let those MV coordinates act as a soft, source/confidence-gated exploration bias alongside normal sensory vision.
+- Adaptive neural controller (`ADAPTIVE_CONTROLLER_ENABLE`) adds an online-learning score term over maze decisions, stores persistent weights in `adaptive_brain.json`, can grow/prune hidden units (`ADAPTIVE_HIDDEN_MIN`..`ADAPTIVE_HIDDEN_MAX`, growth/prune knobs), supports policy arbitration modes (`ADAPTIVE_POLICY_MODE=hybrid|adaptive_first`) with warmup/margin gates, uses replay-style updates (`ADAPTIVE_REPLAY_*`), and can temporarily isolate from MV hint bias with `ADAPTIVE_DISABLE_MV_HINTS=1` while bootstrapping transferable behavior.
 - STM now supports access-time stale pruning with a small probability (`STM_ACCESS_UNUSED_PRUNE_CHANCE`) so low-use entries can be gradually culled while memory is being accessed.
 - Cause-effect memory is also stored in `maze_memory.sqlite3` and shown in the Memory Viewer as `Cause-Effect Memory` entries.
 - Cause-effect memory is now integrated as a three-step layer: working (`recent_cause_effect`), short-term (`Cause-Effect STM`), and semantic (`Cause-Effect Semantic`) with lightweight vector similarity retrieval.
@@ -469,6 +520,7 @@ Then open `http://127.0.0.1:5050`.
 - Spawn tuning env vars: `TARGET_DISTANCE_MIN_RATIO`, `TARGET_DISTANCE_MAX_RATIO` (distance band ratios applied against max reachable shortest-path distance).
 - Step-limit behavior env vars: `MAZE_STEP_LIMIT_RESET_ENABLE` (`1` default = enforce return-to-start on maze timeout, `0` = disable the timeout reset entirely), `RESET_MAZE_KNOWLEDGE_ON_STEP_LIMIT` (`0` default = keep episodic known map on same-maze timeout retries, `1` = fresh exploration after timeout reset).
 - Repeat-goal cap env var: `MAX_REPEAT_EXECUTIONS` (default `25`, controls the maximum requested run/maze count accepted from planner and local prompt parsing).
+- Default prompt prefill env var: `DEFAULT_MAZE_RUN_LENGTH` (default `10`; preloads Enter text with `solve X mazes` so repeated maze runs can be launched without typing the command each time).
 - Map-doubt loop-recovery env vars: `MAZE_MAP_DOUBT_ENABLE`, `MAZE_MAP_DOUBT_REPEAT_THRESHOLD`, `MAZE_MAP_DOUBT_STALL_THRESHOLD`, `MAZE_MAP_DOUBT_COOLDOWN_STEPS` (when a supposedly fully-mapped maze repeats the same state, objective-only routing is temporarily suppressed so the planner can re-check alternative branches and recover from wrong map assumptions).
 - Stuck re-exploration env vars: `MAZE_STUCK_REEXPLORE_ENABLE`, `MAZE_STUCK_REPEAT_THRESHOLD`, `MAZE_STUCK_NO_PROGRESS_THRESHOLD`, `MAZE_STUCK_WINDOW`, `MAZE_STUCK_REEXPLORE_COOLDOWN_STEPS`, `MAZE_STUCK_PREDICTION_CONF_FLOOR`, `MAZE_STUCK_PREDICTION_BIAS_SCALE`, `MAZE_STUCK_TRANSITION_REPEAT_BOOST`, `MAZE_STUCK_TRANSITION_REVERSE_BOOST` (detects local cycling with no progress, temporarily bypasses rigid policy routing, and increases short-term suppression of repeated directed/ping-pong transitions only while stuck cooldown is active).
 - Decision variability env var: `DECISION_NOISE_WEIGHT` (higher adds more exploration score jitter per decision).
@@ -492,6 +544,9 @@ Then open `http://127.0.0.1:5050`.
 - Frontier continuity: the maze planner now keeps a persistent frontier target within the same maze episode and tries to resume that route after timeout resets instead of immediately recomputing from purely local scores.
 - Same-maze retry continuity: timeout retries now keep an explicit retry counter and preserve the frontier target even during stuck-reexplore fallback, so the planner does not drop back to purely local score replay after a reset.
 - Frontier-lock env vars: `FRONTIER_LOCK_UNKNOWN_THRESHOLD`, `FRONTIER_LOCK_FRONTIER_THRESHOLD`, `FRONTIER_LOCK_RETRY_BONUS`, `FRONTIER_LOCK_LOOP_PENALTY`, `SOLVED_REGION_PENALTY`, `LOOP_ENTROPY_WINDOW`, `LOOP_ENTROPY_THRESHOLD`, `FRONTIER_LOCK_MEMORY_VETO_ENABLE`, `FRONTIER_LOCK_MEMORY_VETO_PENALTY`, `FRONTIER_LOCK_MEMORY_VETO_MARGIN`, `FRONTIER_LOCK_MEMORY_VETO_WINDOW`, `FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN`, `FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE`, `FRONTIER_LOCK_FORCE_SCORE_MARGIN` (when the maze is down to a small unresolved frontier pocket, or retries/low-entropy motion indicate corridor replay, the planner enters a hard frontier-lock mode that routes toward the persistent frontier target, suppresses local stuck fallback/model arbitration, and heavily penalizes staying inside already solved regions; the memory-veto knobs let severe recent punishment traces override forced transition replay, and the score-guard knobs prevent forced frontier routing from overriding a clearly superior local move).
+- Verification-priority env vars: `VERIFICATION_PRIORITY_ENABLE`, `VERIFICATION_PRIORITY_UNKNOWN_THRESHOLD`, `VERIFICATION_PRIORITY_FRONTIER_THRESHOLD`, `VERIFICATION_PRIORITY_MIN_SIGNAL`, `VERIFICATION_PRIORITY_SCORE_MARGIN`, `VERIFICATION_PRIORITY_CONTINUITY_BONUS`, `VERIFICATION_PRIORITY_PREDICTION_SCALE`, `LAST_UNCERTAINTY_COMMIT_ENABLE`, `LAST_UNCERTAINTY_UNKNOWN_THRESHOLD`, `LAST_UNCERTAINTY_FRONTIER_THRESHOLD`, `LAST_UNCERTAINTY_SCORE_MARGIN` (when unresolved uncertainty remains, planner prioritizes direct hallway/branch verification; and when only a tiny unresolved set remains, it commits to the best unresolved branch instead of re-looping solved corridors).
+- Corridor vision-equivalence env vars: `VISION_PROGRESS_CREDIT_ENABLE`, `VISION_PROGRESS_CREDIT_SCALE`, `VISION_PROGRESS_CREDIT_MIN_CLEAR_RUN` (visible corridor depth contributes traversal-equivalent progress via effective frontier distance, so seeing a corridor end is weighted similarly to physically walking those cells).
+- Long trap-memory env vars: `LONG_TRAP_MEMORY_PENALTY_WEIGHT`, `LONG_TRAP_MEMORY_MAX_PENALTY`, `LONG_TRAP_MEMORY_MAX_HITS` (catastrophic trap transitions/cells are remembered longer within the maze episode so repeated loop edges accrue stronger suppression over time).
 - Exploration debug now includes `active_retries`, `frontier_lock`, and `move_entropy`, plus per-move `frontier_lock_progress_bonus`, `frontier_lock_loop_penalty`, and `solved_region_penalty`, so late-maze loop behavior can be validated directly from the debug dump.
 - Local map authority env vars: `LOCAL_MAP_AUTHORITY_MODE`, `LOCAL_MAP_AUTHORITY_SOFT_SCALE`, `STRICT_AUTHORITY_RISK_MEMORY_MIN_SCALE` (`strict`=local episodic truth fully overrides cross-maze reward carryover on fully known cells except a configurable minimum carryover for high-risk contexts; `soft`=apply partial override using the soft scale).
 - Local navigation env vars: `LOCAL_NAVIGATION_KERNEL`, `LOCAL_NAVIGATION_API_FALLBACK` (`LOCAL_NAVIGATION_KERNEL=1` makes navigation local-first, and `LOCAL_NAVIGATION_API_FALLBACK=1` lets OpenAI step in if the local kernel stalls or cannot finish cleanly).

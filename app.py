@@ -11,6 +11,7 @@ from tkinter import scrolledtext
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from adaptive_controller import AdaptiveNeuralController
 from organism_control import (
     CandidateProjection,
     ControlState as OrganismControlState,
@@ -214,6 +215,48 @@ class AIAssistantApp:
             0,
             int(os.getenv("MAZE_MODEL_ASSIST_COOLDOWN_STEPS", "10")),
         )
+        self.adaptive_controller_enable = os.getenv("ADAPTIVE_CONTROLLER_ENABLE", "1") == "1"
+        self.adaptive_disable_mv_hints = os.getenv("ADAPTIVE_DISABLE_MV_HINTS", "0") == "1"
+        self.adaptive_score_blend = max(0.0, float(os.getenv("ADAPTIVE_SCORE_BLEND", "28.0")))
+        self.adaptive_max_score_adjust = max(0, int(os.getenv("ADAPTIVE_MAX_SCORE_ADJUST", "120")))
+        self.adaptive_outcome_scale = max(1.0, float(os.getenv("ADAPTIVE_OUTCOME_SCALE", "120.0")))
+        self.adaptive_save_interval_steps = max(20, int(os.getenv("ADAPTIVE_SAVE_INTERVAL_STEPS", "120")))
+        adaptive_mode_raw = str(os.getenv("ADAPTIVE_POLICY_MODE", "hybrid") or "hybrid").strip().lower()
+        self.adaptive_policy_mode = adaptive_mode_raw if adaptive_mode_raw in {"hybrid", "adaptive_first"} else "hybrid"
+        self.adaptive_policy_min_steps = max(0, int(os.getenv("ADAPTIVE_POLICY_MIN_STEPS", "120")))
+        self.adaptive_policy_score_margin = max(0, int(os.getenv("ADAPTIVE_POLICY_SCORE_MARGIN", "40")))
+        self.adaptive_policy_min_pred_gap = max(0.0, float(os.getenv("ADAPTIVE_POLICY_MIN_PRED_GAP", "0.05")))
+        self.adaptive_policy_epsilon = min(1.0, max(0.0, float(os.getenv("ADAPTIVE_POLICY_EPSILON", "0.06"))))
+        self.adaptive_replay_enable = os.getenv("ADAPTIVE_REPLAY_ENABLE", "1") == "1"
+        self.adaptive_replay_batch = max(1, int(os.getenv("ADAPTIVE_REPLAY_BATCH", "6")))
+        self.adaptive_replay_updates = max(1, int(os.getenv("ADAPTIVE_REPLAY_UPDATES", "2")))
+        self._adaptive_replay: deque[tuple[list[float], float]] = deque(
+            maxlen=max(64, int(os.getenv("ADAPTIVE_REPLAY_BUFFER_SIZE", "6000")))
+        )
+        self.adaptive_brain_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "adaptive_brain.json",
+        )
+        self.adaptive_controller: AdaptiveNeuralController | None = None
+        if self.adaptive_controller_enable:
+            adaptive_seed = int(os.getenv("MAZE_SEED", "1337")) + 1723
+            self.adaptive_controller = AdaptiveNeuralController(
+                input_dim=16,
+                state_path=self.adaptive_brain_path,
+                seed=adaptive_seed,
+                hidden_min=max(8, int(os.getenv("ADAPTIVE_HIDDEN_MIN", "20"))),
+                hidden_max=max(16, int(os.getenv("ADAPTIVE_HIDDEN_MAX", "128"))),
+                growth_step=max(1, int(os.getenv("ADAPTIVE_GROWTH_STEP", "4"))),
+                growth_patience=max(20, int(os.getenv("ADAPTIVE_GROWTH_PATIENCE", "120"))),
+                growth_error_threshold=max(0.02, float(os.getenv("ADAPTIVE_GROWTH_ERROR_THRESHOLD", "0.22"))),
+                prune_interval=max(50, int(os.getenv("ADAPTIVE_PRUNE_INTERVAL", "500"))),
+                prune_importance_threshold=max(
+                    0.0,
+                    float(os.getenv("ADAPTIVE_PRUNE_IMPORTANCE_THRESHOLD", "0.008")),
+                ),
+                learning_rate=max(1e-5, float(os.getenv("ADAPTIVE_LEARNING_RATE", "0.018"))),
+                l2=max(0.0, float(os.getenv("ADAPTIVE_L2", "0.0008"))),
+            )
 
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
@@ -288,6 +331,14 @@ class AIAssistantApp:
         self.layout_recall_last_total = 0
         self.layout_recall_last_rejected = 0
         self.layout_recall_last_source = "none"
+        self.last_memory_regression_check: dict[str, object] = {
+            "maze_layout_id": -1,
+            "recall_source": "none",
+            "objective_steps": 0,
+            "fully_mapped_objective_steps": 0,
+            "non_objective_fully_mapped_steps": 0,
+            "shortest_route_integrity": "unknown",
+        }
         self.layout_recall_mutation_chance = min(
             1.0,
             max(0.0, float(os.getenv("LAYOUT_RECALL_MUTATION_CHANCE", "0.03"))),
@@ -575,12 +626,47 @@ class AIAssistantApp:
         self._reset_trace_window = max(16, int(os.getenv("RESET_TRACE_WINDOW", "48")))
         self._reset_trace: deque[dict[str, object]] = deque(maxlen=self._reset_trace_window)
         self._persistent_frontier_target: tuple[int, int] | None = None
+        self._verification_probe_target: tuple[int, int] | None = None
         self.post_reset_exhaustion_penalty = int(os.getenv("POST_RESET_EXHAUSTION_PENALTY", "120"))
         self.reset_failure_transition_penalty = int(os.getenv("RESET_FAILURE_TRANSITION_PENALTY", "24"))
         self.reset_failure_cell_penalty = int(os.getenv("RESET_FAILURE_CELL_PENALTY", "16"))
         self.reset_success_transition_bonus = int(os.getenv("RESET_SUCCESS_TRANSITION_BONUS", "10"))
         self.post_reset_stm_relax_steps = max(0, int(os.getenv("POST_RESET_STM_RELAX_STEPS", "24")))
         self._post_reset_stm_relax_remaining = 0
+        self.verification_priority_enable = os.getenv("VERIFICATION_PRIORITY_ENABLE", "1") == "1"
+        self.verification_priority_unknown_threshold = max(
+            0,
+            int(os.getenv("VERIFICATION_PRIORITY_UNKNOWN_THRESHOLD", "3")),
+        )
+        self.verification_priority_frontier_threshold = max(
+            0,
+            int(os.getenv("VERIFICATION_PRIORITY_FRONTIER_THRESHOLD", "1")),
+        )
+        self.verification_priority_min_signal = max(
+            0.0,
+            float(os.getenv("VERIFICATION_PRIORITY_MIN_SIGNAL", "1.2")),
+        )
+        self.verification_priority_score_margin = max(
+            0,
+            int(os.getenv("VERIFICATION_PRIORITY_SCORE_MARGIN", "44")),
+        )
+        self.verification_priority_continuity_bonus = max(
+            0.0,
+            float(os.getenv("VERIFICATION_PRIORITY_CONTINUITY_BONUS", "1.6")),
+        )
+        self.verification_priority_prediction_scale = min(
+            1.0,
+            max(0.0, float(os.getenv("VERIFICATION_PRIORITY_PREDICTION_SCALE", "0.3"))),
+        )
+        self.vision_progress_credit_enable = os.getenv("VISION_PROGRESS_CREDIT_ENABLE", "1") == "1"
+        self.vision_progress_credit_scale = max(
+            0.0,
+            float(os.getenv("VISION_PROGRESS_CREDIT_SCALE", "1.0")),
+        )
+        self.vision_progress_credit_min_clear_run = max(
+            1,
+            int(os.getenv("VISION_PROGRESS_CREDIT_MIN_CLEAR_RUN", "1")),
+        )
         self.frontier_lock_unknown_threshold = max(0, int(os.getenv("FRONTIER_LOCK_UNKNOWN_THRESHOLD", "3")))
         self.frontier_lock_frontier_threshold = max(0, int(os.getenv("FRONTIER_LOCK_FRONTIER_THRESHOLD", "2")))
         self.frontier_lock_retry_bonus = max(0, int(os.getenv("FRONTIER_LOCK_RETRY_BONUS", "50")))
@@ -636,6 +722,31 @@ class AIAssistantApp:
         )
         self.cycle_taboo_threshold = max(2, int(os.getenv("CYCLE_TABOO_THRESHOLD", "2")))
         self.cycle_taboo_duration_steps = max(4, int(os.getenv("CYCLE_TABOO_DURATION_STEPS", "18")))
+        self.long_trap_memory_penalty_weight = max(
+            0.0,
+            float(os.getenv("LONG_TRAP_MEMORY_PENALTY_WEIGHT", "18.0")),
+        )
+        self.long_trap_memory_max_penalty = max(
+            0,
+            int(os.getenv("LONG_TRAP_MEMORY_MAX_PENALTY", "180")),
+        )
+        self.long_trap_memory_max_hits = max(
+            1,
+            int(os.getenv("LONG_TRAP_MEMORY_MAX_HITS", "8")),
+        )
+        self.last_uncertainty_commit_enable = os.getenv("LAST_UNCERTAINTY_COMMIT_ENABLE", "1") == "1"
+        self.last_uncertainty_unknown_threshold = max(
+            0,
+            int(os.getenv("LAST_UNCERTAINTY_UNKNOWN_THRESHOLD", "2")),
+        )
+        self.last_uncertainty_frontier_threshold = max(
+            0,
+            int(os.getenv("LAST_UNCERTAINTY_FRONTIER_THRESHOLD", "1")),
+        )
+        self.last_uncertainty_score_margin = max(
+            0,
+            int(os.getenv("LAST_UNCERTAINTY_SCORE_MARGIN", "64")),
+        )
         self.terminal_corridor_hard_veto_penalty = int(
             os.getenv("TERMINAL_CORRIDOR_HARD_VETO_PENALTY", "220")
         )
@@ -660,6 +771,8 @@ class AIAssistantApp:
         )
         self.recent_trap_transition_events: deque[tuple[int, tuple[int, int], tuple[int, int]]] = deque(maxlen=24)
         self.taboo_transitions: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
+        self.trap_transition_memory: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
+        self.trap_cell_memory: dict[tuple[int, int], int] = {}
         self.dead_end_end_slap_penalty = float(os.getenv("DEAD_END_END_SLAP_PENALTY", "58.0"))
         self.dead_end_tip_revisit_slap_penalty = float(os.getenv("DEAD_END_TIP_REVISIT_SLAP_PENALTY", "92.0"))
         self.semantic_reinforce_cooldown_steps = max(0, int(os.getenv("SEMANTIC_REINFORCE_COOLDOWN_STEPS", "6")))
@@ -687,6 +800,12 @@ class AIAssistantApp:
         self.logic_confidence_threshold = float(os.getenv("LOGIC_CONFIDENCE_THRESHOLD", "0.55"))
         self.repeat_confidence_threshold = float(os.getenv("REPEAT_CONFIDENCE_THRESHOLD", "0.6"))
         self.max_repeat_executions = max(1, min(250, int(os.getenv("MAX_REPEAT_EXECUTIONS", "25"))))
+        self.default_maze_run_length = max(
+            1,
+            min(self.max_repeat_executions, int(os.getenv("DEFAULT_MAZE_RUN_LENGTH", "10"))),
+        )
+        default_maze_label = "mazes" if self.default_maze_run_length != 1 else "maze"
+        self.default_prompt_text = f"solve {self.default_maze_run_length} {default_maze_label}"
         self.maze_map_doubt_enable = os.getenv("MAZE_MAP_DOUBT_ENABLE", "1") == "1"
         self.maze_map_doubt_repeat_threshold = max(
             2,
@@ -1211,6 +1330,8 @@ class AIAssistantApp:
         self.recent_forced_corridor_cells.clear()
         self.recent_trap_transition_events.clear()
         self.taboo_transitions.clear()
+        self.trap_transition_memory.clear()
+        self.trap_cell_memory.clear()
         self.reset_epoch = 0
         self.step_limit_reset_count = 0
         self._last_step_reset_memory_step = 0
@@ -1225,6 +1346,7 @@ class AIAssistantApp:
         self._cell_visit_reset_epoch.clear()
         self._reset_trace.clear()
         self._persistent_frontier_target = None
+        self._verification_probe_target = None
         self._post_reset_stm_relax_remaining = 0
         self._clear_prediction_memory_state(clear_score=False)
 
@@ -1277,6 +1399,121 @@ class AIAssistantApp:
             )
         return min(5.0, direct + (neighbor_debt * 0.45))
 
+    def _apply_prediction_contradiction_feedback(
+        self,
+        cell: tuple[int, int],
+        context_key: str,
+        severity: float,
+    ) -> int:
+        """
+        Immediately soften nearby/context-matching pending predictions when reality
+        contradicts predictions, so confidence adapts within the same run.
+        """
+        if not self.prediction_memory_active:
+            return 0
+
+        magnitude = max(0.0, float(severity))
+        if magnitude <= 0.0:
+            return 0
+
+        adjusted = 0
+        db_updates: list[tuple[float, float, float, str, str, str, int, int]] = []
+        for pending_cell, record in list(self.prediction_memory_active.items()):
+            try:
+                distance = abs(int(pending_cell[0]) - int(cell[0])) + abs(int(pending_cell[1]) - int(cell[1]))
+            except Exception:  # noqa: BLE001
+                distance = 99
+
+            proximity_weight = 0.0
+            if distance == 0:
+                proximity_weight = 1.0
+            elif distance == 1:
+                proximity_weight = 0.72
+            elif distance == 2:
+                proximity_weight = 0.46
+
+            record_context = str(record.get("prediction_context_key", "") or "")
+            context_weight = 1.0 if (context_key and record_context == context_key) else 0.0
+            influence = max(proximity_weight, context_weight * 0.9)
+            if influence <= 0.0:
+                continue
+
+            attenuation = min(0.86, magnitude * 0.22 * influence)
+            scale = max(0.15, 1.0 - attenuation)
+
+            confidence_prev = float(record.get("confidence", 0.0) or 0.0)
+            p_open_prev = float(record.get("p_open", 0.5) or 0.5)
+            p_open_next = max(0.01, min(0.99, 0.5 + ((p_open_prev - 0.5) * scale)))
+            confidence_next = max(0.05, min(0.99, confidence_prev * scale))
+
+            prior_distribution = record.get("prior_shape_distribution")
+            shape_distribution = record.get("shape_distribution")
+            if not isinstance(prior_distribution, dict):
+                prior_distribution = {label: (1.0 / len(_PREDICTION_SHAPE_LABELS)) for label in _PREDICTION_SHAPE_LABELS}
+            if isinstance(shape_distribution, dict):
+                softened_distribution = {
+                    label: ((1.0 - scale) * float(prior_distribution.get(label, 0.0) or 0.0))
+                    + (scale * float(shape_distribution.get(label, 0.0) or 0.0))
+                    for label in _PREDICTION_SHAPE_LABELS
+                }
+                shape_distribution = self._normalize_distribution(softened_distribution)
+            else:
+                shape_distribution = self._normalize_distribution(prior_distribution)
+
+            predicted_shape = max(shape_distribution.items(), key=lambda item: item[1])[0]
+            predicted_label = "open" if p_open_next >= 0.5 else "blocked"
+            confidence_bucket = self._prediction_confidence_bucket(confidence_next)
+
+            record["confidence"] = float(confidence_next)
+            record["p_open"] = float(p_open_next)
+            record["p_blocked"] = float(1.0 - p_open_next)
+            record["shape_distribution"] = shape_distribution
+            record["predicted_shape"] = predicted_shape
+            record["predicted_label"] = predicted_label
+            record["confidence_bucket"] = int(confidence_bucket)
+            adjusted += 1
+
+            prediction_id = record.get("id")
+            if prediction_id is not None:
+                try:
+                    db_updates.append(
+                        (
+                            float(round(confidence_next, 4)),
+                            float(round(p_open_next, 4)),
+                            float(round(1.0 - p_open_next, 4)),
+                            predicted_label,
+                            predicted_shape,
+                            json.dumps(shape_distribution, sort_keys=True),
+                            int(confidence_bucket),
+                            int(prediction_id),
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if db_updates:
+            try:
+                with sqlite3.connect(self.memory_db_path) as conn:
+                    conn.executemany(
+                        """
+                        UPDATE maze_prediction_memory
+                        SET confidence = ?,
+                            p_open = ?,
+                            p_blocked = ?,
+                            predicted_label = ?,
+                            predicted_shape = ?,
+                            shape_distribution_json = ?,
+                            confidence_bucket = ?
+                        WHERE id = ?
+                        """,
+                        db_updates,
+                    )
+                    conn.commit()
+            except Exception:  # noqa: BLE001
+                pass
+
+        return adjusted
+
     def _maze_objective_override_safe(self) -> bool:
         if self.maze_known_cells.get(self.current_target_cell, "") != "E":
             return False
@@ -1328,6 +1565,24 @@ class AIAssistantApp:
         if self.prediction_shape_scored_count <= 0:
             return 0.0
         return self.prediction_shape_brier_total / max(1, self.prediction_shape_scored_count)
+
+    def _prediction_global_reliability_scale(self) -> float:
+        resolved = int(self.prediction_resolved_count)
+        if resolved <= 0:
+            return 0.72
+
+        occ_acc = max(0.0, min(1.0, self._prediction_accuracy()))
+        shape_acc = max(0.0, min(1.0, self._prediction_shape_accuracy()))
+        occ_fit = max(0.0, min(1.0, 1.0 - (self._prediction_avg_occupancy_brier() / 2.0)))
+        if self.prediction_shape_scored_count > 0:
+            shape_fit = max(0.0, min(1.0, 1.0 - (self._prediction_avg_shape_brier() / 2.0)))
+        else:
+            shape_fit = occ_fit
+
+        blended = (0.45 * occ_acc) + (0.20 * shape_acc) + (0.25 * occ_fit) + (0.10 * shape_fit)
+        support_scale = min(1.0, resolved / 80.0)
+        reliability = ((1.0 - support_scale) * 0.72) + (support_scale * blended)
+        return max(0.30, min(1.0, reliability))
 
     def _prediction_confidence_bucket(self, confidence: float) -> int:
         bucket_count = max(1, int(self.prediction_confidence_buckets))
@@ -1534,6 +1789,10 @@ class AIAssistantApp:
             return 0, 0, context_trust, 0.0
 
         effective_conf = max(0.0, min(1.0, confidence * context_trust * contradiction_scale))
+        if self._verification_priority_active():
+            effective_conf *= float(self.verification_priority_prediction_scale)
+            if effective_conf < 0.08 and confidence < 0.95:
+                return 0, 0, context_trust, effective_conf
         shape_distribution = pred.get("shape_distribution")
         if not isinstance(shape_distribution, dict):
             return 0, 0, context_trust, effective_conf
@@ -1583,8 +1842,11 @@ class AIAssistantApp:
         base = max(0.05, min(0.99, float(base_confidence)))
         stats = self._prediction_context_stats(context_key)
         support = float(stats.get("support", 0.0))
+        global_scale = self._prediction_global_reliability_scale()
+        context_contradiction_debt = float(self.prediction_context_contradiction_debt.get(context_key, 0.0) or 0.0)
+        contradiction_scale = max(0.25, 1.0 - min(0.75, context_contradiction_debt * 0.20))
         if support < float(self.prediction_context_min_support):
-            return base
+            return max(0.05, min(0.99, base * global_scale * contradiction_scale))
         context_confidence = (
             (0.55 * float(stats.get("occ_accuracy", 0.0)))
             + (0.30 * float(stats.get("shape_accuracy", 0.0)))
@@ -1592,7 +1854,9 @@ class AIAssistantApp:
         )
         support_scale = support / (support + float(self.prediction_context_min_support) + 4.0)
         blend = self.prediction_context_confidence_blend * support_scale
-        return max(0.05, min(0.99, ((1.0 - blend) * base) + (blend * context_confidence)))
+        adjusted = ((1.0 - blend) * base) + (blend * context_confidence)
+        adjusted *= global_scale * contradiction_scale
+        return max(0.05, min(0.99, adjusted))
 
     def _prediction_confidence_bucket_rows(self) -> list[tuple]:
         try:
@@ -1901,6 +2165,25 @@ class AIAssistantApp:
                 predicted_shape = max(shape_distribution.items(), key=lambda item: item[1])[0]
                 confidence = max(0.05, min(0.99, abs((p_open * 2.0) - 1.0)))
                 confidence = self._context_adjusted_prediction_confidence(confidence, context_key)
+                local_contradiction_debt = self._prediction_local_contradiction_debt(candidate)
+                context_contradiction_debt = float(self.prediction_context_contradiction_debt.get(context_key, 0.0) or 0.0)
+                contradiction_scale = max(
+                    0.20,
+                    1.0 - min(0.80, (local_contradiction_debt * 0.20) + (context_contradiction_debt * 0.16)),
+                )
+                if contradiction_scale < 0.999:
+                    confidence = max(0.05, min(0.99, confidence * contradiction_scale))
+                    p_open = max(0.01, min(0.99, 0.5 + ((p_open - 0.5) * contradiction_scale)))
+                    p_blocked = 1.0 - p_open
+                    shape_distribution = self._normalize_distribution(
+                        {
+                            label: ((1.0 - contradiction_scale) * float(prior_shape_distribution.get(label, 0.0) or 0.0))
+                            + (contradiction_scale * float(shape_distribution.get(label, 0.0) or 0.0))
+                            for label in _PREDICTION_SHAPE_LABELS
+                        }
+                    )
+                    predicted_shape = max(shape_distribution.items(), key=lambda item: item[1])[0]
+                    predicted_label = "open" if p_open >= 0.5 else "blocked"
                 confidence_bucket = self._prediction_confidence_bucket(confidence)
                 predicted_label = "open" if p_open >= 0.5 else "blocked"
 
@@ -1919,6 +2202,9 @@ class AIAssistantApp:
                     "confidence_bucket": int(confidence_bucket),
                     "local_open_prob": float(local_open_prob),
                     "prior_open_prob": float(prior_open_prob),
+                    "local_contradiction_debt": float(local_contradiction_debt),
+                    "context_contradiction_debt": float(context_contradiction_debt),
+                    "contradiction_scale": float(contradiction_scale),
                 }
 
                 try:
@@ -2040,6 +2326,18 @@ class AIAssistantApp:
                 contradiction_severity += 0.45 + (max(0.0, confidence - 0.45) * 0.7)
             if contradiction_severity > 0.0:
                 self._register_prediction_contradiction(cell, context_key, contradiction_severity)
+                adjusted_pending = self._apply_prediction_contradiction_feedback(cell, context_key, contradiction_severity)
+                local_debt_now = self._prediction_local_contradiction_debt(cell)
+                context_debt_now = float(self.prediction_context_contradiction_debt.get(context_key, 0.0) or 0.0)
+                self._append_memory_log(
+                    (
+                        "prediction_contradiction "
+                        f"cell={cell[0]},{cell[1]} ctx={context_key or '(none)'} "
+                        f"severity={round(contradiction_severity, 3)} "
+                        f"local_debt={round(local_debt_now, 3)} context_debt={round(context_debt_now, 3)} "
+                        f"pending_adjusted={adjusted_pending}"
+                    )
+                )
 
             self.prediction_occupancy_brier_total += occupancy_brier
             if is_correct:
@@ -4356,6 +4654,7 @@ class AIAssistantApp:
             from_cell=from_cell,
             to_cell=to_cell,
         )
+        self._adaptive_controller_observe(action, outcome_score, details_payload)
 
     def _record_reset_trace_event(
         self,
@@ -4946,6 +5245,32 @@ class AIAssistantApp:
             return ("\n".join(lines), total, False)
         return ("\n".join(lines[-capped_limit:]), total, True)
 
+    def _memory_regression_check_summary(self, summary: dict[str, object] | None = None) -> str:
+        payload = summary if isinstance(summary, dict) else self.last_memory_regression_check
+        maze_layout_id = int(payload.get("maze_layout_id", self.current_maze_episode_id) or self.current_maze_episode_id)
+        recall_source = str(payload.get("recall_source", self.layout_recall_last_source) or "none")
+        objective_steps = int(payload.get("objective_steps", 0) or 0)
+        fully_mapped_objective_steps = int(payload.get("fully_mapped_objective_steps", 0) or 0)
+        non_objective_fully_mapped_steps = int(payload.get("non_objective_fully_mapped_steps", 0) or 0)
+
+        if objective_steps <= 0 and non_objective_fully_mapped_steps <= 0:
+            integrity = "insufficient_data"
+        elif non_objective_fully_mapped_steps > 0:
+            integrity = "watch"
+        else:
+            integrity = "pass"
+
+        return (
+            "memory_regression_check="
+            f"maze_layout_id={maze_layout_id} "
+            f"recall_source={recall_source} "
+            f"recall_hit={1 if recall_source == 'db-hit' else 0} "
+            f"objective_steps={objective_steps} "
+            f"fully_mapped_objective_steps={fully_mapped_objective_steps} "
+            f"non_objective_fully_mapped_steps={non_objective_fully_mapped_steps} "
+            f"shortest_route_integrity={integrity}"
+        )
+
     def _memory_export_text(self) -> str:
         memory_text = self._maze_memory_view_text(limit=self.memory_export_section_limit, compact=True)
         memory_logs = self._memory_log_text(limit=self.memory_export_log_limit)
@@ -4965,6 +5290,7 @@ class AIAssistantApp:
             )
         return (
             f"{memory_header}\n"
+            f"{self._memory_regression_check_summary()}\n"
             f"{memory_text or '(empty)'}\n\n"
             f"{memory_logs_header}\n"
             f"{redact_secrets(memory_logs) or '(empty)'}\n\n"
@@ -4975,6 +5301,11 @@ class AIAssistantApp:
     def _on_shutdown(self) -> None:
         # Final decay/prune/promote pass before app exit.
         self._run_stm_pruning_cycle()
+        if self.adaptive_controller_enable and self.adaptive_controller is not None:
+            try:
+                self.adaptive_controller.save_state()
+            except Exception:  # noqa: BLE001
+                pass
         self._clear_working_memory()
         self.root.destroy()
 
@@ -5380,7 +5711,8 @@ class AIAssistantApp:
                     f"junctions={episodic_summary['junctions']} corridors={episodic_summary['corridors']} "
                     f"dead_ends={episodic_summary['dead_ends']} fully_known_open={episodic_summary['fully_known_open']} "
                     f"visited_cells={episodic_summary['visited_cells']}\n"
-                    "priority_rule=episodic current-maze knowledge overrides cross-maze pattern memory"
+                    "priority_rule=episodic current-maze knowledge overrides cross-maze pattern memory\n"
+                    f"{self._memory_regression_check_summary()}"
                 )
             )
             blocks.append("[Working Memory - episodic local view]")
@@ -6355,6 +6687,10 @@ class AIAssistantApp:
         recent_positions: deque[tuple[int, int]] = deque(maxlen=max(8, self.maze_stuck_window))
         no_progress_steps = 0
         best_distance_seen = self._distance_from_target_for_cell(self.current_player_cell)
+        objective_steps = 0
+        fully_mapped_objective_steps = 0
+        non_objective_fully_mapped_steps = 0
+        last_regression_layout_id = int(self.current_maze_episode_id)
 
         while iterations < iteration_budget:
             completed, remaining = self._goal_session_progress()
@@ -6418,6 +6754,9 @@ class AIAssistantApp:
             guard_reason = ""
             selected_move = ""
             end_episode_early = False
+            objective_routing_step = False
+            fully_mapped_objective_step = False
+            fully_mapped_context = False
             if maze_mode:
                 if self._maze_reexplore_cooldown_remaining > 0:
                     self._maze_reexplore_cooldown_remaining = max(0, self._maze_reexplore_cooldown_remaining - 1)
@@ -6452,6 +6791,7 @@ class AIAssistantApp:
                 fully_mapped_now = self._maze_episode_fully_mapped() or (
                     _known_open_now > 0 and _unknown_now <= 0 and _frontier_now <= 0
                 )
+                fully_mapped_context = fully_mapped_now
                 map_doubt_active = self.maze_map_doubt_enable and map_doubt_cooldown > 0
                 if map_doubt_active:
                     map_doubt_cooldown = max(0, map_doubt_cooldown - 1)
@@ -6459,6 +6799,7 @@ class AIAssistantApp:
                     self._post_reset_stm_relax_remaining = max(0, self._post_reset_stm_relax_remaining - 1)
 
                 target_known_in_episode = self.maze_known_cells.get(self.current_target_cell, "") == "E"
+                visible_exit_latch_active = bool(target_known_in_episode and exit_visible_now)
                 target_path_now = self._shortest_path_moves_between_cells(
                     self.current_player_cell,
                     self.current_target_cell,
@@ -6501,6 +6842,7 @@ class AIAssistantApp:
                 objective_relax_guard_note = ""
                 if (
                     objective_priority_active
+                    and (not visible_exit_latch_active)
                     and (_unknown_now > 0 or _frontier_now > 0)
                     and current_cell_repeats >= repeat_trigger_threshold
                     and no_progress_steps >= no_progress_trigger_threshold
@@ -6539,6 +6881,7 @@ class AIAssistantApp:
                     or sticky_objective_active
                     or retry_continuity_active
                     or frontier_lock_active
+                    or visible_exit_latch_active
                 ):
                     # Do not let exploration recovery suppress objective routing
                     # once target is known or a retry frontier target is available.
@@ -6556,10 +6899,15 @@ class AIAssistantApp:
                     map_doubt_stall_count = 0
                     map_doubt_active = True
 
+                if visible_exit_latch_active and map_doubt_active:
+                    # Visible exit should always force capture routing over map-doubt exploration.
+                    map_doubt_active = False
+                    map_doubt_cooldown = 0
+
                 # Hidden-exit override: If the maze is fully mapped and the target exit is known
                 # (whether visible or just in memory), suppress map-doubt and force navigation mode.
                 hidden_exit_override_triggered = False
-                if map_doubt_active and fully_mapped_now:
+                if map_doubt_active and (fully_mapped_now or exit_visible_now):
                     # Check if exit is known (in maze_known_cells as "E")
                     exit_known = self.maze_known_cells.get(self.current_target_cell, "") == "E"
                     if exit_known or exit_visible_now:
@@ -6642,6 +6990,7 @@ class AIAssistantApp:
                     selected_move = objective_move
                     fallback_used = True
                     guard_override = True
+                    objective_routing_step = True
                     # Capture diagnostic state at the moment of override so logs can
                     # assert "exit was actually in FOV" rather than just "guard fired".
                     _t_row, _t_col = self.current_target_cell
@@ -6702,6 +7051,8 @@ class AIAssistantApp:
                         navigation_mode_lock = True
                         fallback_used = True
                         guard_override = True
+                        objective_routing_step = True
+                        fully_mapped_objective_step = True
                         _risk_suffix = f" {objective_risk_guard_note}" if objective_risk_guard_note else ""
                         guard_reason = (
                             "Fully-mapped policy: forcing shortest-path capture step "
@@ -6997,6 +7348,18 @@ class AIAssistantApp:
             if not selected_move:
                 break
 
+            if maze_mode:
+                last_regression_layout_id = int(self.current_maze_episode_id)
+                if fully_mapped_context:
+                    if objective_routing_step:
+                        objective_steps += 1
+                        if fully_mapped_objective_step:
+                            fully_mapped_objective_steps += 1
+                    else:
+                        non_objective_fully_mapped_steps += 1
+                elif objective_routing_step:
+                    objective_steps += 1
+
             if maze_mode and self._is_valid_traversal_move(selected_move):
                 selected_breakdown = self._exploration_move_breakdown(selected_move)
                 if (
@@ -7059,6 +7422,7 @@ class AIAssistantApp:
                         "open_degree": selected_breakdown.get("open_degree", 0),
                         "frontier_distance": selected_breakdown.get("frontier_distance", 0),
                         "edge_type": selected_breakdown.get("edge_type", ""),
+                        "adaptive_features": selected_breakdown.get("adaptive_features", []),
                         "from_cell": list(self.current_player_cell),
                         "to_cell": list(self._neighbor_for_move(self.current_player_cell, selected_move)),
                     },
@@ -7107,6 +7471,20 @@ class AIAssistantApp:
             self.root.after(0, lambda: self.status_var.set("Step mode stopped: max iterations reached"))
 
         self._end_auto_goal_session()
+        regression_summary: dict[str, object] = {
+            "maze_layout_id": last_regression_layout_id,
+            "recall_source": self.layout_recall_last_source,
+            "objective_steps": objective_steps,
+            "fully_mapped_objective_steps": fully_mapped_objective_steps,
+            "non_objective_fully_mapped_steps": non_objective_fully_mapped_steps,
+        }
+        if objective_steps <= 0 and non_objective_fully_mapped_steps <= 0:
+            regression_summary["shortest_route_integrity"] = "insufficient_data"
+        elif non_objective_fully_mapped_steps > 0:
+            regression_summary["shortest_route_integrity"] = "watch"
+        else:
+            regression_summary["shortest_route_integrity"] = "pass"
+        self.last_memory_regression_check = regression_summary
         return {
             "requested_count": requested_count,
             "iterations": iterations,
@@ -7116,6 +7494,7 @@ class AIAssistantApp:
             "map_doubt_triggers": map_doubt_triggers,
             "stuck_reexplore_triggers": self._maze_stuck_trigger_count,
             "step_log": "\n".join(step_logs),
+            "memory_regression_check": self._memory_regression_check_summary(regression_summary),
         }
 
     def _build_ui(self) -> None:
@@ -7146,6 +7525,9 @@ class AIAssistantApp:
 
         self.prompt_input = scrolledtext.ScrolledText(assistant_frame, wrap=tk.WORD, height=7)
         self.prompt_input.pack(fill=tk.X, expand=False, pady=(4, 10))
+        if not self.prompt_input.get("1.0", tk.END).strip():
+            self.prompt_input.insert("1.0", self.default_prompt_text)
+            self.prompt_input.mark_set(tk.INSERT, tk.END)
 
         controls = tk.Frame(assistant_frame)
         controls.pack(fill=tk.X, pady=(0, 10))
@@ -8823,6 +9205,7 @@ class AIAssistantApp:
             f"step_mode_iterations: {step_session['iterations']}\n"
             f"step_mode_completed_hits: {step_session['completed']}\n"
             f"step_mode_remaining_hits: {step_session['remaining']}\n"
+            f"{result.get('memory_regression_check', self._memory_regression_check_summary())}\n"
             f"target_cell: {result['target_cell_debug']}\n"
             f"goal_session_active: {self.goal_session_active}\n"
             f"goal_session_target_hits: {self.goal_session_target_hits}\n"
@@ -8961,6 +9344,51 @@ class AIAssistantApp:
         # Require full convergence, not just a transient frontier=0 snapshot.
         return known_open_cells > 0 and unknown_cells <= 0 and frontier_cells <= 0
 
+    def _exit_visible_now(self) -> bool:
+        target_row, target_col = self.current_target_cell
+        return (
+            self.maze_known_cells.get(self.current_target_cell, "") == "E"
+            and self._is_local_cell_visible(
+                self.current_player_cell[0],
+                self.current_player_cell[1],
+                target_row,
+                target_col,
+                facing=self.player_facing,
+            )
+        )
+
+    def _verification_priority_active(self) -> bool:
+        if not self.verification_priority_enable:
+            return False
+        if self._sticky_objective_target == self.current_target_cell and self._sticky_objective_path:
+            return False
+        if self._exit_visible_now():
+            return False
+        if self._maze_episode_fully_mapped():
+            return False
+
+        summary = self._episodic_memory_summary()
+        unknown_cells = int(summary.get("unknown", 0) or 0)
+        frontier_cells = int(summary.get("frontier", 0) or 0)
+        unresolved = (unknown_cells > 0) or (frontier_cells > 0)
+        if not unresolved:
+            return False
+
+        if self._maze_reexplore_cooldown_remaining > 0:
+            return True
+        if self._active_same_maze_retry_count() > 0:
+            return True
+
+        late_uncertainty = (
+            unknown_cells <= self.verification_priority_unknown_threshold
+            or frontier_cells <= self.verification_priority_frontier_threshold
+        )
+        entropy_collapse = (
+            len(self.maze_recent_transitions) >= max(4, self.loop_entropy_window - 1)
+            and self._recent_move_direction_entropy() <= self.loop_entropy_threshold
+        )
+        return bool(late_uncertainty or entropy_collapse)
+
     def _frontier_cells_current_episode(self) -> list[tuple[int, int]]:
         frontier_cells: list[tuple[int, int]] = []
         for cell, token in self.maze_known_cells.items():
@@ -9014,18 +9442,7 @@ class AIAssistantApp:
         # objective routing should dominate over frontier continuity forcing.
         if self._sticky_objective_target == self.current_target_cell and self._sticky_objective_path:
             return False
-        target_row, target_col = self.current_target_cell
-        exit_visible_now = (
-            self.maze_known_cells.get(self.current_target_cell, "") == "E"
-            and self._is_local_cell_visible(
-                self.current_player_cell[0],
-                self.current_player_cell[1],
-                target_row,
-                target_col,
-                facing=self.player_facing,
-            )
-        )
-        if exit_visible_now:
+        if self._exit_visible_now():
             return False
 
         if unknown_cells is None or frontier_cells is None:
@@ -9419,6 +9836,138 @@ class AIAssistantApp:
             return ""
         return path[0]
 
+    def _verification_priority_move(self, candidates: list[tuple[str, tuple[int, int]]]) -> str:
+        if not self._verification_priority_active():
+            self._verification_probe_target = None
+            return ""
+        if not candidates:
+            self._verification_probe_target = None
+            return ""
+
+        tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
+        current = self.current_player_cell
+        ranked: list[tuple[str, float, int, int, int, int]] = []
+        summary = self._episodic_memory_summary()
+        summary_unknown = int(summary.get("unknown", 0) or 0)
+        summary_frontier = int(summary.get("frontier", 0) or 0)
+        late_unresolved_commit = bool(
+            self.last_uncertainty_commit_enable
+            and (
+                (summary_unknown > 0 and summary_unknown <= self.last_uncertainty_unknown_threshold)
+                or (summary_frontier > 0 and summary_frontier <= self.last_uncertainty_frontier_threshold)
+            )
+        )
+
+        best_any_score = min(int(self._exploration_move_score(move)) for move, _cell in candidates)
+        for move, nxt in candidates:
+            breakdown = self._exploration_move_breakdown(move)
+            if bool(breakdown.get("blocked", False)):
+                continue
+
+            unknown_neighbors = int(breakdown.get("unknown_neighbors", 0) or 0)
+            frontier_distance = int(
+                breakdown.get("frontier_distance_effective", breakdown.get("frontier_distance", 99)) or 99
+            )
+            local_contradiction = float(breakdown.get("local_contradiction_debt", 0.0) or 0.0)
+            edge_frontier = 1 if bool(breakdown.get("edge_frontier", False)) else 0
+            edge_junction = 1 if bool(breakdown.get("edge_junction", False)) else 0
+            visible_open_decision = int(breakdown.get("visible_open_decision", 0) or 0)
+            visits = int(breakdown.get("visits", 0) or 0)
+            recent_transition_count = int(breakdown.get("recent_transition_count", 0) or 0)
+
+            ambiguous = (
+                unknown_neighbors > 0
+                or frontier_distance <= 1
+                or edge_frontier > 0
+                or local_contradiction >= 0.35
+            )
+            if not ambiguous and (not late_unresolved_commit):
+                continue
+
+            if self.terminal_end_hard_avoid and (
+                self._is_move_visibly_terminal_dead_end(current, move)
+                or self._is_move_visibly_boxed_corridor_without_exit(current, move)
+            ):
+                continue
+
+            loop_pressure = (
+                float(breakdown.get("transition_repeat_penalty", 0) or 0)
+                + float(breakdown.get("cycle_pair_penalty", 0) or 0)
+                + float(breakdown.get("loop_commitment_penalty", 0) or 0)
+                + float(breakdown.get("immediate_backtrack_hard_penalty", 0) or 0)
+            )
+            terminal_pressure = (
+                float(breakdown.get("terminal_hard_veto_penalty", 0) or 0)
+                + float(breakdown.get("dead_end_end_slap_penalty", 0) or 0)
+                + float(breakdown.get("dead_end_tip_revisit_slap_penalty", 0) or 0)
+            )
+
+            signal = 0.0
+            signal += unknown_neighbors * 3.0
+            if frontier_distance <= 0:
+                signal += 2.4
+            elif frontier_distance == 1:
+                signal += 1.6
+            elif frontier_distance == 2:
+                signal += 0.8
+            signal += edge_frontier * 2.2
+            signal += edge_junction * 1.4
+            signal += min(3.0, local_contradiction * 1.6)
+            signal += min(1.8, visible_open_decision * 0.7)
+            if self._verification_probe_target == nxt:
+                signal += float(self.verification_priority_continuity_bonus)
+
+            signal -= min(6.0, loop_pressure / 42.0)
+            signal -= min(4.0, terminal_pressure / 55.0)
+            signal -= visits * 0.45
+            signal -= recent_transition_count * 0.75
+
+            local_score = int(breakdown.get("score", 0) or 0)
+            ranked.append((move, signal, local_score, frontier_distance, -unknown_neighbors, visits))
+
+        if not ranked:
+            self._verification_probe_target = None
+            return ""
+
+        if late_unresolved_commit:
+            ranked.sort(key=lambda item: (item[2], item[3], item[4], item[5], tie_order.get(item[0], 9)))
+        else:
+            ranked.sort(key=lambda item: (-item[1], item[2], item[3], item[4], item[5], tie_order.get(item[0], 9)))
+        selected_move, best_signal, selected_score, frontier_distance, unknown_sort, visits = ranked[0]
+        if (not late_unresolved_commit) and best_signal < float(self.verification_priority_min_signal):
+            self._verification_probe_target = None
+            return ""
+
+        delta = int(selected_score - best_any_score)
+        margin = int(self.verification_priority_score_margin)
+        if late_unresolved_commit:
+            margin = max(margin, int(self.last_uncertainty_score_margin))
+        if delta > margin:
+            self._verification_probe_target = None
+            self._last_planner_choice_debug = (
+                f"source=verification_priority_rejected selected={selected_move} "
+                f"signal={round(best_signal, 3)} score_delta={delta}>margin={margin}"
+            )
+            return ""
+
+        self._verification_probe_target = self._neighbor_for_move(self.current_player_cell, selected_move)
+        if late_unresolved_commit:
+            self._last_planner_choice_debug = (
+                f"source=verification_priority_commit selected={selected_move} "
+                f"unknown={summary_unknown} frontier={summary_frontier} "
+                f"frontier_distance={frontier_distance} "
+                f"unknown_neighbors={max(0, -unknown_sort)} visits={visits} "
+                f"score_delta={delta}/{margin}"
+            )
+        else:
+            self._last_planner_choice_debug = (
+                f"source=verification_priority selected={selected_move} "
+                f"signal={round(best_signal, 3)} frontier_distance={frontier_distance} "
+                f"unknown_neighbors={max(0, -unknown_sort)} visits={visits} "
+                f"score_delta={delta}/{margin}"
+            )
+        return selected_move
+
     def _reset_organism_control_state(self) -> None:
         self.organism_memory_state = OrganismMemoryState()
         self.organism_endocrine_state = OrganismEndocrineState()
@@ -9523,6 +10072,8 @@ class AIAssistantApp:
                 + float(breakdown.get("terminal_hard_veto_penalty", 0) or 0)
                 + float(breakdown.get("dead_end_end_slap_penalty", 0) or 0)
                 + float(breakdown.get("dead_end_tip_revisit_slap_penalty", 0) or 0)
+                + float(breakdown.get("long_trap_transition_penalty", 0) or 0)
+                + float(breakdown.get("long_trap_cell_penalty", 0) or 0)
             )
             estimated_loop_risk = max(0.0, min(1.0, raw_loop_pressure / 260.0))
 
@@ -9539,7 +10090,10 @@ class AIAssistantApp:
             )
             estimated_novelty = max(0.0, min(1.0, estimated_novelty))
 
-            frontier_distance = int(breakdown.get("frontier_distance", origin_frontier) or origin_frontier)
+            frontier_distance = int(
+                breakdown.get("frontier_distance_effective", breakdown.get("frontier_distance", origin_frontier))
+                or origin_frontier
+            )
             dead_end_risk_depth = int(breakdown.get("dead_end_risk_depth", 0) or 0)
             cycle_pair_recent = float(breakdown.get("cycle_pair_penalty", 0) or 0) > 0
             visible_terminal = (
@@ -9600,6 +10154,8 @@ class AIAssistantApp:
                 + float(bd.get("terminal_hard_veto_penalty", 0) or 0)
                 + float(bd.get("dead_end_end_slap_penalty", 0) or 0)
                 + float(bd.get("dead_end_tip_revisit_slap_penalty", 0) or 0)
+                + float(bd.get("long_trap_transition_penalty", 0) or 0)
+                + float(bd.get("long_trap_cell_penalty", 0) or 0)
             )
             estimated_loop_risk = max(0.0, min(1.0, raw_loop_pressure / 260.0))
             unknown_neighbors = int(bd.get("unknown_neighbors", 0) or 0)
@@ -9613,7 +10169,10 @@ class AIAssistantApp:
                 + (0.12 * (0 if known else 1))
             ))
             origin_frontier = self._frontier_distance(self.current_player_cell, max_depth=6)
-            frontier_distance = int(bd.get("frontier_distance", origin_frontier) or origin_frontier)
+            frontier_distance = int(
+                bd.get("frontier_distance_effective", bd.get("frontier_distance", origin_frontier))
+                or origin_frontier
+            )
             frontier_delta = origin_frontier - frontier_distance
             estimated_frontier_gain = max(0.0, min(1.0, (frontier_delta + 2.0) / 4.0))
             mv_exit_progress_norm = float(bd.get("mv_exit_progress_norm", 0.0) or 0.0)
@@ -9897,6 +10456,10 @@ class AIAssistantApp:
                 candidates = non_terminal_candidates
                 terminal_filtered = True
 
+        verification_move = self._verification_priority_move(candidates)
+        if verification_move:
+            return verification_move
+
         if self.maze_agent_enable and (not force_score_fallback):
             maze_move = self._maze_agent_exploration_move(candidates, terminal_filtered)
             if maze_move:
@@ -9994,15 +10557,75 @@ class AIAssistantApp:
             selected_move = noisy_pool[0][0]
             picked_random_tie = True
 
+        adaptive_policy_used = False
+        adaptive_policy_note = ""
+        if (
+            self.adaptive_controller_enable
+            and self.adaptive_controller is not None
+            and len(scored) > 1
+            and (not force_score_fallback)
+            and self.adaptive_controller.steps >= self.adaptive_policy_min_steps
+        ):
+            scored_breakdowns = {
+                move: self._exploration_move_breakdown(move)
+                for move, _score in scored
+            }
+            adaptive_ranked: list[tuple[str, float, int]] = []
+            for move, score in scored:
+                breakdown = scored_breakdowns.get(move, {})
+                adaptive_pred = float(breakdown.get("adaptive_prediction", 0.0) or 0.0)
+                adaptive_ranked.append((move, adaptive_pred, int(score)))
+            adaptive_ranked.sort(key=lambda item: (-item[1], item[2], tie_order.get(item[0], 9)))
+
+            adaptive_move, adaptive_pred, adaptive_score = adaptive_ranked[0]
+            if self.adaptive_policy_mode == "adaptive_first" and self.adaptive_policy_epsilon > 0.0:
+                if self._planner_rng.random() < self.adaptive_policy_epsilon and len(adaptive_ranked) > 1:
+                    top_k = min(3, len(adaptive_ranked))
+                    adaptive_move, adaptive_pred, adaptive_score = self._planner_rng.choice(adaptive_ranked[:top_k])
+
+            current_breakdown = scored_breakdowns.get(selected_move, {})
+            current_pred = float(current_breakdown.get("adaptive_prediction", 0.0) or 0.0)
+            current_score = int(next(score for move, score in scored if move == selected_move))
+            pred_gap = float(adaptive_pred - current_pred)
+            score_delta = int(adaptive_score - current_score)
+
+            allow_override = False
+            if adaptive_move != selected_move:
+                if self.adaptive_policy_mode == "adaptive_first":
+                    allow_override = score_delta <= max(60, self.adaptive_policy_score_margin * 2)
+                else:
+                    allow_override = (
+                        pred_gap >= float(self.adaptive_policy_min_pred_gap)
+                        and score_delta <= self.adaptive_policy_score_margin
+                    )
+
+            if allow_override:
+                selected_move = adaptive_move
+                adaptive_policy_used = True
+                adaptive_policy_note = (
+                    f"mode={self.adaptive_policy_mode} pred_gap={round(pred_gap, 4)} "
+                    f"score_delta={score_delta} margin={self.adaptive_policy_score_margin}"
+                )
+
         near_best_compact = ",".join([f"{move}:{score}" for move, score in near_best])
-        self._last_planner_choice_debug = (
-            f"source=score selected={selected_move} best={best_score} tie_band={tie_band} "
-            f"force_score_fallback={1 if force_score_fallback else 0} "
-            f"stuck_softmax={1 if stuck_softmax_used else 0} "
-            f"terminal_filtered={terminal_filtered} "
-            f"randomize_ties={self.exploration_randomize_ties} picked_random_tie={picked_random_tie} "
-            f"near_best=[{near_best_compact}]"
-        )
+        if adaptive_policy_used:
+            self._last_planner_choice_debug = (
+                f"source=adaptive_policy selected={selected_move} best={best_score} tie_band={tie_band} "
+                f"force_score_fallback={1 if force_score_fallback else 0} "
+                f"stuck_softmax={1 if stuck_softmax_used else 0} "
+                f"terminal_filtered={terminal_filtered} "
+                f"randomize_ties={self.exploration_randomize_ties} picked_random_tie={picked_random_tie} "
+                f"near_best=[{near_best_compact}] {adaptive_policy_note}"
+            )
+        else:
+            self._last_planner_choice_debug = (
+                f"source=score selected={selected_move} best={best_score} tie_band={tie_band} "
+                f"force_score_fallback={1 if force_score_fallback else 0} "
+                f"stuck_softmax={1 if stuck_softmax_used else 0} "
+                f"terminal_filtered={terminal_filtered} "
+                f"randomize_ties={self.exploration_randomize_ties} picked_random_tie={picked_random_tie} "
+                f"near_best=[{near_best_compact}]"
+            )
         return selected_move
 
     def _best_maze_objective_move(self) -> str:
@@ -10087,6 +10710,8 @@ class AIAssistantApp:
         risk_score += float(breakdown.get("cycle_pair_penalty", 0) or 0)
         risk_score += float(breakdown.get("transition_repeat_penalty", 0) or 0)
         risk_score += float(breakdown.get("immediate_backtrack_hard_penalty", 0) or 0)
+        risk_score += float(breakdown.get("long_trap_transition_penalty", 0) or 0)
+        risk_score += float(breakdown.get("long_trap_cell_penalty", 0) or 0)
         risk_score += float(breakdown.get("cause_effect_memory_penalty", 0) or 0)
         risk_score -= float(breakdown.get("cause_effect_memory_reward", 0) or 0)
         return float(risk_score)
@@ -10329,6 +10954,23 @@ class AIAssistantApp:
         if not required_tags.issubset(tag_set):
             return
 
+        transition_key = (from_cell, to_cell)
+        reverse_key = (to_cell, from_cell)
+        hit_cap = max(1, int(self.long_trap_memory_max_hits))
+        self.trap_transition_memory[transition_key] = min(
+            hit_cap,
+            int(self.trap_transition_memory.get(transition_key, 0) or 0) + 1,
+        )
+        # Keep weaker reverse-edge memory so ping-pong retries are discouraged.
+        self.trap_transition_memory[reverse_key] = min(
+            hit_cap,
+            max(1, int(self.trap_transition_memory.get(reverse_key, 0) or 0)),
+        )
+        self.trap_cell_memory[to_cell] = min(
+            hit_cap,
+            int(self.trap_cell_memory.get(to_cell, 0) or 0) + 1,
+        )
+
         step_idx = int(self.memory_step_index)
         self.recent_trap_transition_events.append((step_idx, from_cell, to_cell))
         window_start = step_idx - max(6, self.recent_cycle_window)
@@ -10570,6 +11212,33 @@ class AIAssistantApp:
                 reverse += 1
         return (forward, reverse)
 
+    def _long_trap_memory_penalties(
+        self,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+    ) -> tuple[int, int, int, int]:
+        if self._normalized_layout_mode() != "maze":
+            return (0, 0, 0, 0)
+        if self.long_trap_memory_penalty_weight <= 0.0:
+            return (0, 0, 0, 0)
+
+        hit_cap = max(1, int(self.long_trap_memory_max_hits))
+        transition_hits = min(hit_cap, int(self.trap_transition_memory.get((origin, candidate), 0) or 0))
+        cell_hits = min(hit_cap, int(self.trap_cell_memory.get(candidate, 0) or 0))
+        max_penalty = max(0, int(self.long_trap_memory_max_penalty))
+        if max_penalty <= 0:
+            return (0, 0, transition_hits, cell_hits)
+
+        transition_penalty = min(
+            max_penalty,
+            int(round(transition_hits * float(self.long_trap_memory_penalty_weight))),
+        )
+        cell_penalty = min(
+            max_penalty // 2,
+            int(round(cell_hits * float(self.long_trap_memory_penalty_weight) * 0.5)),
+        )
+        return (transition_penalty, cell_penalty, transition_hits, cell_hits)
+
     def _local_map_authority_scale(
         self,
         *,
@@ -10631,6 +11300,94 @@ class AIAssistantApp:
 
     def _exploration_move_score(self, move: str) -> int:
         return self._exploration_move_breakdown(move)["score"]
+
+    def _adaptive_features_from_breakdown(self, breakdown: dict[str, object]) -> list[float]:
+        """
+        Compact transferable state-action feature vector for online adaptation.
+        Values are normalized to roughly [-1, 1].
+        """
+
+        def _num(key: str, default: float = 0.0) -> float:
+            try:
+                return float(breakdown.get(key, default) or default)
+            except Exception:  # noqa: BLE001
+                return float(default)
+
+        def _clip(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
+            return max(lo, min(hi, float(value)))
+
+        features = [
+            1.0,
+            _clip(_num("visits") / 6.0),
+            _clip(_num("backtrack")),
+            _clip(_num("recent")),
+            _clip(_num("unknown_neighbors") / 4.0),
+            _clip((_num("frontier_distance") / 6.0) - 0.5),
+            _clip((_num("open_degree") / 4.0) - 0.5),
+            _clip(_num("dead_end_risk_depth") / 5.0),
+            _clip(_num("transition_pressure_bucket") / 3.0),
+            _clip(_num("visible_open_decision")),
+            _clip(_num("visible_exit_corridor")),
+            _clip(_num("cause_effect_memory_penalty") / 180.0),
+            _clip(_num("cause_effect_memory_reward") / 180.0),
+            _clip(_num("prediction_junction_bonus_raw") / 36.0),
+            _clip(_num("prediction_dead_end_penalty_raw") / 36.0),
+            _clip(_num("mv_exit_progress_norm")),
+        ]
+        return features
+
+    def _adaptive_controller_observe(self, action: str, outcome_score: float, details: dict[str, object]) -> None:
+        if (not self.adaptive_controller_enable) or self.adaptive_controller is None:
+            return
+        if not str(action or "").upper().startswith("MOVE_"):
+            return
+
+        raw_features = details.get("adaptive_features", []) if isinstance(details, dict) else []
+        if not isinstance(raw_features, list) or not raw_features:
+            return
+
+        try:
+            features = [float(v) for v in raw_features]
+        except Exception:  # noqa: BLE001
+            return
+
+        target = float(outcome_score) / float(self.adaptive_outcome_scale)
+        target = max(-1.0, min(1.0, target))
+        self._adaptive_replay.append((list(features), float(target)))
+        update = self.adaptive_controller.learn(features, target)
+
+        if self.adaptive_replay_enable and len(self._adaptive_replay) >= self.adaptive_replay_batch:
+            replay_pool = list(self._adaptive_replay)
+            sample_k = min(self.adaptive_replay_batch, len(replay_pool))
+            replay_rng = self._planner_rng if hasattr(self, "_planner_rng") else random
+            for _ in range(self.adaptive_replay_updates):
+                try:
+                    sampled = replay_rng.sample(replay_pool, sample_k)
+                except Exception:  # noqa: BLE001
+                    sampled = replay_pool[-sample_k:]
+                for replay_features, replay_target in sampled:
+                    self.adaptive_controller.learn(replay_features, replay_target)
+
+        grew = bool(update.get("grew", False))
+        pruned = bool(update.get("pruned", False))
+        if grew or pruned or (self.memory_step_index % 24 == 0):
+            self._append_memory_log(
+                (
+                    "adaptive_learning "
+                    f"action={action} target={round(float(update.get('target', 0.0)), 3)} "
+                    f"pred={round(float(update.get('pred', 0.0)), 3)} "
+                    f"err={round(float(update.get('error', 0.0)), 3)} "
+                    f"ema={round(float(update.get('error_ema', 0.0)), 3)} "
+                    f"hidden={int(update.get('hidden_units', 0) or 0)} "
+                    f"grew={1 if grew else 0} pruned={1 if pruned else 0}"
+                )
+            )
+
+        if (self.memory_step_index % self.adaptive_save_interval_steps) == 0:
+            try:
+                self.adaptive_controller.save_state()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _decision_noise_term(self, move: str) -> int:
         """Small per-decision noise to break deterministic corridor ordering."""
@@ -10738,6 +11495,10 @@ class AIAssistantApp:
         mv_exit_source_scale = float(mv_hints.get("exit_source_scale", 0.0) or 0.0)
         mv_exit_hint_strength = float(mv_hints.get("exit_hint_strength", 0.0) or 0.0)
         mv_exit_usable = bool(mv_hints.get("exit_usable", False))
+        if self.adaptive_controller_enable and self.adaptive_disable_mv_hints:
+            mv_exit_usable = False
+            mv_exit_hint_strength = 0.0
+            mv_exit_source_scale = 0.0
         mv_exit_origin_distance = -1
         mv_exit_candidate_distance = -1
         mv_exit_alignment_bonus = 0
@@ -10837,6 +11598,20 @@ class AIAssistantApp:
             )
             else 0
         )
+        visual_traversal_credit = 0
+        if self.vision_progress_credit_enable:
+            clear_run = int(edge_scan.get("clear_run", 0) or 0)
+            has_end_evidence = bool(
+                edge_scan.get("edge_detected", False)
+                or edge_scan.get("frontier_visible", False)
+                or edge_scan.get("junction_visible", False)
+                or edge_scan.get("exit_visible", False)
+            )
+            if clear_run >= self.vision_progress_credit_min_clear_run and has_end_evidence:
+                visual_traversal_credit = int(
+                    round(min(frontier_distance, clear_run) * self.vision_progress_credit_scale)
+                )
+        frontier_distance_effective = max(0, frontier_distance - visual_traversal_credit)
         visible_closed_structure = (
             1
             if (
@@ -10931,7 +11706,7 @@ class AIAssistantApp:
             seen_corridor_continue_penalty = min(5, max(0, int(edge_scan["clear_run"]) - 1)) * 2
         seen_corridor_continue_penalty = int(round(seen_corridor_continue_penalty * corridor_penalty_scale))
         episodic_relevance_penalty = 0
-        if episodic_constraint_active and frontier_distance >= origin_frontier_distance:
+        if episodic_constraint_active and frontier_distance_effective >= origin_frontier_distance:
             base_episodic_penalty = 10 + (visits * 5) + (recent_penalty * 6)
             episodic_relevance_penalty = int(round(base_episodic_penalty * local_map_authority_scale))
         corridor_suppression_active = (
@@ -10962,7 +11737,7 @@ class AIAssistantApp:
         if (
             visits > 0
             and unknown_neighbors == 0
-            and frontier_distance >= origin_frontier_distance
+            and frontier_distance_effective >= origin_frontier_distance
         ):
             no_progress_repeat_penalty = max(0, int(self.no_progress_repeat_penalty))
         loop_commitment_penalty = 0
@@ -10989,6 +11764,17 @@ class AIAssistantApp:
             transition_pressure_repeat_penalty = (
                 pressure_units * max(0, int(self.transition_pressure_repeat_penalty_weight))
             )
+        long_trap_transition_penalty = 0
+        long_trap_cell_penalty = 0
+        long_trap_transition_hits = 0
+        long_trap_cell_hits = 0
+        if unknown_neighbors == 0:
+            (
+                long_trap_transition_penalty,
+                long_trap_cell_penalty,
+                long_trap_transition_hits,
+                long_trap_cell_hits,
+            ) = self._long_trap_memory_penalties(origin, candidate)
 
         post_reset_exhaustion_penalty = 0
         reset_failure_transition_penalty = 0
@@ -11038,7 +11824,7 @@ class AIAssistantApp:
             elif (
                 unknown_neighbors == 0
                 and candidate_fully_known_current_maze
-                and frontier_distance >= origin_frontier_distance
+                and frontier_distance_effective >= origin_frontier_distance
             ):
                 frontier_lock_loop_penalty = max(0, int(self.frontier_lock_loop_penalty)) * active_retries
 
@@ -11047,7 +11833,7 @@ class AIAssistantApp:
             and episodic_frontier_cells > 0
             and unknown_neighbors == 0
             and candidate_fully_known_current_maze
-            and frontier_distance >= origin_frontier_distance
+            and frontier_distance_effective >= origin_frontier_distance
         ):
             solved_region_penalty = max(0, int(self.solved_region_penalty))
 
@@ -11100,7 +11886,7 @@ class AIAssistantApp:
             unknown_neighbors,
             dead_end_risk_depth,
             visits,
-            frontier_distance,
+            frontier_distance_effective,
             transition_pressure_bucket,
             backtrack,
         )
@@ -11115,9 +11901,9 @@ class AIAssistantApp:
 
         unknown_tightening_term = max(0, 1 - unknown_neighbors)
         frontier_tightening_term = 0
-        if frontier_distance >= 3:
+        if frontier_distance_effective >= 3:
             frontier_tightening_term = 2
-        elif frontier_distance >= 1:
+        elif frontier_distance_effective >= 1:
             frontier_tightening_term = 1
         branch_tightening_score = (
             max(0, dead_end_risk_depth)
@@ -11199,11 +11985,25 @@ class AIAssistantApp:
                 alt_unknown = self._unknown_neighbor_count(alt_cell)
                 alt_frontier = self._frontier_distance(alt_cell)
                 alt_edge = self._directional_edge_scan(origin[0], origin[1], alt_move)
+                alt_visual_credit = 0
+                if self.vision_progress_credit_enable:
+                    alt_clear_run = int(alt_edge.get("clear_run", 0) or 0)
+                    alt_has_end_evidence = bool(
+                        alt_edge.get("edge_detected", False)
+                        or alt_edge.get("frontier_visible", False)
+                        or alt_edge.get("junction_visible", False)
+                        or alt_edge.get("exit_visible", False)
+                    )
+                    if alt_clear_run >= self.vision_progress_credit_min_clear_run and alt_has_end_evidence:
+                        alt_visual_credit = int(
+                            round(min(alt_frontier, alt_clear_run) * self.vision_progress_credit_scale)
+                        )
+                alt_frontier_effective = max(0, alt_frontier - alt_visual_credit)
                 alt_terminal = self._is_move_visibly_terminal_dead_end(origin, alt_move)
                 alt_boxed = self._is_move_visibly_boxed_corridor_without_exit(origin, alt_move)
                 alt_is_escape = (
                     alt_unknown > unknown_neighbors
-                    or alt_frontier < frontier_distance
+                    or alt_frontier_effective < frontier_distance_effective
                     or bool(alt_edge.get("frontier_visible", False))
                     or bool(alt_edge.get("junction_visible", False))
                 ) and (not alt_terminal) and (not alt_boxed)
@@ -11294,7 +12094,7 @@ class AIAssistantApp:
         score += recent_recency_penalty
         score += is_known * 3
         score += int(round(known_dead_area * 20 * attempt_dead_end_scale))
-        score += frontier_distance * 3
+        score += frontier_distance_effective * 3
         score += corridor_commit * 4
         score += dead_end_exp_penalty
         score += short_dead_end_penalty
@@ -11320,6 +12120,8 @@ class AIAssistantApp:
         score += loop_commitment_penalty
         score += immediate_backtrack_hard_penalty
         score += transition_pressure_repeat_penalty
+        score += long_trap_transition_penalty
+        score += long_trap_cell_penalty
         score += post_reset_exhaustion_penalty
         score += reset_failure_transition_penalty
         score += reset_failure_cell_penalty
@@ -11423,7 +12225,7 @@ class AIAssistantApp:
             prediction_lookahead_bonus = int(round(prediction_lookahead_bonus * prediction_contradiction_scale))
         score -= prediction_lookahead_bonus
         contradiction_probe_bonus = 0
-        if local_contradiction_debt > 0.0 and (unknown_neighbors > 0 or frontier_distance <= 1):
+        if local_contradiction_debt > 0.0 and (unknown_neighbors > 0 or frontier_distance_effective <= 1):
             contradiction_probe_bonus = min(18, int(round(local_contradiction_debt * 6.0)))
             score -= contradiction_probe_bonus
         # Stuck re-explore phase: amplify frontier-seeking and increase stochasticity
@@ -11433,11 +12235,11 @@ class AIAssistantApp:
         stuck_dead_end_penalty_relief = 0
         stuck_extra_noise = 0
         if self._maze_reexplore_cooldown_remaining > 0:
-            if frontier_distance < origin_frontier_distance and frontier_distance >= 0:
+            if frontier_distance_effective < origin_frontier_distance and frontier_distance_effective >= 0:
                 _stuck_depth = min(5, self._maze_stuck_trigger_count)
                 stuck_frontier_seek_bonus = 28 + (_stuck_depth * 4)
                 score -= stuck_frontier_seek_bonus
-            if unknown_neighbors > 0 or frontier_distance <= 1:
+            if unknown_neighbors > 0 or frontier_distance_effective <= 1:
                 # Encourage direct verification of nearby ambiguous branches.
                 stuck_uncertainty_probe_bonus = 14 + min(12, self._maze_stuck_trigger_count * 2)
                 score -= stuck_uncertainty_probe_bonus
@@ -11451,6 +12253,34 @@ class AIAssistantApp:
             stuck_extra_noise = decision_noise * 2
             score += stuck_extra_noise
 
+        adaptive_prediction = 0.0
+        adaptive_score_adjustment = 0
+        adaptive_features = self._adaptive_features_from_breakdown(
+            {
+                "visits": visits,
+                "backtrack": backtrack,
+                "recent": recent_penalty,
+                "unknown_neighbors": unknown_neighbors,
+                "frontier_distance": frontier_distance_effective,
+                "open_degree": open_degree,
+                "dead_end_risk_depth": dead_end_risk_depth,
+                "transition_pressure_bucket": transition_pressure_bucket,
+                "visible_open_decision": effective_visible_open_decision,
+                "visible_exit_corridor": visible_exit_corridor,
+                "cause_effect_memory_penalty": cause_effect_memory_penalty,
+                "cause_effect_memory_reward": cause_effect_memory_reward,
+                "prediction_junction_bonus_raw": raw_prediction_junction_bonus,
+                "prediction_dead_end_penalty_raw": raw_prediction_dead_end_penalty,
+                "mv_exit_progress_norm": mv_exit_progress_norm,
+            }
+        )
+        if self.adaptive_controller_enable and self.adaptive_controller is not None:
+            adaptive_prediction = float(self.adaptive_controller.predict(adaptive_features))
+            raw_adjust = -adaptive_prediction * float(self.adaptive_score_blend)
+            max_adjust = max(0, int(self.adaptive_max_score_adjust))
+            adaptive_score_adjustment = int(round(max(-max_adjust, min(max_adjust, raw_adjust))))
+            score += adaptive_score_adjustment
+
         base_score_without_noise = score - decision_noise - stuck_extra_noise
         return {
             "score": score,
@@ -11463,6 +12293,8 @@ class AIAssistantApp:
             "known": is_known,
             "known_dead_area": known_dead_area,
             "frontier_distance": frontier_distance,
+            "frontier_distance_effective": frontier_distance_effective,
+            "visual_traversal_credit": visual_traversal_credit,
             "corridor_commit": corridor_commit,
             "dead_end_risk_depth": dead_end_risk_depth,
             "dead_end_exp_penalty": dead_end_exp_penalty,
@@ -11512,6 +12344,10 @@ class AIAssistantApp:
             "loop_commitment_penalty": loop_commitment_penalty,
             "immediate_backtrack_hard_penalty": immediate_backtrack_hard_penalty,
             "transition_pressure_repeat_penalty": transition_pressure_repeat_penalty,
+            "long_trap_transition_penalty": long_trap_transition_penalty,
+            "long_trap_cell_penalty": long_trap_cell_penalty,
+            "long_trap_transition_hits": long_trap_transition_hits,
+            "long_trap_cell_hits": long_trap_cell_hits,
             "post_reset_exhaustion_penalty": post_reset_exhaustion_penalty,
             "reset_failure_transition_penalty": reset_failure_transition_penalty,
             "reset_failure_cell_penalty": reset_failure_cell_penalty,
@@ -11564,6 +12400,9 @@ class AIAssistantApp:
             "mv_exit_alignment_bonus": mv_exit_alignment_bonus,
             "mv_exit_alignment_penalty": mv_exit_alignment_penalty,
             "mv_exit_progress_norm": round(mv_exit_progress_norm, 3),
+            "adaptive_prediction": round(adaptive_prediction, 4),
+            "adaptive_score_adjustment": adaptive_score_adjustment,
+            "adaptive_features": adaptive_features,
             "move_personality_bias": move_personality_bias,
             "decision_noise": decision_noise,
             "novelty_reward": novelty_reward,
@@ -11681,6 +12520,8 @@ class AIAssistantApp:
                 f"steps_since_reset={max(0, self.memory_step_index - self._last_step_reset_memory_step)} "
                 f"stm_relax={self._post_reset_stm_relax_remaining} "
                 f"frontier_target={self._persistent_frontier_target} "
+                f"verification_mode={1 if self._verification_priority_active() else 0} "
+                f"verification_target={self._verification_probe_target} "
                 f"frontier_lock={1 if self._frontier_lock_active() else 0} "
                 f"move_entropy={self._recent_move_direction_entropy()} "
                 f"local_map_authority_mode={self.local_map_authority_mode} "
@@ -11735,6 +12576,19 @@ class AIAssistantApp:
                 f"dead_end_scale={round(float(personality.get('dead_end_penalty_scale', 1.0)), 2)}"
             )
         )
+        if self.adaptive_controller_enable and self.adaptive_controller is not None:
+            adaptive_stats = self.adaptive_controller.stats()
+            lines.append(
+                (
+                    "adaptive_controller: "
+                    f"mode={self.adaptive_policy_mode} "
+                    f"hidden={adaptive_stats.get('hidden_units', 0)} "
+                    f"steps={adaptive_stats.get('steps', 0)} "
+                    f"error_ema={adaptive_stats.get('error_ema', 0.0)} "
+                    f"mv_isolated={1 if self.adaptive_disable_mv_hints else 0} "
+                    f"policy_min_steps={self.adaptive_policy_min_steps}"
+                )
+            )
         if valid_ranked:
             best_score = int(valid_ranked[0][1]["score"])
             tie_band = max(0, self.exploration_tie_band)
@@ -11778,6 +12632,8 @@ class AIAssistantApp:
                         f"visits={b['visits']} known={b['known']} "
                         f"backtrack={b['backtrack']} recent={b['recent']} dead_area={b['known_dead_area']} "
                         f"unknown_neighbors={b['unknown_neighbors']} frontier_dist={b['frontier_distance']} "
+                        f"frontier_dist_effective={b.get('frontier_distance_effective', b['frontier_distance'])} "
+                        f"visual_credit={b.get('visual_traversal_credit', 0)} "
                         f"corridor_commit={b.get('corridor_commit', 0)} "
                         f"dead_end_depth={b.get('dead_end_risk_depth', 0)} "
                         f"dead_end_exp_penalty={b.get('dead_end_exp_penalty', 0)} "
@@ -11831,6 +12687,8 @@ class AIAssistantApp:
                         f"reverse_transition_count={b.get('recent_reverse_transition_count', 0)} "
                         f"move_personality_bias={b.get('move_personality_bias', 0)} "
                         f"novelty_reward={b.get('novelty_reward', 0)} "
+                        f"adaptive_pred={b.get('adaptive_prediction', 0.0)} "
+                        f"adaptive_adjust={b.get('adaptive_score_adjustment', 0)} "
                         f"decision_noise={b.get('decision_noise', 0)} "
                         f"boundary_hug={b.get('boundary_hug', 0)} "
                         f"degree={b['open_degree']}"
@@ -13117,6 +13975,10 @@ class AIAssistantApp:
             self._roll_maze_personality()
         self.maze_recent_transitions.clear()
         self.recent_forced_corridor_cells.clear()
+        self.recent_trap_transition_events.clear()
+        self.taboo_transitions.clear()
+        self.trap_transition_memory.clear()
+        self.trap_cell_memory.clear()
         self.episode_visited_cells = {(player_row, player_col): 1}
         self.prev_player_cell = (player_row, player_col)
         self.prev_prev_player_cell = (player_row, player_col)
@@ -13273,6 +14135,10 @@ class AIAssistantApp:
                 if not preserve_retry_memory:
                     self.maze_recent_transitions.clear()
                     self.recent_forced_corridor_cells.clear()
+                    self.recent_trap_transition_events.clear()
+                    self.taboo_transitions.clear()
+                    self.trap_transition_memory.clear()
+                    self.trap_cell_memory.clear()
                 self.episode_steps = 0
                 self.episode_revisit_steps = 0
                 self.episode_backtracks = 0
