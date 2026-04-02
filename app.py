@@ -415,6 +415,85 @@ class AIAssistantApp:
         self.prediction_shape_brier_total = 0.0
         self._prediction_context_stats_cache: dict[str, dict[str, float]] = {}
         self._prediction_context_trust_cache: dict[str, float] = {}
+        self.machine_vision_player_localization_enable = os.getenv(
+            "MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE",
+            "1",
+        ) == "1"
+        self.machine_vision_player_localization_train_enable = os.getenv(
+            "MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE",
+            "1",
+        ) == "1"
+        self.machine_vision_exit_localization_enable = os.getenv(
+            "MACHINE_VISION_EXIT_LOCALIZATION_ENABLE",
+            "1",
+        ) == "1"
+        self.machine_vision_exit_localization_train_enable = os.getenv(
+            "MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE",
+            "1",
+        ) == "1"
+        self.machine_vision_overlay_color = "#9acd32"
+        self.machine_vision_overlay_fill = "#adff2f"
+        self.machine_vision_exit_overlay_color = "#9acd32"
+        self.machine_vision_exit_overlay_fill = "#adff2f"
+        self.machine_vision_unseen_confidence_floor = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_UNSEEN_CONFIDENCE_FLOOR", "0.08"))),
+        )
+        self.machine_vision_unseen_temperature = max(
+            0.05,
+            float(os.getenv("MACHINE_VISION_UNSEEN_TEMPERATURE", "1.35")),
+        )
+        self.machine_vision_unseen_random_explore_chance = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_UNSEEN_RANDOM_EXPLORE_CHANCE", "0.2"))),
+        )
+        self.machine_vision_kernel_hint_enable = os.getenv(
+            "MACHINE_VISION_KERNEL_HINT_ENABLE",
+            "1",
+        ) == "1"
+        self.machine_vision_kernel_hint_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_KERNEL_HINT_MIN_CONF", "0.08"))),
+        )
+        self.machine_vision_kernel_exit_bias_weight = max(
+            0.0,
+            float(os.getenv("MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT", "3.0")),
+        )
+        self.machine_vision_recent_results: deque[dict[str, object]] = deque(maxlen=80)
+        self.machine_vision_signature_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
+        self.machine_vision_global_cell_counts: dict[tuple[int, int], int] = {}
+        self.machine_vision_total_samples = 0
+        self.machine_vision_exact_hits = 0
+        self.machine_vision_manhattan_error_total = 0.0
+        self.machine_vision_last_prediction: dict[str, object] = {
+            "predicted_cell": (-1, -1),
+            "actual_cell": (-1, -1),
+            "confidence": 0.0,
+            "support": 0,
+            "exact": False,
+            "manhattan_error": 0,
+            "source": "none",
+        }
+        self._machine_vision_last_sample_key: tuple[int, int, int, str, str] | None = None
+        self._machine_vision_rng = random.Random(self.maze_seed_base + 7919)
+        self.machine_vision_exit_recent_results: deque[dict[str, object]] = deque(maxlen=80)
+        self.machine_vision_exit_signature_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
+        self.machine_vision_exit_context_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
+        self.machine_vision_exit_global_cell_counts: dict[tuple[int, int], int] = {}
+        self.machine_vision_exit_total_samples = 0
+        self.machine_vision_exit_exact_hits = 0
+        self.machine_vision_exit_manhattan_error_total = 0.0
+        self.machine_vision_exit_last_prediction: dict[str, object] = {
+            "predicted_cell": (-1, -1),
+            "actual_cell": (-1, -1),
+            "confidence": 0.0,
+            "support": 0,
+            "exact": False,
+            "manhattan_error": 0,
+            "source": "none",
+        }
+        self._machine_vision_exit_last_sample_key: tuple[int, int, int, int] | None = None
+        self._machine_vision_exit_rng = random.Random(self.maze_seed_base + 104729)
         self.endocrine_enabled = os.getenv("ENDOCRINE_ENABLE", "1") == "1"
         self.endocrine = EndocrineSystem()
         self.endocrine_stress_danger_weight = float(os.getenv("ENDOCRINE_STRESS_DANGER_WEIGHT", "18.0"))
@@ -506,6 +585,28 @@ class AIAssistantApp:
         self.frontier_lock_frontier_threshold = max(0, int(os.getenv("FRONTIER_LOCK_FRONTIER_THRESHOLD", "2")))
         self.frontier_lock_retry_bonus = max(0, int(os.getenv("FRONTIER_LOCK_RETRY_BONUS", "50")))
         self.frontier_lock_loop_penalty = max(0, int(os.getenv("FRONTIER_LOCK_LOOP_PENALTY", "50")))
+        self.frontier_lock_memory_veto_enable = os.getenv("FRONTIER_LOCK_MEMORY_VETO_ENABLE", "1") == "1"
+        self.frontier_lock_memory_veto_penalty = max(
+            0.0,
+            float(os.getenv("FRONTIER_LOCK_MEMORY_VETO_PENALTY", "280")),
+        )
+        self.frontier_lock_memory_veto_margin = max(
+            0.0,
+            float(os.getenv("FRONTIER_LOCK_MEMORY_VETO_MARGIN", "120")),
+        )
+        self.frontier_lock_memory_veto_window = max(
+            6,
+            int(os.getenv("FRONTIER_LOCK_MEMORY_VETO_WINDOW", "18")),
+        )
+        self.frontier_lock_memory_veto_score_margin = max(
+            0,
+            int(os.getenv("FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN", "120")),
+        )
+        self.frontier_lock_force_score_guard_enable = os.getenv("FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE", "1") == "1"
+        self.frontier_lock_force_score_margin = max(
+            0,
+            int(os.getenv("FRONTIER_LOCK_FORCE_SCORE_MARGIN", "120")),
+        )
         self.solved_region_penalty = max(0, int(os.getenv("SOLVED_REGION_PENALTY", "500")))
         self.loop_entropy_window = max(4, int(os.getenv("LOOP_ENTROPY_WINDOW", "8")))
         self.loop_entropy_threshold = max(0.0, float(os.getenv("LOOP_ENTROPY_THRESHOLD", "1.2")))
@@ -680,6 +781,8 @@ class AIAssistantApp:
         self.last_normalized_goal = ""
 
         self._init_memory_db()
+        self._load_machine_vision_training_memory()
+        self._load_machine_vision_exit_training_memory()
 
         self._build_ui()
         self._update_score_label()
@@ -956,6 +1059,78 @@ class AIAssistantApp:
                     """
                 )
                 self._ensure_prediction_memory_schema(conn)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS maze_machine_vision_memory (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        mode TEXT NOT NULL,
+                        difficulty TEXT NOT NULL,
+                        grid_size INTEGER NOT NULL,
+                        maze_layout_id INTEGER NOT NULL,
+                        step_index INTEGER NOT NULL,
+                        facing TEXT NOT NULL,
+                        signature_key TEXT NOT NULL,
+                        predicted_row INTEGER NOT NULL,
+                        predicted_col INTEGER NOT NULL,
+                        predicted_confidence REAL NOT NULL DEFAULT 0.0,
+                        predicted_support INTEGER NOT NULL DEFAULT 0,
+                        actual_row INTEGER NOT NULL,
+                        actual_col INTEGER NOT NULL,
+                        manhattan_error INTEGER NOT NULL,
+                        is_exact INTEGER NOT NULL DEFAULT 0,
+                        model_source TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_machine_vision_signature
+                    ON maze_machine_vision_memory(signature_key)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_machine_vision_step
+                    ON maze_machine_vision_memory(step_index)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS maze_machine_vision_exit_memory (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        mode TEXT NOT NULL,
+                        difficulty TEXT NOT NULL,
+                        grid_size INTEGER NOT NULL,
+                        maze_layout_id INTEGER NOT NULL,
+                        step_index INTEGER NOT NULL,
+                        facing TEXT NOT NULL,
+                        signature_key TEXT NOT NULL,
+                        predicted_row INTEGER NOT NULL,
+                        predicted_col INTEGER NOT NULL,
+                        predicted_confidence REAL NOT NULL DEFAULT 0.0,
+                        predicted_support INTEGER NOT NULL DEFAULT 0,
+                        actual_row INTEGER NOT NULL,
+                        actual_col INTEGER NOT NULL,
+                        manhattan_error INTEGER NOT NULL,
+                        is_exact INTEGER NOT NULL DEFAULT 0,
+                        model_source TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_machine_vision_exit_signature
+                    ON maze_machine_vision_exit_memory(signature_key)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_machine_vision_exit_step
+                    ON maze_machine_vision_exit_memory(step_index)
+                    """
+                )
                 conn.commit()
         except Exception:  # noqa: BLE001
             return
@@ -1981,6 +2156,738 @@ class AIAssistantApp:
             return rows
         except Exception:  # noqa: BLE001
             return []
+
+    def _machine_vision_accuracy(self) -> float:
+        if self.machine_vision_total_samples <= 0:
+            return 0.0
+        return self.machine_vision_exact_hits / max(1, self.machine_vision_total_samples)
+
+    def _machine_vision_mae(self) -> float:
+        if self.machine_vision_total_samples <= 0:
+            return 0.0
+        return self.machine_vision_manhattan_error_total / max(1, self.machine_vision_total_samples)
+
+    def _machine_vision_exit_accuracy(self) -> float:
+        if self.machine_vision_exit_total_samples <= 0:
+            return 0.0
+        return self.machine_vision_exit_exact_hits / max(1, self.machine_vision_exit_total_samples)
+
+    def _machine_vision_exit_mae(self) -> float:
+        if self.machine_vision_exit_total_samples <= 0:
+            return 0.0
+        return self.machine_vision_exit_manhattan_error_total / max(1, self.machine_vision_exit_total_samples)
+
+    def _load_machine_vision_training_memory(self) -> None:
+        self.machine_vision_signature_cell_counts.clear()
+        self.machine_vision_global_cell_counts.clear()
+        self.machine_vision_recent_results.clear()
+        self.machine_vision_total_samples = 0
+        self.machine_vision_exact_hits = 0
+        self.machine_vision_manhattan_error_total = 0.0
+        self.machine_vision_last_prediction = {
+            "predicted_cell": (-1, -1),
+            "actual_cell": (-1, -1),
+            "confidence": 0.0,
+            "support": 0,
+            "exact": False,
+            "manhattan_error": 0,
+            "source": "none",
+        }
+        self._machine_vision_last_sample_key = None
+
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                aggregate_rows = conn.execute(
+                    """
+                    SELECT signature_key, actual_row, actual_col, COUNT(*) AS hit_count
+                    FROM maze_machine_vision_memory
+                    GROUP BY signature_key, actual_row, actual_col
+                    """
+                ).fetchall()
+                global_rows = conn.execute(
+                    """
+                    SELECT actual_row, actual_col, COUNT(*) AS hit_count
+                    FROM maze_machine_vision_memory
+                    GROUP BY actual_row, actual_col
+                    """
+                ).fetchall()
+                totals_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total_samples,
+                           SUM(CASE WHEN is_exact = 1 THEN 1 ELSE 0 END) AS exact_hits,
+                           SUM(manhattan_error) AS total_error
+                    FROM maze_machine_vision_memory
+                    """
+                ).fetchone()
+                last_row = conn.execute(
+                    """
+                    SELECT predicted_row, predicted_col, actual_row, actual_col,
+                           predicted_confidence, predicted_support, is_exact,
+                           manhattan_error, model_source
+                    FROM maze_machine_vision_memory
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except Exception:  # noqa: BLE001
+            return
+
+        for signature_key, actual_row, actual_col, hit_count in aggregate_rows:
+            signature = str(signature_key or "")
+            if not signature:
+                continue
+            bucket = self.machine_vision_signature_cell_counts.setdefault(signature, {})
+            bucket[(int(actual_row), int(actual_col))] = int(hit_count or 0)
+
+        for actual_row, actual_col, hit_count in global_rows:
+            self.machine_vision_global_cell_counts[(int(actual_row), int(actual_col))] = int(hit_count or 0)
+
+        if totals_row:
+            total_samples = int((totals_row[0] or 0))
+            self.machine_vision_total_samples = total_samples
+            self.machine_vision_exact_hits = int((totals_row[1] or 0))
+            self.machine_vision_manhattan_error_total = float((totals_row[2] or 0.0))
+
+        if last_row:
+            (
+                predicted_row,
+                predicted_col,
+                actual_row,
+                actual_col,
+                predicted_confidence,
+                predicted_support,
+                is_exact,
+                manhattan_error,
+                model_source,
+            ) = last_row
+            self.machine_vision_last_prediction = {
+                "predicted_cell": (int(predicted_row), int(predicted_col)),
+                "actual_cell": (int(actual_row), int(actual_col)),
+                "confidence": float(predicted_confidence or 0.0),
+                "support": int(predicted_support or 0),
+                "exact": bool(int(is_exact or 0) == 1),
+                "manhattan_error": int(manhattan_error or 0),
+                "source": str(model_source or "loaded"),
+            }
+
+    def _load_machine_vision_exit_training_memory(self) -> None:
+        self.machine_vision_exit_signature_cell_counts.clear()
+        self.machine_vision_exit_context_cell_counts.clear()
+        self.machine_vision_exit_global_cell_counts.clear()
+        self.machine_vision_exit_recent_results.clear()
+        self.machine_vision_exit_total_samples = 0
+        self.machine_vision_exit_exact_hits = 0
+        self.machine_vision_exit_manhattan_error_total = 0.0
+        self.machine_vision_exit_last_prediction = {
+            "predicted_cell": (-1, -1),
+            "actual_cell": (-1, -1),
+            "confidence": 0.0,
+            "support": 0,
+            "exact": False,
+            "manhattan_error": 0,
+            "source": "none",
+        }
+        self._machine_vision_exit_last_sample_key = None
+
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                aggregate_rows = conn.execute(
+                    """
+                    SELECT signature_key, actual_row, actual_col, COUNT(*) AS hit_count
+                    FROM maze_machine_vision_exit_memory
+                    GROUP BY signature_key, actual_row, actual_col
+                    """
+                ).fetchall()
+                context_rows = conn.execute(
+                    """
+                    SELECT mode, difficulty, grid_size, actual_row, actual_col, COUNT(*) AS hit_count
+                    FROM maze_machine_vision_exit_memory
+                    GROUP BY mode, difficulty, grid_size, actual_row, actual_col
+                    """
+                ).fetchall()
+                global_rows = conn.execute(
+                    """
+                    SELECT actual_row, actual_col, COUNT(*) AS hit_count
+                    FROM maze_machine_vision_exit_memory
+                    GROUP BY actual_row, actual_col
+                    """
+                ).fetchall()
+                totals_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS total_samples,
+                           SUM(CASE WHEN is_exact = 1 THEN 1 ELSE 0 END) AS exact_hits,
+                           SUM(manhattan_error) AS total_error
+                    FROM maze_machine_vision_exit_memory
+                    """
+                ).fetchone()
+                last_row = conn.execute(
+                    """
+                    SELECT predicted_row, predicted_col, actual_row, actual_col,
+                           predicted_confidence, predicted_support, is_exact,
+                           manhattan_error, model_source
+                    FROM maze_machine_vision_exit_memory
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except Exception:  # noqa: BLE001
+            return
+
+        for signature_key, actual_row, actual_col, hit_count in aggregate_rows:
+            signature = str(signature_key or "")
+            if not signature:
+                continue
+            bucket = self.machine_vision_exit_signature_cell_counts.setdefault(signature, {})
+            bucket[(int(actual_row), int(actual_col))] = int(hit_count or 0)
+
+        for mode, difficulty, grid_size, actual_row, actual_col, hit_count in context_rows:
+            context_key = (
+                f"mode={str(mode or '')}|difficulty={str(difficulty or '')}|grid={int(grid_size or 0)}"
+            )
+            bucket = self.machine_vision_exit_context_cell_counts.setdefault(context_key, {})
+            bucket[(int(actual_row), int(actual_col))] = int(hit_count or 0)
+
+        for actual_row, actual_col, hit_count in global_rows:
+            self.machine_vision_exit_global_cell_counts[(int(actual_row), int(actual_col))] = int(hit_count or 0)
+
+        if totals_row:
+            self.machine_vision_exit_total_samples = int((totals_row[0] or 0))
+            self.machine_vision_exit_exact_hits = int((totals_row[1] or 0))
+            self.machine_vision_exit_manhattan_error_total = float((totals_row[2] or 0.0))
+
+        if last_row:
+            (
+                predicted_row,
+                predicted_col,
+                actual_row,
+                actual_col,
+                predicted_confidence,
+                predicted_support,
+                is_exact,
+                manhattan_error,
+                model_source,
+            ) = last_row
+            self.machine_vision_exit_last_prediction = {
+                "predicted_cell": (int(predicted_row), int(predicted_col)),
+                "actual_cell": (int(actual_row), int(actual_col)),
+                "confidence": float(predicted_confidence or 0.0),
+                "support": int(predicted_support or 0),
+                "exact": bool(int(is_exact or 0) == 1),
+                "manhattan_error": int(manhattan_error or 0),
+                "source": str(model_source or "loaded"),
+            }
+
+    def _recent_machine_vision_rows(self, limit: int = 12) -> list[tuple]:
+        capped_limit = max(1, min(200, int(limit)))
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT created_at, step_index, mode, difficulty, grid_size,
+                           maze_layout_id, facing, predicted_row, predicted_col,
+                           predicted_confidence, predicted_support,
+                           actual_row, actual_col, manhattan_error, is_exact, model_source
+                    FROM maze_machine_vision_memory
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (capped_limit,),
+                ).fetchall()
+            return rows
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _recent_machine_vision_exit_rows(self, limit: int = 12) -> list[tuple]:
+        capped_limit = max(1, min(200, int(limit)))
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT created_at, step_index, mode, difficulty, grid_size,
+                           maze_layout_id, facing, predicted_row, predicted_col,
+                           predicted_confidence, predicted_support,
+                           actual_row, actual_col, manhattan_error, is_exact, model_source
+                    FROM maze_machine_vision_exit_memory
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (capped_limit,),
+                ).fetchall()
+            return rows
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _machine_vision_signature(self, player_row: int, player_col: int) -> str:
+        local_ascii = self._build_local_status_snapshot(
+            player_row,
+            player_col,
+            radius=1,
+            include_render_details=False,
+            facing=self.player_facing,
+        )
+        mode = self._normalized_layout_mode()
+        difficulty = self._normalized_maze_difficulty() if mode == "maze" else "n/a"
+        return (
+            f"mode={mode}|difficulty={difficulty}|grid={self.grid_cells}|facing={self.player_facing}"
+            f"|local_ascii={local_ascii}"
+        )
+
+    def _machine_vision_exit_signature(self) -> str:
+        mode = self._normalized_layout_mode()
+        difficulty = self._normalized_maze_difficulty() if mode == "maze" else "n/a"
+        return (
+            f"mode={mode}|difficulty={difficulty}|grid={self.grid_cells}|"
+            f"map_id={int(self.current_maze_episode_id)}|target=exit"
+        )
+
+    def _machine_vision_exit_context_key(self) -> str:
+        mode = self._normalized_layout_mode()
+        difficulty = self._normalized_maze_difficulty() if mode == "maze" else "n/a"
+        return f"mode={mode}|difficulty={difficulty}|grid={self.grid_cells}"
+
+    def _machine_vision_kernel_hints(self) -> dict[str, object]:
+        if self._normalized_layout_mode() != "maze":
+            return {
+                "enabled": False,
+                "self_pred_cell": (-1, -1),
+                "self_conf": 0.0,
+                "self_source": "none",
+                "self_support": 0,
+                "self_error": -1,
+                "self_quality_scale": 0.0,
+                "exit_pred_cell": (-1, -1),
+                "exit_conf": 0.0,
+                "exit_source": "none",
+                "exit_support": 0,
+                "exit_source_scale": 0.0,
+                "exit_hint_strength": 0.0,
+                "exit_usable": False,
+            }
+
+        if not self.machine_vision_kernel_hint_enable:
+            return {
+                "enabled": False,
+                "self_pred_cell": (-1, -1),
+                "self_conf": 0.0,
+                "self_source": "none",
+                "self_support": 0,
+                "self_error": -1,
+                "self_quality_scale": 0.0,
+                "exit_pred_cell": (-1, -1),
+                "exit_conf": 0.0,
+                "exit_source": "none",
+                "exit_support": 0,
+                "exit_source_scale": 0.0,
+                "exit_hint_strength": 0.0,
+                "exit_usable": False,
+            }
+
+        def _valid_cell(cell: tuple[int, int]) -> bool:
+            row, col = int(cell[0]), int(cell[1])
+            return 0 <= row < self.grid_cells and 0 <= col < self.grid_cells
+
+        self_pred = tuple(self.machine_vision_last_prediction.get("predicted_cell", (-1, -1)) or (-1, -1))
+        self_conf = float(self.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
+        self_source = str(self.machine_vision_last_prediction.get("source", "none") or "none")
+        self_support = int(self.machine_vision_last_prediction.get("support", 0) or 0)
+        self_available = _valid_cell(self_pred) and self_support > 0
+
+        self_error = -1
+        self_quality_scale = 0.6
+        if self_available:
+            self_error = abs(int(self_pred[0]) - int(self.current_player_cell[0])) + abs(
+                int(self_pred[1]) - int(self.current_player_cell[1])
+            )
+            self_quality_scale = max(0.25, 1.0 - (0.25 * float(self_error)))
+
+        exit_pred = tuple(self.machine_vision_exit_last_prediction.get("predicted_cell", (-1, -1)) or (-1, -1))
+        exit_conf = float(self.machine_vision_exit_last_prediction.get("confidence", 0.0) or 0.0)
+        exit_source = str(self.machine_vision_exit_last_prediction.get("source", "none") or "none")
+        exit_support = int(self.machine_vision_exit_last_prediction.get("support", 0) or 0)
+        exit_available = _valid_cell(exit_pred) and exit_support > 0
+
+        source_scale_map = {
+            "learned_signature": 1.0,
+            "prior_sample_context": 0.75,
+            "prior_sample": 0.65,
+            "prior_sample_global": 0.55,
+            "explore_uniform": 0.35,
+        }
+        exit_source_scale = float(source_scale_map.get(exit_source, 0.5))
+        min_conf = float(self.machine_vision_kernel_hint_min_conf)
+        exit_usable = bool(exit_available and exit_conf >= min_conf)
+        conf_strength = max(0.2, min(1.0, exit_conf))
+        exit_hint_strength = 0.0
+        if exit_usable:
+            exit_hint_strength = max(0.0, min(1.0, conf_strength * exit_source_scale * self_quality_scale))
+
+        return {
+            "enabled": True,
+            "self_pred_cell": (int(self_pred[0]), int(self_pred[1])) if self_available else (-1, -1),
+            "self_conf": self_conf,
+            "self_source": self_source,
+            "self_support": self_support,
+            "self_error": int(self_error),
+            "self_quality_scale": round(float(self_quality_scale), 3),
+            "exit_pred_cell": (int(exit_pred[0]), int(exit_pred[1])) if exit_available else (-1, -1),
+            "exit_conf": exit_conf,
+            "exit_source": exit_source,
+            "exit_support": exit_support,
+            "exit_source_scale": round(float(exit_source_scale), 3),
+            "exit_hint_strength": round(float(exit_hint_strength), 3),
+            "exit_usable": exit_usable,
+        }
+
+    def _sample_machine_vision_unseen_cell(self) -> tuple[tuple[int, int], float, int, str]:
+        candidate_cells = [
+            (row, col)
+            for row in range(self.grid_cells)
+            for col in range(self.grid_cells)
+        ]
+        if not candidate_cells:
+            return ((0, 0), float(self.machine_vision_unseen_confidence_floor), 0, "explore_uniform")
+
+        total_prior_support = 0
+        for cell, count in self.machine_vision_global_cell_counts.items():
+            if 0 <= int(cell[0]) < self.grid_cells and 0 <= int(cell[1]) < self.grid_cells:
+                total_prior_support += max(0, int(count or 0))
+
+        if self._machine_vision_rng.random() < float(self.machine_vision_unseen_random_explore_chance):
+            sampled = self._machine_vision_rng.choice(candidate_cells)
+            return (
+                sampled,
+                float(self.machine_vision_unseen_confidence_floor),
+                int(total_prior_support),
+                "explore_uniform",
+            )
+
+        temperature = max(0.05, float(self.machine_vision_unseen_temperature))
+        power = 1.0 / temperature
+        weighted_cells: list[tuple[int, int]] = []
+        weights: list[float] = []
+        for cell in candidate_cells:
+            count = max(0, int(self.machine_vision_global_cell_counts.get(cell, 0) or 0))
+            weight = math.pow(float(count) + 1.0, power)
+            weighted_cells.append(cell)
+            weights.append(max(0.0001, weight))
+
+        sampled = self._machine_vision_rng.choices(weighted_cells, weights=weights, k=1)[0]
+        sampled_count = max(0, int(self.machine_vision_global_cell_counts.get(sampled, 0) or 0))
+        confidence = float(self.machine_vision_unseen_confidence_floor)
+        if total_prior_support > 0:
+            confidence = max(
+                float(self.machine_vision_unseen_confidence_floor),
+                float(sampled_count) / float(max(1, total_prior_support)),
+            )
+        source = "prior_sample" if total_prior_support > 0 else "explore_uniform"
+        return (sampled, confidence, int(total_prior_support), source)
+
+    def _sample_machine_vision_unseen_exit_cell(
+        self,
+        context_key: str,
+    ) -> tuple[tuple[int, int], float, int, str]:
+        candidate_cells = [
+            (row, col)
+            for row in range(self.grid_cells)
+            for col in range(self.grid_cells)
+        ]
+        if not candidate_cells:
+            return ((0, 0), float(self.machine_vision_unseen_confidence_floor), 0, "explore_uniform")
+
+        context_counts = self.machine_vision_exit_context_cell_counts.get(context_key, {})
+        use_context_prior = bool(context_counts)
+        source_counts = context_counts if use_context_prior else self.machine_vision_exit_global_cell_counts
+
+        total_prior_support = 0
+        for cell, count in source_counts.items():
+            if 0 <= int(cell[0]) < self.grid_cells and 0 <= int(cell[1]) < self.grid_cells:
+                total_prior_support += max(0, int(count or 0))
+
+        if self._machine_vision_exit_rng.random() < float(self.machine_vision_unseen_random_explore_chance):
+            sampled = self._machine_vision_exit_rng.choice(candidate_cells)
+            return (
+                sampled,
+                float(self.machine_vision_unseen_confidence_floor),
+                int(total_prior_support),
+                "explore_uniform",
+            )
+
+        temperature = max(0.05, float(self.machine_vision_unseen_temperature))
+        power = 1.0 / temperature
+        weighted_cells: list[tuple[int, int]] = []
+        weights: list[float] = []
+        for cell in candidate_cells:
+            count = max(0, int(source_counts.get(cell, 0) or 0))
+            weight = math.pow(float(count) + 1.0, power)
+            weighted_cells.append(cell)
+            weights.append(max(0.0001, weight))
+
+        sampled = self._machine_vision_exit_rng.choices(weighted_cells, weights=weights, k=1)[0]
+        sampled_count = max(0, int(source_counts.get(sampled, 0) or 0))
+        confidence = float(self.machine_vision_unseen_confidence_floor)
+        if total_prior_support > 0:
+            confidence = max(
+                float(self.machine_vision_unseen_confidence_floor),
+                float(sampled_count) / float(max(1, total_prior_support)),
+            )
+        if total_prior_support <= 0:
+            source = "explore_uniform"
+        elif use_context_prior:
+            source = "prior_sample_context"
+        else:
+            source = "prior_sample_global"
+        return (sampled, confidence, int(total_prior_support), source)
+
+    def _predict_player_cell_from_machine_vision(self, signature_key: str) -> tuple[tuple[int, int], float, int, str]:
+        signature_counts = self.machine_vision_signature_cell_counts.get(signature_key, {})
+        if signature_counts:
+            sorted_cells = sorted(
+                signature_counts.items(),
+                key=lambda item: (-int(item[1]), item[0][0], item[0][1]),
+            )
+            best_cell, best_hits = sorted_cells[0]
+            support = sum(max(0, int(v)) for v in signature_counts.values())
+            confidence = float(best_hits) / float(max(1, support))
+            return (best_cell, confidence, support, "learned_signature")
+
+        return self._sample_machine_vision_unseen_cell()
+
+    def _predict_exit_cell_from_machine_vision(self, signature_key: str) -> tuple[tuple[int, int], float, int, str]:
+        signature_counts = self.machine_vision_exit_signature_cell_counts.get(signature_key, {})
+        if signature_counts:
+            sorted_cells = sorted(
+                signature_counts.items(),
+                key=lambda item: (-int(item[1]), item[0][0], item[0][1]),
+            )
+            best_cell, best_hits = sorted_cells[0]
+            support = sum(max(0, int(v)) for v in signature_counts.values())
+            confidence = float(best_hits) / float(max(1, support))
+            return (best_cell, confidence, support, "learned_signature")
+
+        return self._sample_machine_vision_unseen_exit_cell(self._machine_vision_exit_context_key())
+
+    def _update_machine_vision_localization(self, player_row: int, player_col: int) -> None:
+        if not self.machine_vision_player_localization_enable:
+            return
+
+        sample_key = (
+            int(self.memory_step_index),
+            int(player_row),
+            int(player_col),
+            str(self.player_facing),
+            self._normalized_layout_mode(),
+        )
+        if sample_key == self._machine_vision_last_sample_key:
+            return
+        self._machine_vision_last_sample_key = sample_key
+
+        signature_key = self._machine_vision_signature(player_row, player_col)
+        predicted_cell, confidence, support, model_source = self._predict_player_cell_from_machine_vision(signature_key)
+        pred_row, pred_col = predicted_cell
+        actual_cell = (int(player_row), int(player_col))
+        manhattan_error = abs(int(pred_row) - actual_cell[0]) + abs(int(pred_col) - actual_cell[1])
+        is_exact = 1 if manhattan_error == 0 else 0
+
+        if self.machine_vision_player_localization_train_enable:
+            cell_counts = self.machine_vision_signature_cell_counts.setdefault(signature_key, {})
+            cell_counts[actual_cell] = int(cell_counts.get(actual_cell, 0)) + 1
+            self.machine_vision_global_cell_counts[actual_cell] = int(
+                self.machine_vision_global_cell_counts.get(actual_cell, 0)
+            ) + 1
+
+        self.machine_vision_total_samples += 1
+        self.machine_vision_exact_hits += is_exact
+        self.machine_vision_manhattan_error_total += float(manhattan_error)
+        self.machine_vision_last_prediction = {
+            "predicted_cell": (int(pred_row), int(pred_col)),
+            "actual_cell": actual_cell,
+            "confidence": float(confidence),
+            "support": int(support),
+            "exact": bool(is_exact == 1),
+            "manhattan_error": int(manhattan_error),
+            "source": model_source,
+        }
+        self.machine_vision_recent_results.appendleft(
+            {
+                "step": int(self.memory_step_index),
+                "predicted_cell": (int(pred_row), int(pred_col)),
+                "actual_cell": actual_cell,
+                "confidence": round(float(confidence), 3),
+                "support": int(support),
+                "exact": bool(is_exact == 1),
+                "manhattan_error": int(manhattan_error),
+                "source": model_source,
+            }
+        )
+
+        self._append_memory_log(
+            (
+                "vision_localization "
+                f"pred=({int(pred_row)},{int(pred_col)}) "
+                f"actual=({actual_cell[0]},{actual_cell[1]}) "
+                f"confidence={round(float(confidence), 3)} support={int(support)} "
+                f"exact={is_exact} manhattan_error={int(manhattan_error)} "
+                f"source={model_source}"
+            )
+        )
+
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO maze_machine_vision_memory (
+                        mode,
+                        difficulty,
+                        grid_size,
+                        maze_layout_id,
+                        step_index,
+                        facing,
+                        signature_key,
+                        predicted_row,
+                        predicted_col,
+                        predicted_confidence,
+                        predicted_support,
+                        actual_row,
+                        actual_col,
+                        manhattan_error,
+                        is_exact,
+                        model_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._normalized_layout_mode(),
+                        self._normalized_maze_difficulty() if self._normalized_layout_mode() == "maze" else "n/a",
+                        int(self.grid_cells),
+                        int(self.current_maze_episode_id),
+                        int(self.memory_step_index),
+                        str(self.player_facing),
+                        signature_key,
+                        int(pred_row),
+                        int(pred_col),
+                        float(round(confidence, 4)),
+                        int(support),
+                        int(actual_cell[0]),
+                        int(actual_cell[1]),
+                        int(manhattan_error),
+                        int(is_exact),
+                        str(model_source),
+                    ),
+                )
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            return
+
+    def _update_machine_vision_exit_localization(self, player_row: int, player_col: int) -> None:
+        if not self.machine_vision_exit_localization_enable:
+            return
+        if self._normalized_layout_mode() != "maze":
+            return
+
+        actual_exit = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+        sample_key = (
+            int(self.memory_step_index),
+            int(actual_exit[0]),
+            int(actual_exit[1]),
+            int(self.current_maze_episode_id),
+        )
+        if sample_key == self._machine_vision_exit_last_sample_key:
+            return
+        self._machine_vision_exit_last_sample_key = sample_key
+
+        signature_key = self._machine_vision_exit_signature()
+        predicted_cell, confidence, support, model_source = self._predict_exit_cell_from_machine_vision(signature_key)
+        pred_row, pred_col = predicted_cell
+        manhattan_error = abs(int(pred_row) - actual_exit[0]) + abs(int(pred_col) - actual_exit[1])
+        is_exact = 1 if manhattan_error == 0 else 0
+
+        if self.machine_vision_exit_localization_train_enable:
+            cell_counts = self.machine_vision_exit_signature_cell_counts.setdefault(signature_key, {})
+            cell_counts[actual_exit] = int(cell_counts.get(actual_exit, 0)) + 1
+            self.machine_vision_exit_global_cell_counts[actual_exit] = int(
+                self.machine_vision_exit_global_cell_counts.get(actual_exit, 0)
+            ) + 1
+
+        self.machine_vision_exit_total_samples += 1
+        self.machine_vision_exit_exact_hits += is_exact
+        self.machine_vision_exit_manhattan_error_total += float(manhattan_error)
+        self.machine_vision_exit_last_prediction = {
+            "predicted_cell": (int(pred_row), int(pred_col)),
+            "actual_cell": actual_exit,
+            "confidence": float(confidence),
+            "support": int(support),
+            "exact": bool(is_exact == 1),
+            "manhattan_error": int(manhattan_error),
+            "source": model_source,
+        }
+        self.machine_vision_exit_recent_results.appendleft(
+            {
+                "step": int(self.memory_step_index),
+                "predicted_cell": (int(pred_row), int(pred_col)),
+                "actual_cell": actual_exit,
+                "confidence": round(float(confidence), 3),
+                "support": int(support),
+                "exact": bool(is_exact == 1),
+                "manhattan_error": int(manhattan_error),
+                "source": model_source,
+            }
+        )
+
+        self._append_memory_log(
+            (
+                "vision_exit_localization "
+                f"pred=({int(pred_row)},{int(pred_col)}) "
+                f"actual=({actual_exit[0]},{actual_exit[1]}) "
+                f"confidence={round(float(confidence), 3)} support={int(support)} "
+                f"exact={is_exact} manhattan_error={int(manhattan_error)} "
+                f"source={model_source}"
+            )
+        )
+
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO maze_machine_vision_exit_memory (
+                        mode,
+                        difficulty,
+                        grid_size,
+                        maze_layout_id,
+                        step_index,
+                        facing,
+                        signature_key,
+                        predicted_row,
+                        predicted_col,
+                        predicted_confidence,
+                        predicted_support,
+                        actual_row,
+                        actual_col,
+                        manhattan_error,
+                        is_exact,
+                        model_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._normalized_layout_mode(),
+                        self._normalized_maze_difficulty() if self._normalized_layout_mode() == "maze" else "n/a",
+                        int(self.grid_cells),
+                        int(self.current_maze_episode_id),
+                        int(self.memory_step_index),
+                        str(self.player_facing),
+                        signature_key,
+                        int(pred_row),
+                        int(pred_col),
+                        float(round(confidence, 4)),
+                        int(support),
+                        int(actual_exit[0]),
+                        int(actual_exit[1]),
+                        int(manhattan_error),
+                        int(is_exact),
+                        str(model_source),
+                    ),
+                )
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            return
 
     def _update_maze_known_map(
         self,
@@ -4180,6 +5087,8 @@ class AIAssistantApp:
                 for step, action, outcome, reward, penalty, tags in action_rows
             ) or "(no cause-effect entries)"
             prediction_rows = self._recent_prediction_rows(limit=8)
+            machine_vision_rows = self._recent_machine_vision_rows(limit=6)
+            machine_vision_exit_rows = self._recent_machine_vision_exit_rows(limit=6)
             calibration_bucket_rows = self._prediction_confidence_bucket_rows()
             calibration_bucket_text = "\n".join(
                 (
@@ -4220,6 +5129,26 @@ class AIAssistantApp:
                 )
                 for _created_at, _resolved_at, step_created, step_resolved, cell_row, cell_col, predicted_label, predicted_shape, confidence, prediction_context_key, confidence_bucket, resolution_status, _expiry_reason, actual_label, actual_shape, is_correct, is_shape_correct, occupancy_brier, shape_brier, occupancy_score_delta, shape_score_delta, score_delta in prediction_rows
             ) or "(no prediction entries)"
+            machine_vision_text = "\n".join(
+                (
+                    f"- [{created_at}] step={step_index} mode={mode} diff={difficulty} grid={grid_size} "
+                    f"map_id={maze_layout_id} facing={facing} pred=({pred_row},{pred_col}) "
+                    f"actual=({actual_row},{actual_col}) conf={round(float(confidence or 0.0), 3)} "
+                    f"support={int(support or 0)} exact={int(is_exact or 0)} "
+                    f"error={int(manhattan_error or 0)} source={model_source or 'unknown'}"
+                )
+                for created_at, step_index, mode, difficulty, grid_size, maze_layout_id, facing, pred_row, pred_col, confidence, support, actual_row, actual_col, manhattan_error, is_exact, model_source in machine_vision_rows
+            ) or "(no machine vision localization samples)"
+            machine_vision_exit_text = "\n".join(
+                (
+                    f"- [{created_at}] step={step_index} mode={mode} diff={difficulty} grid={grid_size} "
+                    f"map_id={maze_layout_id} facing={facing} pred=({pred_row},{pred_col}) "
+                    f"actual=({actual_row},{actual_col}) conf={round(float(confidence or 0.0), 3)} "
+                    f"support={int(support or 0)} exact={int(is_exact or 0)} "
+                    f"error={int(manhattan_error or 0)} source={model_source or 'unknown'}"
+                )
+                for created_at, step_index, mode, difficulty, grid_size, maze_layout_id, facing, pred_row, pred_col, confidence, support, actual_row, actual_col, manhattan_error, is_exact, model_source in machine_vision_exit_rows
+            ) or "(no machine vision exit localization samples)"
             cause_stm_text = "\n".join(
                 f"- {action} avg_outcome={round(avg, 3)} strength={round(strength, 3)} recall={recall} tags={tags or '(none)'}"
                 for action, tags, avg, strength, recall in cause_stm_rows
@@ -4273,6 +5202,22 @@ class AIAssistantApp:
                 f"{calibration_bucket_text}\n\n"
                 "prediction_context_calibration:\n"
                 f"{calibration_context_text}\n\n"
+                "machine_vision_player_localization:\n"
+                f"enabled={1 if self.machine_vision_player_localization_enable else 0} "
+                f"training={1 if self.machine_vision_player_localization_train_enable else 0} "
+                f"samples={self.machine_vision_total_samples} "
+                f"exact_hits={self.machine_vision_exact_hits} "
+                f"accuracy={round(self._machine_vision_accuracy(), 3)} "
+                f"mae={round(self._machine_vision_mae(), 3)}\n"
+                f"{machine_vision_text}\n\n"
+                "machine_vision_exit_localization:\n"
+                f"enabled={1 if self.machine_vision_exit_localization_enable else 0} "
+                f"training={1 if self.machine_vision_exit_localization_train_enable else 0} "
+                f"samples={self.machine_vision_exit_total_samples} "
+                f"exact_hits={self.machine_vision_exit_exact_hits} "
+                f"accuracy={round(self._machine_vision_exit_accuracy(), 3)} "
+                f"mae={round(self._machine_vision_exit_mae(), 3)}\n"
+                f"{machine_vision_exit_text}\n\n"
                 "cross_maze_short_term_patterns:\n"
                 f"{stm_text}\n\n"
                 "cross_maze_long_term_semantic_memory:\n"
@@ -4373,6 +5318,30 @@ class AIAssistantApp:
                           occupancy_brier, shape_brier,
                           occupancy_score_delta, shape_score_delta, score_delta
                     FROM maze_prediction_memory
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit_value,),
+                ).fetchall()
+                machine_vision_rows = conn.execute(
+                    """
+                    SELECT created_at, step_index, mode, difficulty, grid_size,
+                           maze_layout_id, facing, predicted_row, predicted_col,
+                           predicted_confidence, predicted_support,
+                           actual_row, actual_col, manhattan_error, is_exact, model_source
+                    FROM maze_machine_vision_memory
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit_value,),
+                ).fetchall()
+                machine_vision_exit_rows = conn.execute(
+                    """
+                    SELECT created_at, step_index, mode, difficulty, grid_size,
+                           maze_layout_id, facing, predicted_row, predicted_col,
+                           predicted_confidence, predicted_support,
+                           actual_row, actual_col, manhattan_error, is_exact, model_source
+                    FROM maze_machine_vision_exit_memory
                     ORDER BY id DESC
                     LIMIT ?
                     """,
@@ -4553,6 +5522,94 @@ class AIAssistantApp:
                             f"score_shape={round(float(shape_score_delta or 0.0), 3)} "
                             f"score_delta={round(float(score_delta or 0.0), 3)}"
                             f"{f' expiry_reason={expiry_reason}' if expiry_reason else ''}"
+                        )
+                    )
+            else:
+                blocks.append("(empty)")
+
+            blocks.append("[Machine Vision - player localization training]")
+            blocks.append(
+                (
+                    f"enabled={1 if self.machine_vision_player_localization_enable else 0} "
+                    f"training={1 if self.machine_vision_player_localization_train_enable else 0} "
+                    f"samples={self.machine_vision_total_samples} "
+                    f"exact_hits={self.machine_vision_exact_hits} "
+                    f"accuracy={round(self._machine_vision_accuracy(), 3)} "
+                    f"mae={round(self._machine_vision_mae(), 3)}"
+                )
+            )
+            if machine_vision_rows:
+                for row in machine_vision_rows:
+                    (
+                        created_at,
+                        step_index,
+                        mode,
+                        difficulty,
+                        grid_size,
+                        maze_layout_id,
+                        facing,
+                        predicted_row,
+                        predicted_col,
+                        predicted_confidence,
+                        predicted_support,
+                        actual_row,
+                        actual_col,
+                        manhattan_error,
+                        is_exact,
+                        model_source,
+                    ) = row
+                    blocks.append(
+                        (
+                            f"[{created_at}] step={step_index} mode={mode} diff={difficulty} grid={grid_size} "
+                            f"map_id={maze_layout_id} facing={facing} "
+                            f"pred=({predicted_row},{predicted_col}) actual=({actual_row},{actual_col}) "
+                            f"conf={round(float(predicted_confidence or 0.0), 3)} "
+                            f"support={int(predicted_support or 0)} exact={int(is_exact or 0)} "
+                            f"error={int(manhattan_error or 0)} source={model_source or 'unknown'}"
+                        )
+                    )
+            else:
+                blocks.append("(empty)")
+
+            blocks.append("[Machine Vision - exit localization training]")
+            blocks.append(
+                (
+                    f"enabled={1 if self.machine_vision_exit_localization_enable else 0} "
+                    f"training={1 if self.machine_vision_exit_localization_train_enable else 0} "
+                    f"samples={self.machine_vision_exit_total_samples} "
+                    f"exact_hits={self.machine_vision_exit_exact_hits} "
+                    f"accuracy={round(self._machine_vision_exit_accuracy(), 3)} "
+                    f"mae={round(self._machine_vision_exit_mae(), 3)}"
+                )
+            )
+            if machine_vision_exit_rows:
+                for row in machine_vision_exit_rows:
+                    (
+                        created_at,
+                        step_index,
+                        mode,
+                        difficulty,
+                        grid_size,
+                        maze_layout_id,
+                        facing,
+                        predicted_row,
+                        predicted_col,
+                        predicted_confidence,
+                        predicted_support,
+                        actual_row,
+                        actual_col,
+                        manhattan_error,
+                        is_exact,
+                        model_source,
+                    ) = row
+                    blocks.append(
+                        (
+                            f"[{created_at}] step={step_index} mode={mode} diff={difficulty} grid={grid_size} "
+                            f"map_id={maze_layout_id} facing={facing} "
+                            f"pred=({predicted_row},{predicted_col}) actual=({actual_row},{actual_col}) "
+                            f"conf={round(float(predicted_confidence or 0.0), 3)} "
+                            f"support={int(predicted_support or 0)} exact={int(is_exact or 0)} "
+                            f"error={int(manhattan_error or 0)} source={model_source or 'unknown'}"
                         )
                     )
             else:
@@ -5417,10 +6474,12 @@ class AIAssistantApp:
                     sticky_objective_active
                     or retry_capture_active
                     or fully_mapped_now
-                    or (exit_visible_now and _unknown_now <= 1 and _frontier_now <= 1)
+                    or exit_visible_now
                 )
                 retry_continuity_active = self._retry_continuity_active() and (_unknown_now > 0 or _frontier_now > 0)
                 frontier_lock_active = self._frontier_lock_active(_unknown_now, _frontier_now)
+                if objective_priority_active or sticky_objective_active or exit_visible_now:
+                    frontier_lock_active = False
 
                 current_distance_maze = self._distance_from_target_for_cell(self.current_player_cell)
                 if current_distance_maze < best_distance_seen:
@@ -5464,7 +6523,7 @@ class AIAssistantApp:
                     and (not exit_visible_now)
                     and current_cell_repeats >= repeat_trigger_threshold
                     and no_progress_steps >= no_progress_trigger_threshold
-                    and (_unknown_now > 0 or _frontier_now > 0 or (not fully_mapped_now))
+                    and (_frontier_now > 0 or _unknown_now >= 2 or (not fully_mapped_now and _frontier_now > 0))
                 )
                 if should_trigger_stuck_reexplore:
                     # Escalate re-explore duration when repeated stuck episodes occur.
@@ -6331,6 +7390,8 @@ class AIAssistantApp:
             "maze_cause_effect_stm",
             "maze_cause_effect_semantic",
             "maze_prediction_memory",
+            "maze_machine_vision_memory",
+            "maze_machine_vision_exit_memory",
         ]
         try:
             with sqlite3.connect(self.memory_db_path) as conn:
@@ -6357,6 +7418,39 @@ class AIAssistantApp:
         self.episode_dead_end_entrances = set()
         self.episode_dead_end_tip_cells = set()
         self._clear_prediction_memory_state(clear_score=True)
+        self.machine_vision_recent_results.clear()
+        self.machine_vision_signature_cell_counts.clear()
+        self.machine_vision_global_cell_counts.clear()
+        self.machine_vision_total_samples = 0
+        self.machine_vision_exact_hits = 0
+        self.machine_vision_manhattan_error_total = 0.0
+        self.machine_vision_last_prediction = {
+            "predicted_cell": (-1, -1),
+            "actual_cell": (-1, -1),
+            "confidence": 0.0,
+            "support": 0,
+            "exact": False,
+            "manhattan_error": 0,
+            "source": "none",
+        }
+        self._machine_vision_last_sample_key = None
+        self.machine_vision_exit_recent_results.clear()
+        self.machine_vision_exit_signature_cell_counts.clear()
+        self.machine_vision_exit_context_cell_counts.clear()
+        self.machine_vision_exit_global_cell_counts.clear()
+        self.machine_vision_exit_total_samples = 0
+        self.machine_vision_exit_exact_hits = 0
+        self.machine_vision_exit_manhattan_error_total = 0.0
+        self.machine_vision_exit_last_prediction = {
+            "predicted_cell": (-1, -1),
+            "actual_cell": (-1, -1),
+            "confidence": 0.0,
+            "support": 0,
+            "exact": False,
+            "manhattan_error": 0,
+            "source": "none",
+        }
+        self._machine_vision_exit_last_sample_key = None
         self.memory_event_log.clear()
         self.endocrine_event_log.clear()
         self._refresh_memory_viewer()
@@ -6467,6 +7561,35 @@ class AIAssistantApp:
             )
             episode_objective_line = f"Episode optimal steps at spawn: {self.episode_optimal_steps}."
 
+        self._update_machine_vision_localization(player_row, player_col)
+        self._update_machine_vision_exit_localization(player_row, player_col)
+        self._draw_machine_vision_prediction_overlay(player_row, player_col)
+        self._draw_machine_vision_exit_prediction_overlay(player_row, player_col)
+        vision_pred_cell = self.machine_vision_last_prediction.get("predicted_cell", (-1, -1))
+        vision_conf = float(self.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
+        vision_support = int(self.machine_vision_last_prediction.get("support", 0) or 0)
+        vision_error = int(self.machine_vision_last_prediction.get("manhattan_error", 0) or 0)
+        machine_vision_line = (
+            "Machine vision player localization: "
+            f"pred={vision_pred_cell} actual=({player_row}, {player_col}) "
+            f"conf={round(vision_conf, 3)} support={vision_support} "
+            f"accuracy={round(self._machine_vision_accuracy(), 3)} "
+            f"mae={round(self._machine_vision_mae(), 3)} "
+            f"last_error={vision_error} samples={self.machine_vision_total_samples}."
+        )
+        vision_exit_pred_cell = self.machine_vision_exit_last_prediction.get("predicted_cell", (-1, -1))
+        vision_exit_conf = float(self.machine_vision_exit_last_prediction.get("confidence", 0.0) or 0.0)
+        vision_exit_support = int(self.machine_vision_exit_last_prediction.get("support", 0) or 0)
+        vision_exit_error = int(self.machine_vision_exit_last_prediction.get("manhattan_error", 0) or 0)
+        machine_vision_exit_line = (
+            "Machine vision exit localization: "
+            f"pred={vision_exit_pred_cell} actual={self.current_target_cell} "
+            f"conf={round(vision_exit_conf, 3)} support={vision_exit_support} "
+            f"accuracy={round(self._machine_vision_exit_accuracy(), 3)} "
+            f"mae={round(self._machine_vision_exit_mae(), 3)} "
+            f"last_error={vision_exit_error} samples={self.machine_vision_exit_total_samples}."
+        )
+
         self._draw_pseudo3d_view(player_row, player_col)
 
         snapshot = (
@@ -6496,6 +7619,8 @@ class AIAssistantApp:
             f"occ_brier={round(self._prediction_avg_occupancy_brier(), 3)}, "
             f"shape_brier={round(self._prediction_avg_shape_brier(), 3)}, "
             f"pending={len(self.prediction_memory_active)}, expired={self.prediction_expired_count}).\n"
+            f"{machine_vision_line}\n"
+            f"{machine_vision_exit_line}\n"
             f"{perception_block}"
         )
 
@@ -7885,6 +9010,24 @@ class AIAssistantApp:
         return round(entropy, 3)
 
     def _frontier_lock_active(self, unknown_cells: int | None = None, frontier_cells: int | None = None) -> bool:
+        # If the exit is currently visible (or we already latched a capture path),
+        # objective routing should dominate over frontier continuity forcing.
+        if self._sticky_objective_target == self.current_target_cell and self._sticky_objective_path:
+            return False
+        target_row, target_col = self.current_target_cell
+        exit_visible_now = (
+            self.maze_known_cells.get(self.current_target_cell, "") == "E"
+            and self._is_local_cell_visible(
+                self.current_player_cell[0],
+                self.current_player_cell[1],
+                target_row,
+                target_col,
+                facing=self.player_facing,
+            )
+        )
+        if exit_visible_now:
+            return False
+
         if unknown_cells is None or frontier_cells is None:
             summary = self._episodic_memory_summary()
             unknown_cells = int(summary.get("unknown", 0) or 0)
@@ -7922,6 +9065,208 @@ class AIAssistantApp:
             return ""
 
         return path[0]
+
+    def _recent_action_penalty_profile(
+        self,
+        from_cell: tuple[int, int],
+        moves: list[str],
+    ) -> dict[str, dict[str, float | int]]:
+        normalized_moves = [str(move or "").strip().upper() for move in moves if str(move or "").strip()]
+        if not normalized_moves:
+            return {}
+
+        profile: dict[str, dict[str, float | int]] = {
+            move: {
+                "count": 0,
+                "decayed_penalty": 0.0,
+                "max_penalty": 0.0,
+                "catastrophic_hits": 0,
+                "risk_hits": 0,
+            }
+            for move in normalized_moves
+        }
+        action_to_move = {f"MOVE_{move}": move for move in normalized_moves}
+        risk_tags = {
+            "dead_end_slap",
+            "dead_end_tip_revisit",
+            "dead_end_entrance_revisit",
+            "visible_terminal",
+            "boxed_corridor",
+            "cycle_pair",
+            "transition_repeat",
+            "immediate_backtrack",
+            "branch_diversity",
+        }
+
+        row_limit = max(12, int(self.frontier_lock_memory_veto_window) * 4)
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT action_taken, penalty_signal, reason_tags, player_cell
+                    FROM maze_action_outcome_memory
+                    WHERE maze_layout_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(self.current_maze_episode_id), int(row_limit)),
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            return profile
+
+        origin_cell = (int(from_cell[0]), int(from_cell[1]))
+        catastrophic_threshold = float(self.frontier_lock_memory_veto_penalty)
+        for action_taken, penalty_signal, reason_tags, player_cell_json in rows:
+            action_key = str(action_taken or "").strip().upper()
+            move = action_to_move.get(action_key)
+            if not move:
+                continue
+            try:
+                parsed_cell = json.loads(str(player_cell_json or ""))
+                parsed_from_cell = (int(parsed_cell[0]), int(parsed_cell[1]))
+            except Exception:  # noqa: BLE001
+                continue
+            if parsed_from_cell != origin_cell:
+                continue
+
+            penalty_value = max(0.0, float(penalty_signal or 0.0))
+            bucket = profile[move]
+            rank = int(bucket["count"])
+            decay_weight = 1.0 / (1.0 + (0.7 * rank))
+            bucket["count"] = rank + 1
+            bucket["decayed_penalty"] = float(bucket["decayed_penalty"]) + (penalty_value * decay_weight)
+            bucket["max_penalty"] = max(float(bucket["max_penalty"]), penalty_value)
+            if penalty_value >= catastrophic_threshold:
+                bucket["catastrophic_hits"] = int(bucket["catastrophic_hits"]) + 1
+
+            tag_set = {part.strip() for part in str(reason_tags or "").split(",") if part.strip()}
+            if tag_set.intersection(risk_tags):
+                bucket["risk_hits"] = int(bucket["risk_hits"]) + 1
+
+        return profile
+
+    def _should_veto_frontier_lock_move(
+        self,
+        frontier_lock_move: str,
+        candidates: list[tuple[str, tuple[int, int]]],
+    ) -> tuple[bool, str]:
+        if not self.frontier_lock_memory_veto_enable:
+            return (False, "disabled")
+
+        candidate_moves = [move for move, _cell in candidates]
+        if frontier_lock_move not in candidate_moves or len(candidate_moves) < 2:
+            return (False, "insufficient_candidates")
+
+        profile = self._recent_action_penalty_profile(self.current_player_cell, candidate_moves)
+        selected = profile.get(frontier_lock_move, {})
+        selected_count = int(selected.get("count", 0) or 0)
+        if selected_count <= 0:
+            return (False, "no_recent_selected")
+
+        selected_decayed = float(selected.get("decayed_penalty", 0.0) or 0.0)
+        selected_max = float(selected.get("max_penalty", 0.0) or 0.0)
+        selected_catastrophic = int(selected.get("catastrophic_hits", 0) or 0)
+        selected_risk_hits = int(selected.get("risk_hits", 0) or 0)
+        catastrophic_threshold = float(self.frontier_lock_memory_veto_penalty)
+
+        severe_selected = (
+            selected_max >= catastrophic_threshold
+            or selected_decayed >= catastrophic_threshold
+            or selected_catastrophic > 0
+            or selected_risk_hits >= 2
+        )
+        if not severe_selected:
+            return (False, "selected_not_severe")
+
+        alternatives = [move for move in candidate_moves if move != frontier_lock_move]
+        best_alt = min(
+            alternatives,
+            key=lambda move: (
+                int(profile.get(move, {}).get("catastrophic_hits", 0) or 0),
+                float(profile.get(move, {}).get("decayed_penalty", 0.0) or 0.0),
+                float(profile.get(move, {}).get("max_penalty", 0.0) or 0.0),
+            ),
+        )
+        alt_bucket = profile.get(best_alt, {})
+        alt_decayed = float(alt_bucket.get("decayed_penalty", 0.0) or 0.0)
+        alt_max = float(alt_bucket.get("max_penalty", 0.0) or 0.0)
+        alt_catastrophic = int(alt_bucket.get("catastrophic_hits", 0) or 0)
+        alt_risk_hits = int(alt_bucket.get("risk_hits", 0) or 0)
+
+        selected_pressure = selected_decayed + (selected_catastrophic * catastrophic_threshold * 0.7) + (selected_risk_hits * 22.0)
+        alt_pressure = alt_decayed + (alt_catastrophic * catastrophic_threshold * 0.7) + (alt_risk_hits * 22.0)
+        pressure_gap = selected_pressure - alt_pressure
+        if pressure_gap < float(self.frontier_lock_memory_veto_margin):
+            return (
+                False,
+                f"pressure_gap={round(pressure_gap, 1)}<margin={round(float(self.frontier_lock_memory_veto_margin), 1)}",
+            )
+
+        selected_score = self._exploration_move_score(frontier_lock_move)
+        alt_score = self._exploration_move_score(best_alt)
+        score_gap_allowance = int(self.frontier_lock_memory_veto_score_margin)
+        score_gap_allowance += selected_catastrophic * 140
+        if selected_max >= (catastrophic_threshold * 1.8):
+            score_gap_allowance += 80
+        if selected_count >= 3:
+            score_gap_allowance += 40
+        score_gap = int(alt_score) - int(selected_score)
+        if score_gap > score_gap_allowance:
+            return (
+                False,
+                f"alt_score_gap={score_gap}>allowance={score_gap_allowance}",
+            )
+
+        return (
+            True,
+            (
+                f"selected={frontier_lock_move} alt={best_alt} sel_count={selected_count} "
+                f"sel_max={round(selected_max, 1)} alt_max={round(alt_max, 1)} "
+                f"pressure_gap={round(pressure_gap, 1)} score_gap={score_gap} "
+                f"allowance={score_gap_allowance}"
+            ),
+        )
+
+    def _frontier_forced_move_score_guard(
+        self,
+        forced_move: str,
+        candidates: list[tuple[str, tuple[int, int]]],
+    ) -> tuple[bool, str]:
+        if not self.frontier_lock_force_score_guard_enable:
+            return (True, "disabled")
+
+        candidate_moves = [move for move, _cell in candidates]
+        if forced_move not in candidate_moves:
+            return (False, f"forced_not_legal_candidate:{forced_move}")
+        if len(candidate_moves) < 2:
+            return (True, "single_candidate")
+
+        tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
+        scored: list[tuple[str, int]] = []
+        for move in candidate_moves:
+            scored.append((move, int(self._exploration_move_score(move))))
+        scored.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
+
+        best_move, best_score = scored[0]
+        forced_score = int(next(score for move, score in scored if move == forced_move))
+        margin = int(self.frontier_lock_force_score_margin)
+        delta = forced_score - best_score
+        if delta <= margin:
+            return (
+                True,
+                (
+                    f"forced={forced_move}:{forced_score} best={best_move}:{best_score} "
+                    f"delta={delta}<=margin={margin}"
+                ),
+            )
+
+        return (
+            False,
+            (
+                f"forced={forced_move}:{forced_score} best={best_move}:{best_score} "
+                f"delta={delta}>margin={margin}"
+            ),
+        )
 
     def _retry_continuity_active(self) -> bool:
         if self._active_same_maze_retry_count() <= 0:
@@ -8271,6 +9616,11 @@ class AIAssistantApp:
             frontier_distance = int(bd.get("frontier_distance", origin_frontier) or origin_frontier)
             frontier_delta = origin_frontier - frontier_distance
             estimated_frontier_gain = max(0.0, min(1.0, (frontier_delta + 2.0) / 4.0))
+            mv_exit_progress_norm = float(bd.get("mv_exit_progress_norm", 0.0) or 0.0)
+            if mv_exit_progress_norm > 0.0:
+                estimated_frontier_gain = max(0.0, min(1.0, estimated_frontier_gain + (0.35 * mv_exit_progress_norm)))
+            elif mv_exit_progress_norm < 0.0:
+                estimated_loop_risk = max(0.0, min(1.0, estimated_loop_risk + (abs(mv_exit_progress_norm) * 0.2)))
             candidate_inputs.append(
                 CandidateInput(
                     action=move,
@@ -8473,38 +9823,65 @@ class AIAssistantApp:
         continuity_override_active = self._retry_continuity_active()
         frontier_lock_active = self._frontier_lock_active()
         frontier_lock_move = self._frontier_lock_step() if frontier_lock_active else ""
+        frontier_lock_vetoed = False
 
         if frontier_lock_active and frontier_lock_move and persistent_frontier_target is not None:
-            target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
-            exhausted_cells, exhausted_transitions = self._path_exhaustion_counts(
-                self.current_player_cell,
-                self._path_to_frontier_target(persistent_frontier_target),
-            )
-            next_cell = self._neighbor_for_move(self.current_player_cell, frontier_lock_move)
-            current_frontier_distance = self._frontier_distance(self.current_player_cell, max_depth=12)
-            next_frontier_distance = self._frontier_distance(next_cell, max_depth=12)
-            self._last_planner_choice_debug = (
-                f"source=frontier_lock selected={frontier_lock_move} target={persistent_frontier_target} "
-                f"target_distance={target_distance} frontier_distance={current_frontier_distance}->{next_frontier_distance} "
-                f"exhausted_cells={exhausted_cells} exhausted_transitions={exhausted_transitions} "
-                f"retries={self._active_same_maze_retry_count()} entropy={self._recent_move_direction_entropy()} "
-                f"force_score_fallback={1 if force_score_fallback else 0}"
-            )
-            return frontier_lock_move
+            should_veto_frontier_lock, veto_reason = self._should_veto_frontier_lock_move(frontier_lock_move, candidates)
+            if should_veto_frontier_lock:
+                frontier_lock_vetoed = True
+                force_score_fallback = True
+                self._last_planner_choice_debug = (
+                    f"source=frontier_lock_veto selected={frontier_lock_move} "
+                    f"target={persistent_frontier_target} reason={veto_reason} -> fallback=score"
+                )
+            else:
+                force_allowed, force_reason = self._frontier_forced_move_score_guard(frontier_lock_move, candidates)
+                if not force_allowed:
+                    frontier_lock_vetoed = True
+                    force_score_fallback = True
+                    self._last_planner_choice_debug = (
+                        f"source=frontier_lock_score_guard selected={frontier_lock_move} "
+                        f"target={persistent_frontier_target} reason={force_reason} -> fallback=score"
+                    )
+                else:
+                    target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
+                    exhausted_cells, exhausted_transitions = self._path_exhaustion_counts(
+                        self.current_player_cell,
+                        self._path_to_frontier_target(persistent_frontier_target),
+                    )
+                    next_cell = self._neighbor_for_move(self.current_player_cell, frontier_lock_move)
+                    current_frontier_distance = self._frontier_distance(self.current_player_cell, max_depth=12)
+                    next_frontier_distance = self._frontier_distance(next_cell, max_depth=12)
+                    self._last_planner_choice_debug = (
+                        f"source=frontier_lock selected={frontier_lock_move} target={persistent_frontier_target} "
+                        f"target_distance={target_distance} frontier_distance={current_frontier_distance}->{next_frontier_distance} "
+                        f"exhausted_cells={exhausted_cells} exhausted_transitions={exhausted_transitions} "
+                        f"retries={self._active_same_maze_retry_count()} entropy={self._recent_move_direction_entropy()} "
+                        f"force_score_fallback={1 if force_score_fallback else 0}"
+                    )
+                    return frontier_lock_move
 
-        if (continuity_override_active or (not force_score_fallback)) and persistent_frontier_move and persistent_frontier_target is not None:
-            target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
-            exhausted_cells, exhausted_transitions = self._path_exhaustion_counts(
-                self.current_player_cell,
-                self._path_to_frontier_target(persistent_frontier_target),
-            )
+        if (not frontier_lock_vetoed) and (continuity_override_active or (not force_score_fallback)) and persistent_frontier_move and persistent_frontier_target is not None:
+            force_allowed, force_reason = self._frontier_forced_move_score_guard(persistent_frontier_move, candidates)
+            if force_allowed:
+                target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
+                exhausted_cells, exhausted_transitions = self._path_exhaustion_counts(
+                    self.current_player_cell,
+                    self._path_to_frontier_target(persistent_frontier_target),
+                )
+                self._last_planner_choice_debug = (
+                    f"source=persistent_frontier selected={persistent_frontier_move} target={persistent_frontier_target} "
+                    f"target_distance={target_distance} exhausted_cells={exhausted_cells} "
+                    f"exhausted_transitions={exhausted_transitions} "
+                    f"retries={self._active_same_maze_retry_count()} "
+                    f"force_score_fallback={1 if force_score_fallback else 0}"
+                )
+                return persistent_frontier_move
+            force_score_fallback = True
             self._last_planner_choice_debug = (
-                f"source=persistent_frontier selected={persistent_frontier_move} target={persistent_frontier_target} "
-                f"target_distance={target_distance} exhausted_cells={exhausted_cells} "
-                f"exhausted_transitions={exhausted_transitions} retries={self._active_same_maze_retry_count()} "
-                f"force_score_fallback={1 if force_score_fallback else 0}"
+                f"source=persistent_frontier_score_guard selected={persistent_frontier_move} "
+                f"target={persistent_frontier_target} reason={force_reason} -> fallback=score"
             )
-            return persistent_frontier_move
 
         terminal_filtered = False
         if self.terminal_end_hard_avoid:
@@ -9350,6 +10727,37 @@ class AIAssistantApp:
             candidate_is_target=(candidate == self.current_target_cell),
         )
         episodic_exploration_locked = local_map_authority_scale >= 0.999
+
+        mv_hints = self._machine_vision_kernel_hints()
+        mv_self_pred_cell = tuple(mv_hints.get("self_pred_cell", (-1, -1)) or (-1, -1))
+        mv_self_error = int(mv_hints.get("self_error", -1) or -1)
+        mv_self_quality_scale = float(mv_hints.get("self_quality_scale", 0.0) or 0.0)
+        mv_exit_pred_cell = tuple(mv_hints.get("exit_pred_cell", (-1, -1)) or (-1, -1))
+        mv_exit_conf = float(mv_hints.get("exit_conf", 0.0) or 0.0)
+        mv_exit_source = str(mv_hints.get("exit_source", "none") or "none")
+        mv_exit_source_scale = float(mv_hints.get("exit_source_scale", 0.0) or 0.0)
+        mv_exit_hint_strength = float(mv_hints.get("exit_hint_strength", 0.0) or 0.0)
+        mv_exit_usable = bool(mv_hints.get("exit_usable", False))
+        mv_exit_origin_distance = -1
+        mv_exit_candidate_distance = -1
+        mv_exit_alignment_bonus = 0
+        mv_exit_alignment_penalty = 0
+        mv_exit_progress_norm = 0.0
+        if mv_exit_usable and mv_exit_pred_cell[0] >= 0 and mv_exit_pred_cell[1] >= 0:
+            mv_exit_origin_distance = abs(int(origin[0]) - int(mv_exit_pred_cell[0])) + abs(
+                int(origin[1]) - int(mv_exit_pred_cell[1])
+            )
+            mv_exit_candidate_distance = abs(int(candidate[0]) - int(mv_exit_pred_cell[0])) + abs(
+                int(candidate[1]) - int(mv_exit_pred_cell[1])
+            )
+            mv_exit_progress = mv_exit_origin_distance - mv_exit_candidate_distance
+            mv_exit_progress_norm = max(-1.0, min(1.0, (mv_exit_progress / 3.0))) * mv_exit_hint_strength
+            mv_bias_units = float(self.machine_vision_kernel_exit_bias_weight) * mv_exit_hint_strength
+            if mv_exit_progress > 0:
+                mv_exit_alignment_bonus = int(round(mv_exit_progress * (1.0 + mv_bias_units)))
+            elif mv_exit_progress < 0:
+                mv_exit_alignment_penalty = int(round(abs(mv_exit_progress) * (0.7 + (0.7 * mv_bias_units))))
+
         # --- Prediction memory bias (unknown cells only) ---
         # When the candidate is unknown but has an active shape prediction,
         # bias scoring toward predicted junctions and away from predicted dead-ends.
@@ -9926,6 +11334,7 @@ class AIAssistantApp:
         score += endocrine_stress_penalty
         score += endocrine_fatigue_penalty
         score += cause_effect_memory_penalty
+        score += mv_exit_alignment_penalty
         score += move_personality_bias
         score += decision_noise
         # Keep raw exploration reward intentionally weak. Strong preference comes
@@ -9939,6 +11348,7 @@ class AIAssistantApp:
         score -= max(0, open_degree - 2) * 1
         score -= effective_visible_open_decision * 22
         score -= cause_effect_memory_reward
+        score -= mv_exit_alignment_bonus
         score -= branch_tightening_escape_bonus
         score -= effective_bio_opening_bonus
         score -= int(bio_nav["bio_dead_end_escape_bonus"])
@@ -10140,6 +11550,20 @@ class AIAssistantApp:
             "cause_effect_memory_penalty": cause_effect_memory_penalty,
             "cause_effect_memory_reward": cause_effect_memory_reward,
             "cause_effect_retrieved_tags": ",".join(retrieved_cause_tags),
+            "mv_self_pred_cell": mv_self_pred_cell,
+            "mv_self_error": mv_self_error,
+            "mv_self_quality_scale": round(mv_self_quality_scale, 3),
+            "mv_exit_pred_cell": mv_exit_pred_cell,
+            "mv_exit_conf": round(mv_exit_conf, 3),
+            "mv_exit_source": mv_exit_source,
+            "mv_exit_source_scale": round(mv_exit_source_scale, 3),
+            "mv_exit_hint_strength": round(mv_exit_hint_strength, 3),
+            "mv_exit_usable": 1 if mv_exit_usable else 0,
+            "mv_exit_origin_distance": mv_exit_origin_distance,
+            "mv_exit_candidate_distance": mv_exit_candidate_distance,
+            "mv_exit_alignment_bonus": mv_exit_alignment_bonus,
+            "mv_exit_alignment_penalty": mv_exit_alignment_penalty,
+            "mv_exit_progress_norm": round(mv_exit_progress_norm, 3),
             "move_personality_bias": move_personality_bias,
             "decision_noise": decision_noise,
             "novelty_reward": novelty_reward,
@@ -10722,6 +12146,133 @@ class AIAssistantApp:
             self.game_canvas.tag_raise(self.end_label)
         if hasattr(self, "player"):
             self.game_canvas.tag_raise(self.player)
+
+    def _draw_machine_vision_prediction_overlay(self, player_row: int, player_col: int) -> None:
+        self.game_canvas.delete("vision_pred")
+        if self._normalized_layout_mode() != "maze":
+            return
+        if not self.machine_vision_player_localization_enable:
+            return
+
+        predicted = self.machine_vision_last_prediction.get("predicted_cell", (-1, -1))
+        if not isinstance(predicted, (tuple, list)) or len(predicted) != 2:
+            return
+        try:
+            pred_row = int(predicted[0])
+            pred_col = int(predicted[1])
+        except Exception:  # noqa: BLE001
+            return
+        if pred_row < 0 or pred_col < 0 or pred_row >= self.grid_cells or pred_col >= self.grid_cells:
+            return
+
+        inset = max(2, int(self.cell_size * 0.08))
+        x1 = pred_col * self.cell_size + inset
+        y1 = pred_row * self.cell_size + inset
+        x2 = (pred_col + 1) * self.cell_size - inset
+        y2 = (pred_row + 1) * self.cell_size - inset
+        confidence = float(self.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
+
+        self.game_canvas.create_rectangle(
+            x1,
+            y1,
+            x2,
+            y2,
+            fill=self.machine_vision_overlay_fill,
+            outline="",
+            stipple="gray50",
+            tags="vision_pred",
+        )
+        self.game_canvas.create_rectangle(
+            x1,
+            y1,
+            x2,
+            y2,
+            fill="",
+            outline=self.machine_vision_overlay_color,
+            width=3,
+            tags="vision_pred",
+        )
+        self.game_canvas.create_text(
+            x1 + 3,
+            y1 + 3,
+            anchor=tk.NW,
+            text=f"MV {int(round(confidence * 100))}%",
+            fill="#2f3e00",
+            font=("Helvetica", 7, "bold"),
+            tags="vision_pred",
+        )
+
+        self.game_canvas.tag_raise("vision_pred")
+        if hasattr(self, "player"):
+            self.game_canvas.tag_raise(self.player)
+        if hasattr(self, "target"):
+            self.game_canvas.tag_raise(self.target)
+        if hasattr(self, "end_label"):
+            self.game_canvas.tag_raise(self.end_label)
+
+    def _draw_machine_vision_exit_prediction_overlay(self, player_row: int, player_col: int) -> None:
+        _ = (player_row, player_col)
+        self.game_canvas.delete("vision_exit_pred")
+        if self._normalized_layout_mode() != "maze":
+            return
+        if not self.machine_vision_exit_localization_enable:
+            return
+
+        predicted = self.machine_vision_exit_last_prediction.get("predicted_cell", (-1, -1))
+        if not isinstance(predicted, (tuple, list)) or len(predicted) != 2:
+            return
+        try:
+            pred_row = int(predicted[0])
+            pred_col = int(predicted[1])
+        except Exception:  # noqa: BLE001
+            return
+        if pred_row < 0 or pred_col < 0 or pred_row >= self.grid_cells or pred_col >= self.grid_cells:
+            return
+
+        inset = max(2, int(self.cell_size * 0.08))
+        x1 = pred_col * self.cell_size + inset
+        y1 = pred_row * self.cell_size + inset
+        x2 = (pred_col + 1) * self.cell_size - inset
+        y2 = (pred_row + 1) * self.cell_size - inset
+        confidence = float(self.machine_vision_exit_last_prediction.get("confidence", 0.0) or 0.0)
+
+        self.game_canvas.create_rectangle(
+            x1,
+            y1,
+            x2,
+            y2,
+            fill=self.machine_vision_exit_overlay_fill,
+            outline="",
+            stipple="gray50",
+            tags="vision_exit_pred",
+        )
+        self.game_canvas.create_rectangle(
+            x1,
+            y1,
+            x2,
+            y2,
+            fill="",
+            outline=self.machine_vision_exit_overlay_color,
+            width=3,
+            tags="vision_exit_pred",
+        )
+        self.game_canvas.create_text(
+            x1 + 3,
+            y1 + 3,
+            anchor=tk.NW,
+            text=f"MV-E {int(round(confidence * 100))}%",
+            fill="#2f3e00",
+            font=("Helvetica", 7, "bold"),
+            tags="vision_exit_pred",
+        )
+
+        self.game_canvas.tag_raise("vision_exit_pred")
+        if hasattr(self, "player"):
+            self.game_canvas.tag_raise(self.player)
+        if hasattr(self, "target"):
+            self.game_canvas.tag_raise(self.target)
+        if hasattr(self, "end_label"):
+            self.game_canvas.tag_raise(self.end_label)
 
     def _fov_fill_color(self, strength: float, vis_kind: str, corner_graze_steps: int) -> str:
         # Strength-based palette gives a user-visible cue for light/vision attenuation.

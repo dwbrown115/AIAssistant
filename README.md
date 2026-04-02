@@ -282,6 +282,16 @@ FRONTIER_LOCK_LOOP_PENALTY=50
 SOLVED_REGION_PENALTY=500
 LOOP_ENTROPY_WINDOW=8
 LOOP_ENTROPY_THRESHOLD=1.2
+# Optional: when frontier-lock proposes a move with severe recent punishment memory,
+# allow a score fallback instead of forcing the same transition replay.
+FRONTIER_LOCK_MEMORY_VETO_ENABLE=1
+FRONTIER_LOCK_MEMORY_VETO_PENALTY=280
+FRONTIER_LOCK_MEMORY_VETO_MARGIN=120
+FRONTIER_LOCK_MEMORY_VETO_WINDOW=18
+FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN=120
+# Optional: prevent forced frontier-lock/continuity moves when local score gap is too large.
+FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE=1
+FRONTIER_LOCK_FORCE_SCORE_MARGIN=120
 # Optional: feature vector size used for cause-effect similarity retrieval.
 CAUSE_EFFECT_VECTOR_DIM=24
 # Optional: top-k similar cause-effect memories retrieved per move scoring.
@@ -300,6 +310,20 @@ STRICT_AUTHORITY_RISK_MEMORY_MIN_SCALE=0.45
 LAYOUT_RECALL_MUTATION_CHANCE=0.03
 # Optional: decay depth applied to one recalled cell metadata during reconsolidation mutation.
 LAYOUT_RECALL_MUTATION_DECAY_STEPS=18
+# Optional: machine-vision side-channel predicts player cell from local perception; kernel grades accuracy only.
+MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE=1
+MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE=1
+# Optional: machine-vision side-channel predicts maze exit cell from local perception; kernel grades accuracy only.
+MACHINE_VISION_EXIT_LOCALIZATION_ENABLE=1
+MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE=1
+# Optional: unseen-signature localization tuning (confidence floor + temperature prior sampling + random exploration chance).
+MACHINE_VISION_UNSEEN_CONFIDENCE_FLOOR=0.08
+MACHINE_VISION_UNSEEN_TEMPERATURE=1.35
+MACHINE_VISION_UNSEEN_RANDOM_EXPLORE_CHANCE=0.2
+# Optional: feed MV self/exit coordinate hints into kernel scoring as soft, confidence-gated bias.
+MACHINE_VISION_KERNEL_HINT_ENABLE=1
+MACHINE_VISION_KERNEL_HINT_MIN_CONF=0.08
+MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT=3.0
 # Optional: blend weight for cross-maze priors when predicting unseen cells (0..1).
 PREDICTION_PRIOR_BLEND=0.35
 # Optional: score reward when an unseen-structure prediction is correct.
@@ -436,6 +460,7 @@ Then open `http://127.0.0.1:5050`.
 - Maze-mode exit placement is deterministic per map identity (seed + difficulty + algorithm), so the same deterministic `map_id` resolves to the same exit cell across runs.
 - Layout recalls now support biological-style reconsolidation: each recall has a small configurable mutation chance (`LAYOUT_RECALL_MUTATION_CHANCE`), and the recalled block is written back as the latest memory version.
 - Reconsolidation mutation is now soft: it decays one recalled cell's recency metadata (`LAYOUT_RECALL_MUTATION_DECAY_STEPS`) instead of removing known open/wall occupancy from the recalled map.
+- Machine-vision localization training is available as side-channels (`MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE`, `MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE`): it predicts player and exit cell coordinates from local perception, the maze memory pipeline logs/grades exact-hit and Manhattan error accuracy, and the board renders yellow-green overlays for both (`MV` for player prediction, `MV-E` for exit prediction). Optional kernel-hint knobs (`MACHINE_VISION_KERNEL_HINT_ENABLE`, `MACHINE_VISION_KERNEL_HINT_MIN_CONF`, `MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT`) now let those MV coordinates act as a soft, source/confidence-gated exploration bias alongside normal sensory vision.
 - STM now supports access-time stale pruning with a small probability (`STM_ACCESS_UNUSED_PRUNE_CHANCE`) so low-use entries can be gradually culled while memory is being accessed.
 - Cause-effect memory is also stored in `maze_memory.sqlite3` and shown in the Memory Viewer as `Cause-Effect Memory` entries.
 - Cause-effect memory is now integrated as a three-step layer: working (`recent_cause_effect`), short-term (`Cause-Effect STM`), and semantic (`Cause-Effect Semantic`) with lightweight vector similarity retrieval.
@@ -466,7 +491,7 @@ Then open `http://127.0.0.1:5050`.
 - Reset-aware exploration env vars: `RESET_TRACE_WINDOW`, `POST_RESET_EXHAUSTION_PENALTY`, `RESET_FAILURE_TRANSITION_PENALTY`, `RESET_FAILURE_CELL_PENALTY`, `RESET_SUCCESS_TRANSITION_BONUS`, `POST_RESET_STM_RELAX_STEPS` (after step-limit resets, retain a failure trace window, temporarily suppress revisiting exhausted regions/transitions that repeatedly led to timeout loops, and allow successful post-reset transitions to receive a small recovery bonus; STM novelty gate is briefly relaxed so more post-reset context can be retained).
 - Frontier continuity: the maze planner now keeps a persistent frontier target within the same maze episode and tries to resume that route after timeout resets instead of immediately recomputing from purely local scores.
 - Same-maze retry continuity: timeout retries now keep an explicit retry counter and preserve the frontier target even during stuck-reexplore fallback, so the planner does not drop back to purely local score replay after a reset.
-- Frontier-lock env vars: `FRONTIER_LOCK_UNKNOWN_THRESHOLD`, `FRONTIER_LOCK_FRONTIER_THRESHOLD`, `FRONTIER_LOCK_RETRY_BONUS`, `FRONTIER_LOCK_LOOP_PENALTY`, `SOLVED_REGION_PENALTY`, `LOOP_ENTROPY_WINDOW`, `LOOP_ENTROPY_THRESHOLD` (when the maze is down to a small unresolved frontier pocket, or retries/low-entropy motion indicate corridor replay, the planner enters a hard frontier-lock mode that routes toward the persistent frontier target, suppresses local stuck fallback/model arbitration, and heavily penalizes staying inside already solved regions).
+- Frontier-lock env vars: `FRONTIER_LOCK_UNKNOWN_THRESHOLD`, `FRONTIER_LOCK_FRONTIER_THRESHOLD`, `FRONTIER_LOCK_RETRY_BONUS`, `FRONTIER_LOCK_LOOP_PENALTY`, `SOLVED_REGION_PENALTY`, `LOOP_ENTROPY_WINDOW`, `LOOP_ENTROPY_THRESHOLD`, `FRONTIER_LOCK_MEMORY_VETO_ENABLE`, `FRONTIER_LOCK_MEMORY_VETO_PENALTY`, `FRONTIER_LOCK_MEMORY_VETO_MARGIN`, `FRONTIER_LOCK_MEMORY_VETO_WINDOW`, `FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN`, `FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE`, `FRONTIER_LOCK_FORCE_SCORE_MARGIN` (when the maze is down to a small unresolved frontier pocket, or retries/low-entropy motion indicate corridor replay, the planner enters a hard frontier-lock mode that routes toward the persistent frontier target, suppresses local stuck fallback/model arbitration, and heavily penalizes staying inside already solved regions; the memory-veto knobs let severe recent punishment traces override forced transition replay, and the score-guard knobs prevent forced frontier routing from overriding a clearly superior local move).
 - Exploration debug now includes `active_retries`, `frontier_lock`, and `move_entropy`, plus per-move `frontier_lock_progress_bonus`, `frontier_lock_loop_penalty`, and `solved_region_penalty`, so late-maze loop behavior can be validated directly from the debug dump.
 - Local map authority env vars: `LOCAL_MAP_AUTHORITY_MODE`, `LOCAL_MAP_AUTHORITY_SOFT_SCALE`, `STRICT_AUTHORITY_RISK_MEMORY_MIN_SCALE` (`strict`=local episodic truth fully overrides cross-maze reward carryover on fully known cells except a configurable minimum carryover for high-risk contexts; `soft`=apply partial override using the soft scale).
 - Local navigation env vars: `LOCAL_NAVIGATION_KERNEL`, `LOCAL_NAVIGATION_API_FALLBACK` (`LOCAL_NAVIGATION_KERNEL=1` makes navigation local-first, and `LOCAL_NAVIGATION_API_FALLBACK=1` lets OpenAI step in if the local kernel stalls or cannot finish cleanly).
