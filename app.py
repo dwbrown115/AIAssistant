@@ -6,8 +6,14 @@ import math
 import random
 import re
 import sqlite3
+import gc
+import tempfile
+import base64
+import shutil
+import zipfile
+from datetime import datetime
 from collections import deque
-from tkinter import scrolledtext
+from tkinter import filedialog, scrolledtext
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -26,7 +32,8 @@ from organism_control import (
 from maze.runner import CandidateInput, MazeAgent, StepOutput as MazeStepOutput
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+# Ensure local project defaults are deterministic even if the shell has stale exports.
+load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 load_dotenv(os.path.join(BASE_DIR, ".env.secret"), override=True)
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -65,20 +72,171 @@ class EndocrineSystem:
     """Slow global modulators that bias move selection and memory behavior."""
 
     def __init__(self) -> None:
-        self.stress = Hormone(value=0.2, decay=float(os.getenv("HORMONE_STRESS_DECAY", "0.90")))
-        self.curiosity = Hormone(value=0.35, decay=float(os.getenv("HORMONE_CURIOSITY_DECAY", "0.97")))
-        self.confidence = Hormone(value=0.30, decay=float(os.getenv("HORMONE_CONFIDENCE_DECAY", "0.96")))
-        self.fatigue = Hormone(value=0.15, decay=float(os.getenv("HORMONE_FATIGUE_DECAY", "0.98")))
-        self.reward = Hormone(value=0.20, decay=float(os.getenv("HORMONE_REWARD_DECAY", "0.95")))
+        self.H_curiosity = Hormone(
+            value=0.36,
+            decay=float(os.getenv("H_CURIOSITY_DECAY", os.getenv("HORMONE_CURIOSITY_DECAY", "0.97"))),
+        )
+        self.H_caution = Hormone(
+            value=0.24,
+            decay=float(os.getenv("H_CAUTION_DECAY", os.getenv("HORMONE_STRESS_DECAY", "0.93"))),
+        )
+        self.H_persistence = Hormone(
+            value=0.32,
+            decay=float(os.getenv("H_PERSISTENCE_DECAY", os.getenv("HORMONE_REWARD_DECAY", "0.965"))),
+        )
+        self.H_mv_trust = Hormone(value=0.28, decay=float(os.getenv("H_MV_TRUST_DECAY", "0.96")))
+        self.H_boredom = Hormone(
+            value=0.16,
+            decay=float(os.getenv("H_BOREDOM_DECAY", os.getenv("HORMONE_FATIGUE_DECAY", "0.985"))),
+        )
+        self.H_confidence = Hormone(
+            value=0.30,
+            decay=float(os.getenv("H_CONFIDENCE_DECAY", os.getenv("HORMONE_CONFIDENCE_DECAY", "0.96"))),
+        )
+        self._homeostasis_targets = {
+            "H_curiosity": 0.36,
+            "H_caution": 0.24,
+            "H_persistence": 0.32,
+            "H_mv_trust": 0.28,
+            "H_boredom": 0.16,
+            "H_confidence": 0.30,
+        }
+        self._saturation_high_start = max(
+            0.7,
+            min(0.99, float(os.getenv("HORMONE_SATURATION_HIGH_START", "0.86"))),
+        )
+        self._saturation_low_end = max(
+            0.01,
+            min(0.3, float(os.getenv("HORMONE_SATURATION_LOW_END", "0.14"))),
+        )
+        self._saturation_min_scale = max(
+            0.05,
+            min(1.0, float(os.getenv("HORMONE_SATURATION_MIN_SCALE", "0.30"))),
+        )
+        self._distress_recovery_enable = os.getenv("HORMONE_DISTRESS_RECOVERY_ENABLE", "1") == "1"
+        self._distress_recovery_threshold = max(
+            0.75,
+            min(0.99, float(os.getenv("HORMONE_DISTRESS_RECOVERY_THRESHOLD", "0.86"))),
+        )
+        self._distress_recovery_step = max(
+            0.001,
+            min(0.05, float(os.getenv("HORMONE_DISTRESS_RECOVERY_STEP", "0.016"))),
+        )
+        self._distress_drive_threshold = min(
+            -0.2,
+            max(-2.0, float(os.getenv("HORMONE_DISTRESS_EXPLORATION_DRIVE_THRESHOLD", "-0.82"))),
+        )
+        self._distress_drive_recovery_scale = max(
+            1.0,
+            min(3.0, float(os.getenv("HORMONE_DISTRESS_DRIVE_RECOVERY_SCALE", "1.55"))),
+        )
+        self._outcome_penalty_clip = max(
+            30.0,
+            float(os.getenv("HORMONE_OUTCOME_PENALTY_CLIP", "260.0")),
+        )
+        self._dead_end_penalty_scale = max(
+            0.05,
+            min(1.0, float(os.getenv("HORMONE_DEAD_END_PENALTY_SCALE", "0.30"))),
+        )
+        self._terminal_boxed_penalty_scale = max(
+            0.05,
+            min(1.0, float(os.getenv("HORMONE_TERMINAL_BOXED_PENALTY_SCALE", "0.45"))),
+        )
+        self._repeat_loop_penalty_scale = max(
+            0.05,
+            min(1.0, float(os.getenv("HORMONE_REPEAT_LOOP_PENALTY_SCALE", "0.55"))),
+        )
+        self._distress_persistence_cap = max(
+            0.05,
+            min(0.95, float(os.getenv("HORMONE_DISTRESS_PERSISTENCE_CAP", "0.42"))),
+        )
+        self._distress_persistence_relief_step = max(
+            0.002,
+            min(0.08, float(os.getenv("HORMONE_DISTRESS_PERSISTENCE_RELIEF_STEP", "0.024"))),
+        )
         self._last_decay_step = -1
         self._last_signature_step = -1
+
+    def _edge_damped_delta(self, hormone: Hormone, delta: float) -> float:
+        value = float(hormone.value)
+        d = float(delta)
+        if d > 0.0 and value >= self._saturation_high_start:
+            span = max(1e-6, 1.0 - self._saturation_high_start)
+            proximity = max(0.0, min(1.0, (value - self._saturation_high_start) / span))
+            scale = max(self._saturation_min_scale, 1.0 - proximity)
+            d *= scale
+        elif d < 0.0 and value <= self._saturation_low_end:
+            span = max(1e-6, self._saturation_low_end)
+            proximity = max(0.0, min(1.0, (self._saturation_low_end - value) / span))
+            scale = max(self._saturation_min_scale, 1.0 - proximity)
+            d *= scale
+        return d
+
+    def _update_hormone(self, hormone: Hormone, delta: float) -> None:
+        hormone.update(self._edge_damped_delta(hormone, delta))
+
+    def _exploration_drive(self) -> float:
+        return (
+            self.H_curiosity.value
+            + (0.45 * self.H_confidence.value)
+            + (0.40 * self.H_persistence.value)
+            + (0.35 * self.H_mv_trust.value)
+            - (0.60 * self.H_caution.value)
+            - (0.70 * self.H_boredom.value)
+        )
+
+    def _apply_distress_recovery(self) -> None:
+        if not self._distress_recovery_enable:
+            return
+        exploration_drive = self._exploration_drive()
+        high_distress = (
+            self.H_caution.value >= self._distress_recovery_threshold
+            and self.H_boredom.value >= self._distress_recovery_threshold
+        )
+        drive_locked = (
+            exploration_drive <= self._distress_drive_threshold
+            and self.H_caution.value >= (self._distress_recovery_threshold - 0.08)
+        )
+        if not (high_distress or drive_locked):
+            return
+
+        step = float(self._distress_recovery_step)
+        if drive_locked:
+            step *= float(self._distress_drive_recovery_scale)
+        self._update_hormone(self.H_caution, -step)
+        self._update_hormone(self.H_boredom, -step)
+        self._update_hormone(self.H_curiosity, step)
+        self._update_hormone(self.H_confidence, step * 0.8)
+        self._update_hormone(self.H_mv_trust, step * 0.7)
+        self._update_hormone(self.H_persistence, step * 0.55)
+
+        # Distress loops can over-accumulate persistence and create sticky replay.
+        # Keep persistence bounded while exploration drive remains deeply negative.
+        if (
+            exploration_drive <= self._distress_drive_threshold
+            and self.H_persistence.value > self._distress_persistence_cap
+        ):
+            relief = min(
+                self._distress_persistence_relief_step,
+                self.H_persistence.value - self._distress_persistence_cap,
+            )
+            if relief > 0.0:
+                self._update_hormone(self.H_persistence, -relief)
 
     def tick(self, step_index: int) -> None:
         if int(step_index) == self._last_decay_step:
             return
         self._last_decay_step = int(step_index)
-        for hormone in [self.stress, self.curiosity, self.confidence, self.fatigue, self.reward]:
+        for hormone in [
+            self.H_curiosity,
+            self.H_caution,
+            self.H_persistence,
+            self.H_mv_trust,
+            self.H_boredom,
+            self.H_confidence,
+        ]:
             hormone.tick()
+        self._apply_distress_recovery()
 
     def update_from_signature(self, signature: dict, step_index: int) -> None:
         if int(step_index) == self._last_signature_step:
@@ -94,7 +252,7 @@ class EndocrineSystem:
         transition_pressure = int(signature.get("transition_pressure_bucket", 0) or 0)
         risky_branches = int(signature.get("visible_risky_branches", 0) or 0)
 
-        stress_delta = (
+        caution_delta = (
             (dead_end_risk * 0.035)
             + (min(6, dead_end_depth) * 0.015)
             + (transition_pressure * 0.03)
@@ -102,77 +260,211 @@ class EndocrineSystem:
             + (risky_branches * 0.02)
         )
         if unknown_neighbors == 0:
-            stress_delta += 0.02
+            caution_delta += 0.02
         if frontier_distance >= 3:
-            stress_delta += 0.02
-        self.stress.update(stress_delta)
+            caution_delta += 0.02
+        if unknown_neighbors >= 2 and dead_end_risk == 0:
+            caution_delta -= 0.015
+        self._update_hormone(self.H_caution, caution_delta)
 
         curiosity_delta = (unknown_neighbors * 0.05)
         if frontier_distance <= 1:
             curiosity_delta += 0.04
-        if risky_branches == 0 and unknown_neighbors == 0:
+        if dead_end_risk >= 2:
             curiosity_delta -= 0.03
-        self.curiosity.update(curiosity_delta)
+        if risky_branches == 0 and unknown_neighbors == 0:
+            curiosity_delta -= 0.02
+        self._update_hormone(self.H_curiosity, curiosity_delta)
 
-        fatigue_delta = (visit_bucket * 0.03) + (transition_pressure * 0.035) + (recent_backtrack * 0.04)
+        boredom_delta = (visit_bucket * 0.03) + (transition_pressure * 0.02) + (recent_backtrack * 0.03)
         if unknown_neighbors == 0:
-            fatigue_delta += 0.02
-        self.fatigue.update(fatigue_delta)
+            boredom_delta += 0.03
+        if unknown_neighbors >= 2 or frontier_distance <= 1:
+            boredom_delta -= 0.03
+        self._update_hormone(self.H_boredom, boredom_delta)
+
+        persistence_delta = (transition_pressure * 0.022) + (visit_bucket * 0.01)
+        if unknown_neighbors > 0 and frontier_distance <= 2:
+            persistence_delta += 0.018
+        if recent_backtrack > 0 and unknown_neighbors == 0:
+            persistence_delta -= 0.014
+        if dead_end_risk >= 2:
+            persistence_delta -= 0.01
+        self._update_hormone(self.H_persistence, persistence_delta)
 
         confidence_delta = 0.0
         if dead_end_risk == 0 and unknown_neighbors > 0 and visit_bucket <= 1:
             confidence_delta += 0.03
         if dead_end_risk >= 2 or recent_backtrack > 0:
             confidence_delta -= 0.03
-        self.confidence.update(confidence_delta)
+        if risky_branches >= 2:
+            confidence_delta -= 0.02
+        self._update_hormone(self.H_confidence, confidence_delta)
 
-        reward_delta = 0.0
-        if frontier_distance <= 1:
-            reward_delta += 0.025
-        if unknown_neighbors >= 2:
-            reward_delta += 0.03
+        mv_trust_delta = 0.0
+        if unknown_neighbors > 0 and frontier_distance <= 2 and dead_end_risk <= 1:
+            mv_trust_delta += 0.02
+        if risky_branches == 0 and dead_end_risk == 0:
+            mv_trust_delta += 0.015
+        if recent_backtrack > 0 or dead_end_risk >= 2:
+            mv_trust_delta -= 0.025
         if transition_pressure >= 2:
-            reward_delta -= 0.02
-        self.reward.update(reward_delta)
+            mv_trust_delta -= 0.015
+        self._update_hormone(self.H_mv_trust, mv_trust_delta)
 
     def update_from_outcome(self, outcome_value: float, reward_signal: float, penalty_signal: float, tags: list[str]) -> None:
         outcome = float(outcome_value)
         reward = max(0.0, float(reward_signal))
         penalty = max(0.0, float(penalty_signal))
         tag_set = {str(tag).strip() for tag in tags if str(tag).strip()}
+        has_terminal_or_boxed = bool({"visible_terminal", "boxed_corridor"} & tag_set)
+        has_repeat_loop = bool({"cycle_pair", "transition_repeat", "immediate_backtrack"} & tag_set)
+        has_dead_end_slap = bool({"dead_end_slap", "dead_end_tip_revisit", "dead_end_entrance_revisit"} & tag_set)
+
+        if penalty > 0.0 and has_dead_end_slap:
+            scale = float(self._dead_end_penalty_scale)
+            penalty *= scale
+            if outcome < 0.0:
+                outcome *= scale
+
+        if penalty > 0.0 and has_terminal_or_boxed:
+            scale = float(self._terminal_boxed_penalty_scale)
+            penalty *= scale
+            if outcome < 0.0:
+                outcome *= scale
+
+        if penalty > 0.0 and has_repeat_loop:
+            scale = float(self._repeat_loop_penalty_scale)
+            penalty *= scale
+            if outcome < 0.0:
+                outcome *= scale
+
+        trap_churn = bool({"visible_terminal", "boxed_corridor"} & tag_set) and bool(
+            {"cycle_pair", "transition_repeat", "immediate_backtrack"} & tag_set
+        )
+        if trap_churn and penalty > 0.0:
+            # Repeated terminal/boxed ping-pong can flood endocrine penalties during
+            # rescue windows; damp this channel so hormone state does not lock up.
+            churn_scale = max(
+                0.1,
+                min(1.0, float(os.getenv("HORMONE_TRAP_CHURN_PENALTY_SCALE", "0.35"))),
+            )
+            penalty *= churn_scale
+            if outcome < 0.0:
+                outcome *= churn_scale
+
+        if penalty > self._outcome_penalty_clip:
+            clip = float(self._outcome_penalty_clip)
+            scale = clip / max(1e-6, penalty)
+            penalty = clip
+            if outcome < 0.0:
+                outcome *= scale
 
         if reward > 0.0 or outcome > 0.0:
-            self.reward.update(0.06 + min(0.18, reward / 300.0))
-            self.confidence.update(0.04 + min(0.12, max(0.0, outcome) / 400.0))
-            self.stress.update(-0.05)
-            self.fatigue.update(-0.03)
+            gain = max(reward, max(0.0, outcome))
+            self._update_hormone(self.H_confidence, 0.04 + min(0.12, gain / 380.0))
+            self._update_hormone(self.H_persistence, 0.03 + min(0.10, gain / 460.0))
+            self._update_hormone(self.H_caution, -0.05)
+            self._update_hormone(self.H_boredom, -0.04)
+            self._update_hormone(self.H_mv_trust, 0.02 + min(0.08, gain / 520.0))
             if "novelty_reward" in tag_set or "frontier_visible" in tag_set:
-                self.curiosity.update(0.03)
+                self._update_hormone(self.H_curiosity, 0.035)
         elif penalty > 0.0 or outcome < 0.0:
-            self.stress.update(0.06 + min(0.24, penalty / 260.0))
-            self.fatigue.update(0.05 + min(0.18, penalty / 300.0))
-            self.confidence.update(-(0.05 + min(0.15, penalty / 320.0)))
-            self.reward.update(-0.04)
+            self._update_hormone(self.H_caution, 0.06 + min(0.24, penalty / 260.0))
+            self._update_hormone(self.H_boredom, 0.05 + min(0.18, penalty / 300.0))
+            self._update_hormone(self.H_confidence, -(0.05 + min(0.15, penalty / 320.0)))
+            self._update_hormone(self.H_mv_trust, -(0.04 + min(0.13, penalty / 360.0)))
             if "cycle_pair" in tag_set or "transition_repeat" in tag_set:
-                self.curiosity.update(-0.03)
+                self._update_hormone(self.H_curiosity, -0.02)
+                drive_locked = self._exploration_drive() <= self._distress_drive_threshold
+                high_distress = (
+                    self.H_caution.value >= (self._distress_recovery_threshold - 0.04)
+                    and self.H_boredom.value >= (self._distress_recovery_threshold - 0.04)
+                )
+                if drive_locked or high_distress:
+                    self._update_hormone(self.H_persistence, -0.03)
+                else:
+                    self._update_hormone(self.H_persistence, 0.01)
+            elif penalty > 120.0:
+                self._update_hormone(self.H_persistence, -0.02)
+        self._apply_distress_recovery()
+
+    def sleep_cycle_prune(
+        self,
+        *,
+        decay_passes: int = 2,
+        pull_strength: float = 0.08,
+        extreme_threshold: float = 0.95,
+    ) -> dict[str, int]:
+        passes = max(1, int(decay_passes))
+        pull = max(0.0, min(1.0, float(pull_strength)))
+        extreme = max(0.5, min(0.999, float(extreme_threshold)))
+
+        hormones: list[tuple[str, Hormone]] = [
+            ("H_curiosity", self.H_curiosity),
+            ("H_caution", self.H_caution),
+            ("H_persistence", self.H_persistence),
+            ("H_mv_trust", self.H_mv_trust),
+            ("H_boredom", self.H_boredom),
+            ("H_confidence", self.H_confidence),
+        ]
+
+        def _is_extreme(value: float) -> bool:
+            return value >= extreme or value <= (1.0 - extreme)
+
+        saturated_before = sum(1 for _name, hormone in hormones if _is_extreme(float(hormone.value)))
+
+        for _ in range(passes):
+            for _name, hormone in hormones:
+                hormone.tick()
+
+        if pull > 0.0:
+            for name, hormone in hormones:
+                target = float(self._homeostasis_targets.get(name, hormone.value))
+                hormone.update((target - float(hormone.value)) * pull)
+
+        saturated_after = sum(1 for _name, hormone in hormones if _is_extreme(float(hormone.value)))
+        return {
+            "applied": 1,
+            "passes": int(passes),
+            "saturated_before": int(saturated_before),
+            "saturated_after": int(saturated_after),
+        }
 
     def state(self) -> dict[str, float]:
+        reward_proxy = max(
+            0.0,
+            min(
+                1.0,
+                ((self.H_persistence.value + self.H_confidence.value + self.H_mv_trust.value) / 3.0)
+                - (0.2 * self.H_boredom.value),
+            ),
+        )
         return {
-            "stress": round(self.stress.value, 4),
-            "curiosity": round(self.curiosity.value, 4),
-            "confidence": round(self.confidence.value, 4),
-            "fatigue": round(self.fatigue.value, 4),
-            "reward": round(self.reward.value, 4),
+            "H_curiosity": round(self.H_curiosity.value, 4),
+            "H_caution": round(self.H_caution.value, 4),
+            "H_persistence": round(self.H_persistence.value, 4),
+            "H_mv_trust": round(self.H_mv_trust.value, 4),
+            "H_boredom": round(self.H_boredom.value, 4),
+            "H_confidence": round(self.H_confidence.value, 4),
+            # Legacy aliases kept for backward compatibility while env levers are deprecated.
+            "stress": round(self.H_caution.value, 4),
+            "curiosity": round(self.H_curiosity.value, 4),
+            "confidence": round(self.H_confidence.value, 4),
+            "fatigue": round(self.H_boredom.value, 4),
+            "reward": round(reward_proxy, 4),
         }
 
     def neural_state(self) -> dict[str, float]:
-        exploration_drive = (self.curiosity.value + self.reward.value) - self.fatigue.value
-        risk_aversion = self.stress.value - self.confidence.value
-        momentum = (self.reward.value + self.confidence.value) - (0.5 * self.stress.value)
+        exploration_drive = self._exploration_drive()
+        risk_aversion = self.H_caution.value - (0.55 * self.H_confidence.value) + (0.22 * self.H_boredom.value)
+        momentum = self.H_persistence.value + (0.45 * self.H_confidence.value) - (0.35 * self.H_boredom.value)
+        mv_reliance = self.H_mv_trust.value - (0.40 * self.H_caution.value) + (0.20 * self.H_confidence.value)
         return {
             "exploration_drive": round(exploration_drive, 4),
             "risk_aversion": round(risk_aversion, 4),
             "momentum": round(momentum, 4),
+            "mv_reliance": round(mv_reliance, 4),
         }
 
 
@@ -230,6 +522,23 @@ class AIAssistantApp:
         self.adaptive_replay_enable = os.getenv("ADAPTIVE_REPLAY_ENABLE", "1") == "1"
         self.adaptive_replay_batch = max(1, int(os.getenv("ADAPTIVE_REPLAY_BATCH", "6")))
         self.adaptive_replay_updates = max(1, int(os.getenv("ADAPTIVE_REPLAY_UPDATES", "2")))
+        self.adaptive_progress_report_enable = os.getenv("ADAPTIVE_PROGRESS_REPORT_ENABLE", "1") == "1"
+        self.adaptive_progress_report_model = os.getenv("ADAPTIVE_PROGRESS_REPORT_MODEL", self.logic_model)
+        self.adaptive_progress_report_interval_steps = max(
+            30,
+            int(os.getenv("ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS", "180")),
+        )
+        self.adaptive_progress_auto_tune = os.getenv("ADAPTIVE_PROGRESS_AUTO_TUNE", "1") == "1"
+        self.adaptive_progress_report_max_notes_chars = max(
+            120,
+            int(os.getenv("ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS", "260")),
+        )
+        self._last_adaptive_progress_report_step = -1
+        self._adaptive_progress_report_inflight = False
+        self.adaptive_progress_last_feedback_summary = ""
+        self.adaptive_progress_last_feedback_step = -1
+        self.adaptive_progress_last_autotune_summary = ""
+        self.adaptive_progress_last_error = ""
         self._adaptive_replay: deque[tuple[list[float], float]] = deque(
             maxlen=max(64, int(os.getenv("ADAPTIVE_REPLAY_BUFFER_SIZE", "6000")))
         )
@@ -325,6 +634,20 @@ class AIAssistantApp:
         self.prediction_context_contradiction_debt: dict[str, float] = {}
         self.mental_sweep_cells: dict[tuple[int, int], str] = {}
         self._last_saved_structural_signature = ""
+        self._last_structural_snapshot_step = -10_000
+        self.structural_memory_snapshot_interval_steps = max(
+            1,
+            int(os.getenv("STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS", "6")),
+        )
+        self.structural_memory_max_rows = max(
+            0,
+            int(os.getenv("STRUCTURAL_MEMORY_MAX_ROWS", "12000")),
+        )
+        self.memory_viewer_refresh_interval_steps = max(
+            1,
+            int(os.getenv("MEMORY_VIEWER_REFRESH_INTERVAL_STEPS", "8")),
+        )
+        self._last_memory_viewer_refresh_step = -10_000
         self._last_saved_layout_cell_signature = ""
         self.layout_recall_last_map_id = -1
         self.layout_recall_last_restored = 0
@@ -430,6 +753,26 @@ class AIAssistantApp:
             0.0,
             float(os.getenv("PREDICTION_SHAPE_SCORE_WEIGHT", "0.65")),
         )
+        self.prediction_contradiction_local_scale = max(
+            0.0,
+            float(os.getenv("PREDICTION_CONTRADICTION_LOCAL_SCALE", "0.30")),
+        )
+        self.prediction_contradiction_context_scale = max(
+            0.0,
+            float(os.getenv("PREDICTION_CONTRADICTION_CONTEXT_SCALE", "0.22")),
+        )
+        self.prediction_contradiction_max_suppression = min(
+            0.98,
+            max(0.0, float(os.getenv("PREDICTION_CONTRADICTION_MAX_SUPPRESSION", "0.94"))),
+        )
+        self.prediction_contradiction_verification_trigger = max(
+            0.0,
+            float(os.getenv("PREDICTION_CONTRADICTION_VERIFICATION_TRIGGER", "0.85")),
+        )
+        self.prediction_context_contradiction_verification_trigger = max(
+            0.0,
+            float(os.getenv("PREDICTION_CONTEXT_CONTRADICTION_VERIFICATION_TRIGGER", "0.75")),
+        )
         self.prediction_shape_require_observability = os.getenv("PREDICTION_SHAPE_REQUIRE_OBSERVABILITY", "1") == "1"
         self.prediction_shape_observability_min_neighbors = max(
             1,
@@ -466,6 +809,8 @@ class AIAssistantApp:
         self.prediction_shape_brier_total = 0.0
         self._prediction_context_stats_cache: dict[str, dict[str, float]] = {}
         self._prediction_context_trust_cache: dict[str, float] = {}
+        self.machine_vision_master_enable = os.getenv("MACHINE_VISION_ENABLE", "1") == "1"
+        self.machine_vision_master_enable_var = tk.BooleanVar(value=self.machine_vision_master_enable)
         self.machine_vision_player_localization_enable = os.getenv(
             "MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE",
             "1",
@@ -510,6 +855,99 @@ class AIAssistantApp:
             0.0,
             float(os.getenv("MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT", "3.0")),
         )
+        self.mv_bootstrap_route_enable = os.getenv("MV_BOOTSTRAP_ROUTE_ENABLE", "1") == "1"
+        self.mv_bootstrap_self_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MV_BOOTSTRAP_SELF_MIN_CONF", "0.9"))),
+        )
+        self.mv_bootstrap_exit_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MV_BOOTSTRAP_EXIT_MIN_CONF", "0.9"))),
+        )
+        self.mv_bootstrap_max_self_error = max(
+            0,
+            int(os.getenv("MV_BOOTSTRAP_MAX_SELF_ERROR", "1")),
+        )
+        self.mv_preplan_sweep_enable = os.getenv("MV_PREPLAN_SWEEP_ENABLE", "1") == "1"
+        self.mv_preplan_require_exit = os.getenv("MV_PREPLAN_REQUIRE_EXIT", "1") == "1"
+        self.mv_preplan_self_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MV_PREPLAN_SELF_MIN_CONF", "0.9"))),
+        )
+        self.mv_preplan_exit_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MV_PREPLAN_EXIT_MIN_CONF", "0.9"))),
+        )
+        self.mv_preplan_max_self_error = max(
+            0,
+            int(os.getenv("MV_PREPLAN_MAX_SELF_ERROR", "1")),
+        )
+        self.mv_preplan_acquire_max_sweeps = max(
+            1,
+            int(os.getenv("MV_PREPLAN_ACQUIRE_MAX_SWEEPS", "6")),
+        )
+        self._mv_preplan_last_status = "idle"
+        self._mv_preplan_no_sweep_wait_streak = 0
+        self.machine_vision_cellmap_init_enable = os.getenv("MACHINE_VISION_CELLMAP_INIT_ENABLE", "1") == "1"
+        self.machine_vision_cellmap_overlay_enable = os.getenv("MACHINE_VISION_CELLMAP_OVERLAY_ENABLE", "1") == "1"
+        self.machine_vision_cellmap_overlay_show_text = os.getenv("MACHINE_VISION_CELLMAP_OVERLAY_SHOW_TEXT", "1") == "1"
+        self.machine_vision_cellmap_force_ready = os.getenv("MACHINE_VISION_CELLMAP_FORCE_READY", "1") == "1"
+        self.machine_vision_cellmap_min_confidence = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_CELLMAP_MIN_CONFIDENCE", "0.9"))),
+        )
+        self.machine_vision_cellmap_kernel_hint_enable = os.getenv(
+            "MACHINE_VISION_CELLMAP_KERNEL_HINT_ENABLE",
+            "1",
+        ) == "1"
+        self.machine_vision_cellmap_kernel_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_CELLMAP_KERNEL_MIN_CONF", "0.75"))),
+        )
+        self.machine_vision_cellmap_kernel_bias_weight = max(
+            0.0,
+            float(os.getenv("MACHINE_VISION_CELLMAP_KERNEL_BIAS_WEIGHT", "10.0")),
+        )
+        self.mv_route_planning_mode_enable = os.getenv("MV_ROUTE_PLANNING_MODE_ENABLE", "0") == "1"
+        self.mv_route_planning_mode_var = tk.BooleanVar(value=self.mv_route_planning_mode_enable)
+        self.machine_vision_cellmap_min_accuracy = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_CELLMAP_MIN_ACCURACY", "1.0"))),
+        )
+        self.machine_vision_cellmap_min_confident_accuracy = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_CELLMAP_MIN_CONFIDENT_ACCURACY", "1.0"))),
+        )
+        self.machine_vision_cellmap_refine_passes_per_check = max(
+            1,
+            int(os.getenv("MACHINE_VISION_CELLMAP_REFINE_PASSES_PER_CHECK", "1")),
+        )
+        self.machine_vision_cellmap_refine_passes = 0
+        self.machine_vision_cellmap_predictions: dict[tuple[int, int], dict[str, object]] = {}
+        self.machine_vision_cellmap_layout_id = -1
+        self.machine_vision_cellmap_ready = False
+        self.machine_vision_cellmap_status = "idle"
+        self.machine_vision_cellmap_grade: dict[str, float | int] = {
+            "total": 0,
+            "confident": 0,
+            "correct": 0,
+            "confident_correct": 0,
+            "forced": 0,
+            "accuracy": 0.0,
+            "confident_accuracy": 0.0,
+            "avg_confidence": 0.0,
+            "avg_brier": 0.0,
+            "refine_passes": 0,
+        }
+        self._machine_vision_cellmap_grade_dirty = True
+        self.machine_vision_beam_equivalent_min_conf = min(
+            1.0,
+            max(0.0, float(os.getenv("MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF", "0.9"))),
+        )
+        self.machine_vision_beam_equivalent_max_self_error = max(
+            0,
+            int(os.getenv("MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR", "1")),
+        )
         self.machine_vision_recent_results: deque[dict[str, object]] = deque(maxlen=80)
         self.machine_vision_signature_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
         self.machine_vision_global_cell_counts: dict[tuple[int, int], int] = {}
@@ -524,6 +962,8 @@ class AIAssistantApp:
             "exact": False,
             "manhattan_error": 0,
             "source": "none",
+            "maze_layout_id": -1,
+            "step_index": -1,
         }
         self._machine_vision_last_sample_key: tuple[int, int, int, str, str] | None = None
         self._machine_vision_rng = random.Random(self.maze_seed_base + 7919)
@@ -542,6 +982,8 @@ class AIAssistantApp:
             "exact": False,
             "manhattan_error": 0,
             "source": "none",
+            "maze_layout_id": -1,
+            "step_index": -1,
         }
         self._machine_vision_exit_last_sample_key: tuple[int, int, int, int] | None = None
         self._machine_vision_exit_rng = random.Random(self.maze_seed_base + 104729)
@@ -552,6 +994,80 @@ class AIAssistantApp:
         self.endocrine_fatigue_repeat_weight = float(os.getenv("ENDOCRINE_FATIGUE_REPEAT_WEIGHT", "10.0"))
         self.endocrine_confidence_risk_bonus = float(os.getenv("ENDOCRINE_CONFIDENCE_RISK_BONUS", "8.0"))
         self.endocrine_momentum_bonus_weight = float(os.getenv("ENDOCRINE_MOMENTUM_BONUS_WEIGHT", "6.0"))
+        self.hormone_legacy_weight_blend = min(
+            1.0,
+            max(0.0, float(os.getenv("HORMONE_LEGACY_WEIGHT_BLEND", "0.35"))),
+        )
+        self.hormone_legacy_batch_level = min(
+            4,
+            max(0, int(os.getenv("HORMONE_LEGACY_BATCH_LEVEL", "1"))),
+        )
+        self.objective_override_phase_level = min(
+            4,
+            max(
+                0,
+                int(
+                    os.getenv(
+                        "OBJECTIVE_OVERRIDE_PHASE_LEVEL",
+                        str(self.hormone_legacy_batch_level),
+                    )
+                ),
+            ),
+        )
+        # Staged attenuation for hardcoded planner override channels.
+        # 0=legacy behavior, 4=maximum suppression of forced override paths.
+        self.hard_override_phase_level = min(
+            4,
+            max(0, int(os.getenv("HARD_OVERRIDE_PHASE_LEVEL", "0"))),
+        )
+        # Optional: consolidate objective + hard-override phase controls.
+        # When set (0..4), this value drives both phase tracks.
+        self.consolidated_override_phase_level = max(
+            -1,
+            min(4, int(os.getenv("CONSOLIDATED_OVERRIDE_PHASE_LEVEL", "-1"))),
+        )
+        if self.consolidated_override_phase_level >= 0:
+            self.objective_override_phase_level = int(self.consolidated_override_phase_level)
+            self.hard_override_phase_level = int(self.consolidated_override_phase_level)
+        phase2_soft_default = "1" if int(self.hard_override_phase_level) >= 2 else "0"
+        self.phase2_soft_override_enable = os.getenv("PHASE2_SOFT_OVERRIDE_ENABLE", phase2_soft_default) == "1"
+        self.phase2_frontier_lock_influence = max(
+            0,
+            int(os.getenv("PHASE2_FRONTIER_LOCK_INFLUENCE", "22")),
+        )
+        self.phase2_persistent_frontier_influence = max(
+            0,
+            int(os.getenv("PHASE2_PERSISTENT_FRONTIER_INFLUENCE", "16")),
+        )
+        self.phase2_verification_influence = max(
+            0,
+            int(os.getenv("PHASE2_VERIFICATION_INFLUENCE", "14")),
+        )
+        self.phase2_plan_hold_influence = max(
+            0,
+            int(os.getenv("PHASE2_PLAN_HOLD_INFLUENCE", "12")),
+        )
+        self.hormone_dynamic_legacy_enable = os.getenv("HORMONE_DYNAMIC_LEGACY_ENABLE", "1") == "1"
+        self.hormone_dynamic_legacy_loop_center = max(
+            -1.0,
+            min(1.0, float(os.getenv("HORMONE_DYNAMIC_LEGACY_LOOP_CENTER", "0.10"))),
+        )
+        self.hormone_dynamic_legacy_loop_gain = max(
+            0.1,
+            float(os.getenv("HORMONE_DYNAMIC_LEGACY_LOOP_GAIN", "2.8")),
+        )
+        self.hormone_dynamic_legacy_batch12_suppression_max = min(
+            1.0,
+            max(0.0, float(os.getenv("HORMONE_DYNAMIC_LEGACY_BATCH12_SUPPRESSION_MAX", "1.0"))),
+        )
+        self.hormone_caution_danger_weight = float(os.getenv("HORMONE_CAUTION_DANGER_WEIGHT", "18.0"))
+        self.hormone_curiosity_novelty_weight = float(
+            os.getenv("HORMONE_CURIOSITY_NOVELTY_WEIGHT", os.getenv("HORMONE_CURIOUSITY_NOVELTY_WEIGHT", "14.0"))
+        )
+        self.hormone_boredom_repeat_weight = float(os.getenv("HORMONE_BOREDOM_REPEAT_WEIGHT", "10.0"))
+        self.hormone_confidence_risk_bonus = float(os.getenv("HORMONE_CONFIDENCE_RISK_BONUS", "8.0"))
+        self.hormone_momentum_bonus_weight = float(os.getenv("HORMONE_MOMENTUM_BONUS_WEIGHT", "6.0"))
+        self.hormone_mv_trust_bonus_weight = float(os.getenv("HORMONE_MV_TRUST_BONUS_WEIGHT", "9.0"))
         self.endocrine_event_log: deque[str] = deque(maxlen=160)
         self._last_endocrine_trace_step = -1
         self.organism_control_enable = os.getenv("ORGANISM_CONTROL_ENABLE", "1") == "1"
@@ -585,13 +1101,65 @@ class AIAssistantApp:
             0, int(os.getenv("BIO_NAV_DEAD_END_PREDICTIVE_PENALTY", "16"))
         )
         self.bio_nav_loop_risk_penalty = max(0, int(os.getenv("BIO_NAV_LOOP_RISK_PENALTY", "12")))
-        self.memory_event_log: deque[str] = deque(maxlen=1200)
-        self.memory_export_section_limit = max(1, int(os.getenv("MEMORY_EXPORT_SECTION_LIMIT", "6")))
-        self.memory_export_log_limit = max(20, int(os.getenv("MEMORY_EXPORT_LOG_LIMIT", "240")))
-        self.memory_export_debug_limit = max(20, int(os.getenv("MEMORY_EXPORT_DEBUG_LIMIT", "180")))
-        self.memory_export_ascii_max_lines = max(6, int(os.getenv("MEMORY_EXPORT_ASCII_MAX_LINES", "12")))
+        self.memory_event_log_maxlen = max(1200, int(os.getenv("MEMORY_EVENT_LOG_MAXLEN", "6000")))
+        self.memory_event_log: deque[str] = deque(maxlen=self.memory_event_log_maxlen)
+        # Export limits: 0 means no truncation (full batch dump).
+        self.memory_export_section_limit = max(0, int(os.getenv("MEMORY_EXPORT_SECTION_LIMIT", "300")))
+        self.memory_export_log_limit = max(0, int(os.getenv("MEMORY_EXPORT_LOG_LIMIT", "2000")))
+        self.memory_export_debug_limit = max(0, int(os.getenv("MEMORY_EXPORT_DEBUG_LIMIT", "3000")))
+        self.memory_export_ascii_max_lines = max(0, int(os.getenv("MEMORY_EXPORT_ASCII_MAX_LINES", "220")))
         self.memory_export_strip_look_sections = os.getenv("MEMORY_EXPORT_STRIP_LOOK_SECTIONS", "1") == "1"
+        # When enabled, ASCII snapshots are cropped to observed/visible regions and
+        # hidden cells are not emitted as dense '?' fields.
+        self.maze_ascii_visible_only = os.getenv("MAZE_ASCII_VISIBLE_ONLY", "0") == "1"
         self.memory_step_index = 0
+        self.sleep_cycle_enable = os.getenv("SLEEP_CYCLE_ENABLE", "1") == "1"
+        self.sleep_cycle_auto_interval_steps = max(
+            0,
+            int(os.getenv("SLEEP_CYCLE_AUTO_INTERVAL_STEPS", "0")),
+        )
+        self.sleep_cycle_auto_after_maze_completion = (
+            os.getenv("SLEEP_CYCLE_AUTO_AFTER_MAZE_COMPLETION", "1") == "1"
+        )
+        self.sleep_cycle_auto_after_run_set = os.getenv("SLEEP_CYCLE_AUTO_AFTER_RUN_SET", "1") == "1"
+        self.sleep_cycle_auto_after_log_dump = os.getenv("SLEEP_CYCLE_AUTO_AFTER_LOG_DUMP", "1") == "1"
+        self.sleep_cycle_hormone_prune_enable = os.getenv("SLEEP_CYCLE_HORMONE_PRUNE_ENABLE", "1") == "1"
+        self.sleep_cycle_hormone_decay_passes = max(
+            1,
+            int(os.getenv("SLEEP_CYCLE_HORMONE_DECAY_PASSES", "2")),
+        )
+        self.sleep_cycle_hormone_pull_strength = min(
+            1.0,
+            max(0.0, float(os.getenv("SLEEP_CYCLE_HORMONE_PULL_STRENGTH", "0.08"))),
+        )
+        self.sleep_cycle_hormone_extreme_threshold = min(
+            0.999,
+            max(0.5, float(os.getenv("SLEEP_CYCLE_HORMONE_EXTREME_THRESHOLD", "0.95"))),
+        )
+        self.sleep_cycle_usage_boost = max(0.0, float(os.getenv("SLEEP_CYCLE_USAGE_BOOST", "0.04")))
+        self.sleep_cycle_usage_recent_window_steps = max(
+            8,
+            int(os.getenv("SLEEP_CYCLE_USAGE_RECENT_WINDOW_STEPS", "96")),
+        )
+        self.sleep_cycle_memory_event_keep = max(
+            200,
+            int(os.getenv("SLEEP_CYCLE_MEMORY_EVENT_KEEP", "1400")),
+        )
+        self.sleep_cycle_endocrine_event_keep = max(
+            80,
+            int(os.getenv("SLEEP_CYCLE_ENDOCRINE_EVENT_KEEP", "240")),
+        )
+        self.sleep_cycle_action_outcome_keep_rows = max(
+            0,
+            int(os.getenv("SLEEP_CYCLE_ACTION_OUTCOME_KEEP_ROWS", "120000")),
+        )
+        self.sleep_cycle_prediction_keep_rows = max(
+            0,
+            int(os.getenv("SLEEP_CYCLE_PREDICTION_KEEP_ROWS", "160000")),
+        )
+        self.sleep_cycle_vacuum_on_manual = os.getenv("SLEEP_CYCLE_VACUUM_ON_MANUAL", "0") == "1"
+        self.sleep_cycle_vacuum_on_auto = os.getenv("SLEEP_CYCLE_VACUUM_ON_AUTO", "0") == "1"
+        self._last_sleep_cycle_step = -10_000
         self.stm_reinforce_alpha = float(os.getenv("STM_REINFORCE_ALPHA", "0.2"))
         self.stm_decay_rate = float(os.getenv("STM_DECAY_RATE", "0.97"))
         self.stm_prune_threshold = float(os.getenv("STM_PRUNE_THRESHOLD", "0.15"))
@@ -688,6 +1256,39 @@ class AIAssistantApp:
             0,
             int(os.getenv("FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN", "120")),
         )
+        self.hazard_preparedness_enable = os.getenv("HAZARD_PREPAREDNESS_ENABLE", "1") == "1"
+        self.hazard_preparedness_window = max(
+            8,
+            int(os.getenv("HAZARD_PREPAREDNESS_WINDOW", "28")),
+        )
+        self.hazard_preparedness_min_samples = max(
+            1,
+            int(os.getenv("HAZARD_PREPAREDNESS_MIN_SAMPLES", "2")),
+        )
+        self.hazard_preparedness_rank_decay = max(
+            0.1,
+            float(os.getenv("HAZARD_PREPAREDNESS_RANK_DECAY", "0.7")),
+        )
+        self.hazard_preparedness_penalty_scale = max(
+            0.0,
+            float(os.getenv("HAZARD_PREPAREDNESS_PENALTY_SCALE", "0.16")),
+        )
+        self.hazard_preparedness_max_penalty = max(
+            0,
+            int(os.getenv("HAZARD_PREPAREDNESS_MAX_PENALTY", "120")),
+        )
+        self.hazard_preparedness_reward_relief_scale = max(
+            0.0,
+            float(os.getenv("HAZARD_PREPAREDNESS_REWARD_RELIEF_SCALE", "0.85")),
+        )
+        self.hazard_preparedness_risk_hit_weight = max(
+            0.0,
+            float(os.getenv("HAZARD_PREPAREDNESS_RISK_HIT_WEIGHT", "16.0")),
+        )
+        self.hazard_preparedness_safe_hit_weight = max(
+            0.0,
+            float(os.getenv("HAZARD_PREPAREDNESS_SAFE_HIT_WEIGHT", "12.0")),
+        )
         self.frontier_lock_force_score_guard_enable = os.getenv("FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE", "1") == "1"
         self.frontier_lock_force_score_margin = max(
             0,
@@ -703,14 +1304,207 @@ class AIAssistantApp:
         self.cycle_transition_penalty_weight = float(os.getenv("CYCLE_TRANSITION_PENALTY_WEIGHT", "26.0"))
         self.cycle_pair_penalty_weight = float(os.getenv("CYCLE_PAIR_PENALTY_WEIGHT", "34.0"))
         self.cycle_guard_score_margin = int(os.getenv("CYCLE_GUARD_SCORE_MARGIN", "10"))
+        self.anti_oscillation_soft_enable = os.getenv("ANTI_OSCILLATION_SOFT_ENABLE", "1") == "1"
+        self.anti_oscillation_soft_penalty = max(
+            0,
+            int(os.getenv("ANTI_OSCILLATION_SOFT_PENALTY", "12")),
+        )
+        self.anti_oscillation_soft_frontier_bonus = max(
+            0,
+            int(os.getenv("ANTI_OSCILLATION_SOFT_FRONTIER_BONUS", "4")),
+        )
+        self.anti_oscillation_soft_margin = max(
+            0,
+            int(os.getenv("ANTI_OSCILLATION_SOFT_MARGIN", "6")),
+        )
+        self.anti_oscillation_soft_repeat_boost = max(
+            0,
+            int(os.getenv("ANTI_OSCILLATION_SOFT_REPEAT_BOOST", "8")),
+        )
+        self.anti_oscillation_soft_hazard_boost = max(
+            0,
+            int(os.getenv("ANTI_OSCILLATION_SOFT_HAZARD_BOOST", "6")),
+        )
         self.visible_terminal_end_penalty = int(os.getenv("VISIBLE_TERMINAL_END_PENALTY", "40"))
         self.terminal_end_guard_margin = int(os.getenv("TERMINAL_END_GUARD_MARGIN", "8"))
         self.terminal_end_hard_avoid = os.getenv("TERMINAL_END_HARD_AVOID", "1") == "1"
         self.boxed_corridor_no_exit_penalty = int(os.getenv("BOXED_CORRIDOR_NO_EXIT_PENALTY", "60"))
+        self.memory_risk_replay_guard_enable = os.getenv("MEMORY_RISK_REPLAY_GUARD_ENABLE", "1") == "1"
+        self.memory_risk_replay_guard_min_repeat = max(
+            1,
+            int(os.getenv("MEMORY_RISK_REPLAY_GUARD_MIN_REPEAT", "2")),
+        )
+        self.memory_risk_replay_guard_decay_threshold = max(
+            0.0,
+            float(os.getenv("MEMORY_RISK_REPLAY_GUARD_DECAY_THRESHOLD", "120.0")),
+        )
+        self.memory_risk_replay_guard_score_margin = max(
+            0,
+            int(os.getenv("MEMORY_RISK_REPLAY_GUARD_SCORE_MARGIN", "90")),
+        )
+        self.memory_risk_replay_guard_max_detour = max(
+            0,
+            int(os.getenv("MEMORY_RISK_REPLAY_GUARD_MAX_DETOUR", "1")),
+        )
         self.visible_exit_corridor_reward = int(os.getenv("VISIBLE_EXIT_CORRIDOR_REWARD", "42"))
         self.frontier_override_score_margin = int(os.getenv("FRONTIER_OVERRIDE_SCORE_MARGIN", "6"))
         self.no_progress_repeat_penalty = int(os.getenv("NO_PROGRESS_REPEAT_PENALTY", "22"))
         self.loop_commitment_penalty = int(os.getenv("LOOP_COMMITMENT_PENALTY", "28"))
+        self.adaptive_guard_enable = os.getenv("ADAPTIVE_GUARD_ENABLE", "1") == "1"
+        adaptive_guard_strength_init = max(
+            0.05,
+            min(1.0, float(os.getenv("ADAPTIVE_GUARD_LEGACY_STRENGTH_INIT", "1.0"))),
+        )
+        self.adaptive_guard_legacy_strength_init = adaptive_guard_strength_init
+        self.adaptive_guard_legacy_strength = adaptive_guard_strength_init
+        self.adaptive_guard_legacy_min_strength = max(
+            0.05,
+            min(1.0, float(os.getenv("ADAPTIVE_GUARD_LEGACY_MIN_STRENGTH", "0.25"))),
+        )
+        if self.adaptive_guard_legacy_strength < self.adaptive_guard_legacy_min_strength:
+            self.adaptive_guard_legacy_strength = self.adaptive_guard_legacy_min_strength
+        if self.adaptive_guard_legacy_strength_init < self.adaptive_guard_legacy_min_strength:
+            self.adaptive_guard_legacy_strength_init = self.adaptive_guard_legacy_min_strength
+        self.adaptive_guard_learn_rate = max(
+            0.0,
+            min(0.5, float(os.getenv("ADAPTIVE_GUARD_LEARN_RATE", "0.045"))),
+        )
+        self.adaptive_guard_ema_decay = max(
+            0.5,
+            min(0.999, float(os.getenv("ADAPTIVE_GUARD_EMA_DECAY", "0.94"))),
+        )
+        self.adaptive_guard_utility_target = max(
+            0.05,
+            min(0.95, float(os.getenv("ADAPTIVE_GUARD_UTILITY_TARGET", "0.58"))),
+        )
+        self.adaptive_guard_intervention_target = max(
+            0.02,
+            min(0.95, float(os.getenv("ADAPTIVE_GUARD_INTERVENTION_TARGET", "0.28"))),
+        )
+        self.adaptive_guard_penalty_floor = max(
+            0.0,
+            float(os.getenv("ADAPTIVE_GUARD_PENALTY_FLOOR", "18.0")),
+        )
+        self.adaptive_guard_budget_window = max(
+            8,
+            int(os.getenv("ADAPTIVE_GUARD_BUDGET_WINDOW", "18")),
+        )
+        self.adaptive_guard_budget_base = max(
+            1,
+            int(os.getenv("ADAPTIVE_GUARD_BUDGET_BASE", "6")),
+        )
+        self.adaptive_guard_hysteresis_steps = max(
+            0,
+            int(os.getenv("ADAPTIVE_GUARD_HYSTERESIS_STEPS", "3")),
+        )
+        self.long_run_runtime_normalize_enable = os.getenv("LONG_RUN_RUNTIME_NORMALIZE_ENABLE", "1") == "1"
+        self.long_run_runtime_guard_blend = max(
+            0.0,
+            min(1.0, float(os.getenv("LONG_RUN_RUNTIME_GUARD_BLEND", "0.22"))),
+        )
+        self.micro_frontier_stall_enable = os.getenv("MICRO_FRONTIER_STALL_ENABLE", "1") == "1"
+        self.micro_frontier_stall_window_steps = max(
+            2,
+            int(os.getenv("MICRO_FRONTIER_STALL_WINDOW_STEPS", "4")),
+        )
+        self.micro_frontier_stall_unknown_max = max(
+            1,
+            int(os.getenv("MICRO_FRONTIER_STALL_UNKNOWN_MAX", "2")),
+        )
+        self.micro_frontier_stall_frontier_max = max(
+            1,
+            int(os.getenv("MICRO_FRONTIER_STALL_FRONTIER_MAX", "3")),
+        )
+        self.micro_frontier_stall_include_closure_pockets = (
+            os.getenv("MICRO_FRONTIER_STALL_INCLUDE_CLOSURE_POCKETS", "1") == "1"
+        )
+        self.micro_frontier_stall_no_progress_min = max(
+            2,
+            int(os.getenv("MICRO_FRONTIER_STALL_NO_PROGRESS_MIN", "8")),
+        )
+        self.micro_frontier_stall_repeat_min = max(
+            1,
+            int(os.getenv("MICRO_FRONTIER_STALL_REPEAT_MIN", "1")),
+        )
+        self.micro_frontier_stall_escape_no_progress_min = max(
+            6,
+            int(os.getenv("MICRO_FRONTIER_STALL_ESCAPE_NO_PROGRESS_MIN", "18")),
+        )
+        self.micro_frontier_stall_escape_repeat_min = max(
+            1,
+            int(os.getenv("MICRO_FRONTIER_STALL_ESCAPE_REPEAT_MIN", "2")),
+        )
+        self.micro_frontier_stall_escape_score_margin = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_ESCAPE_SCORE_MARGIN", "24")),
+        )
+        self.micro_frontier_stall_escape_emergency_no_progress_delta = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_ESCAPE_EMERGENCY_NO_PROGRESS_DELTA", "8")),
+        )
+        self.micro_frontier_stall_disambiguation_enable = (
+            os.getenv("MICRO_FRONTIER_STALL_DISAMBIGUATION_ENABLE", "1") == "1"
+        )
+        self.micro_frontier_stall_disambiguation_no_progress_cap = max(
+            8,
+            int(os.getenv("MICRO_FRONTIER_STALL_DISAMBIGUATION_NO_PROGRESS_CAP", "32")),
+        )
+        self.micro_frontier_stall_disambiguation_streak_cap = max(
+            2,
+            int(os.getenv("MICRO_FRONTIER_STALL_DISAMBIGUATION_STREAK_CAP", "10")),
+        )
+        self.micro_frontier_stall_disambiguation_min_repeat = max(
+            1,
+            int(os.getenv("MICRO_FRONTIER_STALL_DISAMBIGUATION_MIN_REPEAT", "2")),
+        )
+        self.micro_frontier_stall_disambiguation_cooldown_steps = max(
+            1,
+            int(os.getenv("MICRO_FRONTIER_STALL_DISAMBIGUATION_COOLDOWN_STEPS", "18")),
+        )
+        self.micro_frontier_stall_score_escape_bonus_scale = max(
+            0.0,
+            float(os.getenv("MICRO_FRONTIER_STALL_SCORE_ESCAPE_BONUS_SCALE", "1.0")),
+        )
+        self.micro_frontier_stall_score_loop_penalty_scale = max(
+            0.0,
+            float(os.getenv("MICRO_FRONTIER_STALL_SCORE_LOOP_PENALTY_SCALE", "1.0")),
+        )
+        self.micro_frontier_stall_score_max_bonus = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_SCORE_MAX_BONUS", "54")),
+        )
+        self.micro_frontier_stall_score_max_penalty = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_SCORE_MAX_PENALTY", "46")),
+        )
+        self.long_loop_escape_enable = os.getenv("LONG_LOOP_ESCAPE_ENABLE", "1") == "1"
+        self.long_loop_escape_no_progress_min = max(
+            12,
+            int(os.getenv("LONG_LOOP_ESCAPE_NO_PROGRESS_MIN", "48")),
+        )
+        self.long_loop_escape_repeat_min = max(
+            1,
+            int(os.getenv("LONG_LOOP_ESCAPE_REPEAT_MIN", "1")),
+        )
+        self.long_loop_escape_score_margin = max(
+            0,
+            int(os.getenv("LONG_LOOP_ESCAPE_SCORE_MARGIN", "36")),
+        )
+        self.long_loop_escape_min_unknown = max(
+            0,
+            int(os.getenv("LONG_LOOP_ESCAPE_MIN_UNKNOWN", "3")),
+        )
+        self.long_loop_escape_emergency_no_progress_delta = max(
+            0,
+            int(os.getenv("LONG_LOOP_ESCAPE_EMERGENCY_NO_PROGRESS_DELTA", "16")),
+        )
+        self.adaptive_guard_recent_interventions: deque[int] = deque(maxlen=self.adaptive_guard_budget_window)
+        self.guard_intervention_ema = 0.0
+        self.guard_utility_ema = 0.5
+        self.guard_penalty_ema = 0.0
+        self.adaptive_guard_escape_lock_move = ""
+        self.adaptive_guard_escape_lock_steps = 0
+        self.adaptive_guard_escape_lock_repeat_floor = 0
         self.immediate_backtrack_hard_penalty = int(os.getenv("IMMEDIATE_BACKTRACK_HARD_PENALTY", "52"))
         self.transition_pressure_repeat_penalty_weight = int(
             os.getenv("TRANSITION_PRESSURE_REPEAT_PENALTY_WEIGHT", "9")
@@ -733,6 +1527,60 @@ class AIAssistantApp:
         self.long_trap_memory_max_hits = max(
             1,
             int(os.getenv("LONG_TRAP_MEMORY_MAX_HITS", "8")),
+        )
+        self.spatial_memory_enable = os.getenv("SPATIAL_MEMORY_ENABLE", "1") == "1"
+        self.spatial_transition_learning_rate = max(
+            0.02,
+            min(0.9, float(os.getenv("SPATIAL_TRANSITION_LEARNING_RATE", "0.18"))),
+        )
+        self.spatial_transition_reward_scale = max(
+            12.0,
+            float(os.getenv("SPATIAL_TRANSITION_REWARD_SCALE", "120.0")),
+        )
+        self.spatial_transition_sample_saturation = max(
+            2.0,
+            float(os.getenv("SPATIAL_TRANSITION_SAMPLE_SATURATION", "18.0")),
+        )
+        self.spatial_transition_decay_steps = max(
+            16,
+            int(os.getenv("SPATIAL_TRANSITION_DECAY_STEPS", "260")),
+        )
+        self.spatial_transition_max_bias = max(
+            0,
+            int(os.getenv("SPATIAL_TRANSITION_MAX_BIAS", "68")),
+        )
+        self.spatial_branch_lookahead_depth = max(
+            1,
+            int(os.getenv("SPATIAL_BRANCH_LOOKAHEAD_DEPTH", "3")),
+        )
+        self.spatial_branch_risk_weight = max(
+            0.0,
+            float(os.getenv("SPATIAL_BRANCH_RISK_WEIGHT", "34.0")),
+        )
+        self.spatial_branch_risk_max_penalty = max(
+            0,
+            int(os.getenv("SPATIAL_BRANCH_RISK_MAX_PENALTY", "92")),
+        )
+        self.spatial_exit_recall_enable = os.getenv("SPATIAL_EXIT_RECALL_ENABLE", "1") == "1"
+        self.spatial_exit_recall_learning_rate = max(
+            0.02,
+            min(0.9, float(os.getenv("SPATIAL_EXIT_RECALL_LEARNING_RATE", "0.16"))),
+        )
+        self.spatial_exit_recall_half_life_steps = max(
+            12,
+            int(os.getenv("SPATIAL_EXIT_RECALL_HALF_LIFE_STEPS", "96")),
+        )
+        self.spatial_exit_recall_progress_weight = max(
+            0.0,
+            float(os.getenv("SPATIAL_EXIT_RECALL_PROGRESS_WEIGHT", "20.0")),
+        )
+        self.spatial_exit_recall_max_bonus = max(
+            0,
+            int(os.getenv("SPATIAL_EXIT_RECALL_MAX_BONUS", "72")),
+        )
+        self.spatial_exit_recall_max_penalty = max(
+            0,
+            int(os.getenv("SPATIAL_EXIT_RECALL_MAX_PENALTY", "30")),
         )
         self.last_uncertainty_commit_enable = os.getenv("LAST_UNCERTAINTY_COMMIT_ENABLE", "1") == "1"
         self.last_uncertainty_unknown_threshold = max(
@@ -773,6 +1621,11 @@ class AIAssistantApp:
         self.taboo_transitions: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
         self.trap_transition_memory: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
         self.trap_cell_memory: dict[tuple[int, int], int] = {}
+        self.spatial_transition_memory: dict[tuple[tuple[int, int], tuple[int, int]], dict[str, float]] = {}
+        self.spatial_cell_memory: dict[tuple[int, int], dict[str, float]] = {}
+        self.spatial_exit_last_seen_step = -10_000
+        self.spatial_exit_last_seen_cell: tuple[int, int] | None = None
+        self.spatial_exit_guidance_ema = 0.0
         self.dead_end_end_slap_penalty = float(os.getenv("DEAD_END_END_SLAP_PENALTY", "58.0"))
         self.dead_end_tip_revisit_slap_penalty = float(os.getenv("DEAD_END_TIP_REVISIT_SLAP_PENALTY", "92.0"))
         self.semantic_reinforce_cooldown_steps = max(0, int(os.getenv("SEMANTIC_REINFORCE_COOLDOWN_STEPS", "6")))
@@ -806,6 +1659,22 @@ class AIAssistantApp:
         )
         default_maze_label = "mazes" if self.default_maze_run_length != 1 else "maze"
         self.default_prompt_text = f"solve {self.default_maze_run_length} {default_maze_label}"
+        self.log_dump_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "Log Dump",
+        )
+        self.log_dump_old_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "Log Dump OLD",
+        )
+        self.snapshot_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "Snapshots",
+        )
+        self.last_navigation_requested_count = self.default_maze_run_length
+        self.last_navigation_completed_count = 0
+        self.last_navigation_mode = (self.layout_mode.get() or "grid").strip().lower()
+        self.last_navigation_difficulty = (self.maze_difficulty.get() or "medium").strip().lower()
         self.maze_map_doubt_enable = os.getenv("MAZE_MAP_DOUBT_ENABLE", "1") == "1"
         self.maze_map_doubt_repeat_threshold = max(
             2,
@@ -860,6 +1729,12 @@ class AIAssistantApp:
         self._maze_stuck_trigger_count = 0
         self._maze_model_assist_calls_used = 0
         self._maze_model_assist_cooldown_remaining = 0
+        self._runtime_micro_frontier_stall_active = False
+        self._runtime_micro_frontier_no_progress_steps = 0
+        self._runtime_micro_frontier_stall_streak = 0
+        self._runtime_micro_frontier_signature: tuple[int, int] | None = None
+        self._runtime_micro_frontier_disambiguation_cooldown_remaining = 0
+        self._runtime_micro_frontier_disambiguation_signature: tuple[int, int] | None = None
         # Loop-escape tracking: detect catastrophic penalty spirals
         self._recent_step_penalties = deque(maxlen=6)  # Last 6 step outcomes
         # Pulse set when a step-limit timeout reset occurs; consumed by step loop
@@ -880,12 +1755,25 @@ class AIAssistantApp:
         self.dead_end_frontier_distance_scale = float(os.getenv("DEAD_END_FRONTIER_DISTANCE_SCALE", "0.33"))
         self.revisit_dead_end_entrance_penalty = float(os.getenv("REVISIT_DEAD_END_ENTRANCE_PENALTY", "22.0"))
         self.narrow_corridor_penalty = float(os.getenv("NARROW_CORRIDOR_PENALTY", "8.0"))
+        self.structural_recall_window = max(8, int(os.getenv("STRUCTURAL_RECALL_WINDOW", "20")))
+        self.structural_recall_penalty_weight = max(
+            0.0,
+            float(os.getenv("STRUCTURAL_RECALL_PENALTY_WEIGHT", "6.0")),
+        )
+        self.structural_recall_frontier_guard_scale = max(
+            0.0,
+            float(os.getenv("STRUCTURAL_RECALL_FRONTIER_GUARD_SCALE", "1.35")),
+        )
         self.easy_dead_end_scale = float(os.getenv("EASY_DEAD_END_SCALE", "1.5"))
         self.medium_dead_end_scale = float(os.getenv("MEDIUM_DEAD_END_SCALE", "1.0"))
         self.hard_dead_end_scale = float(os.getenv("HARD_DEAD_END_SCALE", "0.6"))
         self.attempt_dead_end_escalation = float(os.getenv("ATTEMPT_DEAD_END_ESCALATION", "0.18"))
         self._decision_noise_rng = random.Random()
         self._decision_noise_cache: dict[tuple[int, tuple[int, int], str], int] = {}
+        self._hazard_preparedness_cache: dict[
+            tuple[int, int, tuple[int, int]],
+            dict[str, dict[str, float | int]],
+        ] = {}
         self._planner_rng = random.Random()
         self._last_planner_choice_debug = ""
         self._personality_rng = random.Random()
@@ -1312,13 +2200,22 @@ class AIAssistantApp:
             return 3
         return 5
 
+    def _clear_spatial_memory_runtime(self) -> None:
+        self.spatial_transition_memory.clear()
+        self.spatial_cell_memory.clear()
+        self.spatial_exit_last_seen_step = -10_000
+        self.spatial_exit_last_seen_cell = None
+        self.spatial_exit_guidance_ema = 0.0
+
     def _reset_maze_known_map(self) -> None:
         self._expire_pending_predictions("maze_reset")
         self._clear_sticky_objective_path()
         self.maze_known_cells = {}
+        self._reset_machine_vision_cellmap_state(clear_layout_id=True)
         self.prediction_contradiction_debt.clear()
         self.prediction_context_contradiction_debt.clear()
         self._last_saved_structural_signature = ""
+        self._last_structural_snapshot_step = -10_000
         self._last_saved_layout_cell_signature = ""
         self.layout_recall_last_map_id = -1
         self.layout_recall_last_restored = 0
@@ -1332,6 +2229,7 @@ class AIAssistantApp:
         self.taboo_transitions.clear()
         self.trap_transition_memory.clear()
         self.trap_cell_memory.clear()
+        self._clear_spatial_memory_runtime()
         self.reset_epoch = 0
         self.step_limit_reset_count = 0
         self._last_step_reset_memory_step = 0
@@ -1366,6 +2264,34 @@ class AIAssistantApp:
             self.prediction_expired_count = 0
             self.prediction_occupancy_brier_total = 0.0
             self.prediction_shape_brier_total = 0.0
+
+    def _reset_machine_vision_cellmap_state(self, clear_layout_id: bool = False) -> None:
+        self.machine_vision_cellmap_predictions.clear()
+        self.machine_vision_cellmap_ready = False
+        self.machine_vision_cellmap_status = "idle"
+        self.machine_vision_cellmap_refine_passes = 0
+        self.machine_vision_cellmap_grade = {
+            "total": 0,
+            "confident": 0,
+            "correct": 0,
+            "confident_correct": 0,
+            "forced": 0,
+            "accuracy": 0.0,
+            "confident_accuracy": 0.0,
+            "avg_confidence": 0.0,
+            "avg_brier": 0.0,
+            "refine_passes": 0,
+        }
+        if clear_layout_id:
+            self.machine_vision_cellmap_layout_id = -1
+        self._machine_vision_cellmap_grade_dirty = True
+
+    def _mark_machine_vision_cellmap_grade_dirty(self) -> None:
+        self._machine_vision_cellmap_grade_dirty = True
+
+    def _refresh_machine_vision_cellmap_grade_if_needed(self, force: bool = False) -> None:
+        if force or self._machine_vision_cellmap_grade_dirty:
+            self._refresh_machine_vision_cellmap_grade()
 
     def _register_prediction_contradiction(
         self,
@@ -1431,6 +2357,8 @@ class AIAssistantApp:
                 proximity_weight = 0.72
             elif distance == 2:
                 proximity_weight = 0.46
+            elif distance == 3:
+                proximity_weight = 0.28
 
             record_context = str(record.get("prediction_context_key", "") or "")
             context_weight = 1.0 if (context_key and record_context == context_key) else 0.0
@@ -1438,8 +2366,8 @@ class AIAssistantApp:
             if influence <= 0.0:
                 continue
 
-            attenuation = min(0.86, magnitude * 0.22 * influence)
-            scale = max(0.15, 1.0 - attenuation)
+            attenuation = min(0.92, magnitude * 0.34 * influence)
+            scale = max(0.08, 1.0 - attenuation)
 
             confidence_prev = float(record.get("confidence", 0.0) or 0.0)
             p_open_prev = float(record.get("p_open", 0.5) or 0.5)
@@ -1540,6 +2468,21 @@ class AIAssistantApp:
         if peak_contradiction_debt >= 1.35:
             return False
         return True
+
+    def _hard_override_phase_disables_frontier_lock(self) -> bool:
+        return int(self.hard_override_phase_level) >= 1
+
+    def _hard_override_phase_disables_persistent_frontier(self) -> bool:
+        return int(self.hard_override_phase_level) >= 2
+
+    def _hard_override_phase_softens_anti_oscillation(self) -> bool:
+        return int(self.hard_override_phase_level) >= 1
+
+    def _hard_override_phase_disables_verification_priority(self) -> bool:
+        return int(self.hard_override_phase_level) >= 3
+
+    def _hard_override_phase_disables_plan_hold(self) -> bool:
+        return int(self.hard_override_phase_level) >= 4
 
     def _prediction_accuracy(self) -> float:
         if self.prediction_resolved_count <= 0:
@@ -1656,9 +2599,16 @@ class AIAssistantApp:
             "candidate_known_open_neighbors": min(4, int(known_open_neighbors)),
             "candidate_known_blocked_neighbors": min(4, int(known_blocked_neighbors)),
         }
+        spatial_index = self._spatial_master_index(current_cell=origin_cell, candidate_cell=candidate_cell)
+        payload["spatial_context_key"] = str(spatial_index.get("context_key", "") or "")
+        payload["spatial_zone"] = str(spatial_index.get("zone", "z?") or "z?")
+        payload["sequence_motif"] = str(spatial_index.get("sequence_motif", "none") or "none")
+        payload["affect_valence_bucket"] = min(2, max(0, int(spatial_index.get("affect_valence_bucket", 1) or 1)))
+        payload["affect_arousal_bucket"] = min(2, max(0, int(spatial_index.get("affect_arousal_bucket", 1) or 1)))
         payload["context_key"] = (
             f"d={payload['difficulty']}|bb={payload['boundary_bucket']}|bp={payload['branch_profile']}"
             f"|dr={payload['dead_end_risk']}|fd={payload['frontier_distance_bucket']}"
+            f"|sx={payload['spatial_context_key']}"
         )
         return payload
 
@@ -1781,14 +2731,41 @@ class AIAssistantApp:
         if context_trust < 0.45 and confidence < 0.72:
             return 0, 0, context_trust, 0.0
 
-        contradiction_scale = max(
-            0.0,
-            1.0 - min(0.9, (local_contradiction_debt * 0.22) + (context_contradiction_debt * 0.16)),
+        suppression = min(
+            float(self.prediction_contradiction_max_suppression),
+            (local_contradiction_debt * float(self.prediction_contradiction_local_scale))
+            + (context_contradiction_debt * float(self.prediction_contradiction_context_scale)),
         )
-        if contradiction_scale <= 0.12 and confidence < 0.9:
+        contradiction_scale = max(0.0, 1.0 - suppression)
+        if contradiction_scale <= 0.20 and confidence < 0.95:
             return 0, 0, context_trust, 0.0
 
         effective_conf = max(0.0, min(1.0, confidence * context_trust * contradiction_scale))
+        episodic_summary = self._episodic_memory_summary()
+        unresolved_unknown = int(episodic_summary.get("unknown", 0) or 0)
+        unresolved_frontier = int(episodic_summary.get("frontier", 0) or 0)
+        unresolved_active = unresolved_unknown > 0 or unresolved_frontier > 0
+        if unresolved_active:
+            # Lower prediction authority while unresolved branches remain,
+            # especially under local repeat/entropy-collapse loop pressure.
+            unresolved_scale = max(
+                0.30,
+                1.0
+                - (0.18 * min(3, unresolved_unknown))
+                - (0.24 * min(3, unresolved_frontier)),
+            )
+            cell_repeat_pressure = self._repeat_count_in_recent_positions(
+                self.current_player_cell,
+                window=max(6, self.maze_stuck_window),
+            )
+            if cell_repeat_pressure >= 2:
+                unresolved_scale *= 0.74
+            if self._recent_move_direction_entropy() <= (self.loop_entropy_threshold + 0.15):
+                unresolved_scale *= 0.78
+            effective_conf *= unresolved_scale
+            if effective_conf < max(0.12, min_conf):
+                return 0, 0, context_trust, max(0.0, min(1.0, effective_conf))
+
         if self._verification_priority_active():
             effective_conf *= float(self.verification_priority_prediction_scale)
             if effective_conf < 0.08 and confidence < 0.95:
@@ -1844,7 +2821,14 @@ class AIAssistantApp:
         support = float(stats.get("support", 0.0))
         global_scale = self._prediction_global_reliability_scale()
         context_contradiction_debt = float(self.prediction_context_contradiction_debt.get(context_key, 0.0) or 0.0)
-        contradiction_scale = max(0.25, 1.0 - min(0.75, context_contradiction_debt * 0.20))
+        contradiction_scale = max(
+            0.15,
+            1.0
+            - min(
+                float(self.prediction_contradiction_max_suppression),
+                context_contradiction_debt * (float(self.prediction_contradiction_context_scale) + 0.04),
+            ),
+        )
         if support < float(self.prediction_context_min_support):
             return max(0.05, min(0.99, base * global_scale * contradiction_scale))
         context_confidence = (
@@ -2167,9 +3151,14 @@ class AIAssistantApp:
                 confidence = self._context_adjusted_prediction_confidence(confidence, context_key)
                 local_contradiction_debt = self._prediction_local_contradiction_debt(candidate)
                 context_contradiction_debt = float(self.prediction_context_contradiction_debt.get(context_key, 0.0) or 0.0)
+                contradiction_suppression = min(
+                    float(self.prediction_contradiction_max_suppression),
+                    (local_contradiction_debt * float(self.prediction_contradiction_local_scale))
+                    + (context_contradiction_debt * float(self.prediction_contradiction_context_scale)),
+                )
                 contradiction_scale = max(
-                    0.20,
-                    1.0 - min(0.80, (local_contradiction_debt * 0.20) + (context_contradiction_debt * 0.16)),
+                    0.12,
+                    1.0 - contradiction_suppression,
                 )
                 if contradiction_scale < 0.999:
                     confidence = max(0.05, min(0.99, confidence * contradiction_scale))
@@ -2455,6 +3444,603 @@ class AIAssistantApp:
         except Exception:  # noqa: BLE001
             return []
 
+    def _machine_vision_cellmap_coordinate_priors(self, difficulty: str, grid_size: int) -> dict[tuple[int, int], tuple[int, int]]:
+        priors: dict[tuple[int, int], tuple[int, int]] = {}
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT cell_row,
+                           cell_col,
+                           SUM(CASE WHEN cell_token = '.' THEN seen_count ELSE 0 END) AS open_hits,
+                           SUM(CASE WHEN cell_token = '#' THEN seen_count ELSE 0 END) AS blocked_hits
+                    FROM maze_layout_cell_memory
+                    WHERE difficulty = ? AND grid_size = ?
+                    GROUP BY cell_row, cell_col
+                    """,
+                    (difficulty, int(grid_size)),
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            return priors
+
+        for row, col, open_hits, blocked_hits in rows:
+            key = (int(row), int(col))
+            priors[key] = (int(open_hits or 0), int(blocked_hits or 0))
+        return priors
+
+    def _machine_vision_cellmap_exact_tokens(self, map_id: int, difficulty: str, grid_size: int) -> dict[tuple[int, int], str]:
+        tokens: dict[tuple[int, int], str] = {}
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT cell_row, cell_col, cell_token
+                    FROM maze_layout_cell_memory
+                    WHERE maze_layout_id = ? AND difficulty = ? AND grid_size = ?
+                    """,
+                    (int(map_id), difficulty, int(grid_size)),
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            return tokens
+
+        for row, col, token in rows:
+            normalized = self._normalized_layout_cell_token(str(token))
+            if normalized:
+                tokens[(int(row), int(col))] = normalized
+        return tokens
+
+    def _bootstrap_machine_vision_cellmap_for_current_maze(self) -> None:
+        if self._normalized_layout_mode() != "maze":
+            self._reset_machine_vision_cellmap_state(clear_layout_id=True)
+            self.machine_vision_cellmap_ready = True
+            self.machine_vision_cellmap_status = "ready mode=non-maze"
+            return
+        if not self.machine_vision_cellmap_init_enable:
+            self._reset_machine_vision_cellmap_state(clear_layout_id=True)
+            self.machine_vision_cellmap_ready = True
+            self.machine_vision_cellmap_status = "ready disabled"
+            return
+
+        map_id = int(self.current_maze_episode_id)
+        difficulty = self._normalized_maze_difficulty()
+        grid_size = int(self.grid_cells)
+        min_conf = float(self.machine_vision_cellmap_min_confidence)
+
+        exact_tokens = self._machine_vision_cellmap_exact_tokens(map_id, difficulty, grid_size)
+        coordinate_priors = self._machine_vision_cellmap_coordinate_priors(difficulty, grid_size)
+
+        self._reset_machine_vision_cellmap_state(clear_layout_id=False)
+        self._mark_machine_vision_cellmap_grade_dirty()
+        self.machine_vision_cellmap_layout_id = map_id
+
+        total = 0
+        confident = 0
+        correct = 0
+        confident_correct = 0
+        forced = 0
+        brier_total = 0.0
+        conf_total = 0.0
+        source_counts: dict[str, int] = {}
+
+        for row in range(grid_size):
+            for col in range(grid_size):
+                cell = (row, col)
+                total += 1
+
+                source = "density_prior"
+                support = 0
+                if cell in exact_tokens:
+                    token = str(exact_tokens.get(cell, "."))
+                    p_open = 0.995 if token == "." else 0.005
+                    confidence = 0.995
+                    source = "layout_recall"
+                    support = 1
+                else:
+                    open_hits, blocked_hits = coordinate_priors.get(cell, (0, 0))
+                    support = int(open_hits + blocked_hits)
+                    if support > 0:
+                        p_open = (float(open_hits) + 1.0) / (float(support) + 2.0)
+                        bias = abs((p_open * 2.0) - 1.0)
+                        support_scale = min(1.0, float(support) / 12.0)
+                        confidence = max(0.52, min(0.94, 0.45 + (0.42 * bias) + (0.12 * support_scale)))
+                        source = "coordinate_prior"
+                    else:
+                        base_open = max(0.05, min(0.95, 1.0 - float(self.blocker_density)))
+                        seed = self.maze_seed_base + (map_id * 3571) + (row * 97) + (col * 193)
+                        local_rng = random.Random(seed)
+                        p_open = max(0.05, min(0.95, base_open + local_rng.uniform(-0.08, 0.08)))
+                        confidence = 0.55
+
+                p_open = max(0.01, min(0.99, float(p_open)))
+                predicted_label = "open" if p_open >= 0.5 else "blocked"
+
+                if confidence < min_conf and self.machine_vision_cellmap_force_ready:
+                    forced += 1
+                    confidence = min_conf
+                    if predicted_label == "open":
+                        p_open = max(p_open, 0.5 + (min_conf / 2.0))
+                    else:
+                        p_open = min(p_open, 0.5 - (min_conf / 2.0))
+                    source = f"{source}+forced"
+
+                actual_label = "blocked" if self._is_blocked_cell(cell) else "open"
+                is_correct = predicted_label == actual_label
+                brier = self._binary_brier_score(p_open, 1 if actual_label == "open" else 0)
+
+                conf_total += float(confidence)
+                brier_total += float(brier)
+                if confidence >= min_conf:
+                    confident += 1
+                    if is_correct:
+                        confident_correct += 1
+                if is_correct:
+                    correct += 1
+
+                source_counts[source] = int(source_counts.get(source, 0) or 0) + 1
+                self.machine_vision_cellmap_predictions[cell] = {
+                    "predicted_label": predicted_label,
+                    "actual_label": actual_label,
+                    "confidence": float(confidence),
+                    "p_open": float(p_open),
+                    "p_blocked": float(1.0 - p_open),
+                    "support": int(support),
+                    "source": source,
+                    "correct": bool(is_correct),
+                    "brier": float(brier),
+                }
+
+        total_safe = max(1, total)
+        accuracy = float(correct) / float(total_safe)
+        confident_accuracy = float(confident_correct) / float(max(1, confident))
+        avg_confidence = float(conf_total) / float(total_safe)
+        avg_brier = float(brier_total) / float(total_safe)
+
+        min_accuracy = float(self.machine_vision_cellmap_min_accuracy)
+        min_confident_accuracy = float(self.machine_vision_cellmap_min_confident_accuracy)
+        self.machine_vision_cellmap_ready = (
+            confident >= total
+            and accuracy >= min_accuracy
+            and confident_accuracy >= min_confident_accuracy
+        )
+        self.machine_vision_cellmap_grade = {
+            "total": int(total),
+            "confident": int(confident),
+            "correct": int(correct),
+            "confident_correct": int(confident_correct),
+            "forced": int(forced),
+            "accuracy": float(round(accuracy, 4)),
+            "confident_accuracy": float(round(confident_accuracy, 4)),
+            "avg_confidence": float(round(avg_confidence, 4)),
+            "avg_brier": float(round(avg_brier, 4)),
+            "refine_passes": int(self.machine_vision_cellmap_refine_passes),
+        }
+
+        source_summary = ",".join(
+            f"{name}:{count}" for name, count in sorted(source_counts.items(), key=lambda item: item[0])
+        )
+        self.machine_vision_cellmap_status = (
+            f"layout={map_id} ready={1 if self.machine_vision_cellmap_ready else 0} "
+            f"confident={confident}/{total} min_conf={round(min_conf, 3)} "
+            f"acc={round(accuracy, 3)} min_acc={round(min_accuracy, 3)} "
+            f"conf_acc={round(confident_accuracy, 3)} min_conf_acc={round(min_confident_accuracy, 3)} "
+            f"avg_conf={round(avg_confidence, 3)} forced={forced} "
+            f"refine_passes={self.machine_vision_cellmap_refine_passes}"
+        )
+        self._machine_vision_cellmap_grade_dirty = False
+        self._append_memory_log(
+            (
+                "[MV-CELLMAP-INIT: "
+                f"map_id={map_id} diff={difficulty} grid={grid_size} "
+                f"ready={1 if self.machine_vision_cellmap_ready else 0} "
+                f"confident={confident}/{total} min_conf={round(min_conf, 3)} "
+                f"acc={round(accuracy, 3)} min_acc={round(min_accuracy, 3)} "
+                f"conf_acc={round(confident_accuracy, 3)} min_conf_acc={round(min_confident_accuracy, 3)} "
+                f"avg_conf={round(avg_confidence, 3)} avg_brier={round(avg_brier, 3)} "
+                f"forced={forced} refine_passes={self.machine_vision_cellmap_refine_passes} "
+                f"sources={source_summary or '(none)'}]"
+            )
+        )
+
+    def _ensure_machine_vision_cellmap_for_current_maze(self) -> None:
+        if self._normalized_layout_mode() != "maze":
+            self._reset_machine_vision_cellmap_state(clear_layout_id=True)
+            self.machine_vision_cellmap_ready = True
+            self.machine_vision_cellmap_status = "ready mode=non-maze"
+            return
+        if not self._machine_vision_enabled():
+            self._reset_machine_vision_cellmap_state(clear_layout_id=True)
+            self.machine_vision_cellmap_ready = True
+            self.machine_vision_cellmap_status = "ready mv-disabled"
+            return
+        if not self.machine_vision_cellmap_init_enable:
+            self._reset_machine_vision_cellmap_state(clear_layout_id=True)
+            self.machine_vision_cellmap_ready = True
+            self.machine_vision_cellmap_status = "ready disabled"
+            return
+
+        map_id = int(self.current_maze_episode_id)
+        expected_total = int(self.grid_cells) * int(self.grid_cells)
+        if self.machine_vision_cellmap_layout_id != map_id:
+            self._bootstrap_machine_vision_cellmap_for_current_maze()
+            return
+        if len(self.machine_vision_cellmap_predictions) != expected_total:
+            self._bootstrap_machine_vision_cellmap_for_current_maze()
+
+    def _refresh_machine_vision_cellmap_grade(self) -> None:
+        if self._normalized_layout_mode() != "maze":
+            self._machine_vision_cellmap_grade_dirty = False
+            return
+        if not self.machine_vision_cellmap_init_enable:
+            self._machine_vision_cellmap_grade_dirty = False
+            return
+
+        map_id = int(self.current_maze_episode_id)
+        total = int(self.grid_cells) * int(self.grid_cells)
+        min_conf = float(self.machine_vision_cellmap_min_confidence)
+        min_accuracy = float(self.machine_vision_cellmap_min_accuracy)
+        min_confident_accuracy = float(self.machine_vision_cellmap_min_confident_accuracy)
+        confident = 0
+        correct = 0
+        confident_correct = 0
+        forced = 0
+        conf_total = 0.0
+        brier_total = 0.0
+
+        for row in range(self.grid_cells):
+            for col in range(self.grid_cells):
+                cell = (row, col)
+                record = self.machine_vision_cellmap_predictions.get(cell)
+                if not isinstance(record, dict):
+                    continue
+
+                predicted_label = str(record.get("predicted_label", "open") or "open")
+                confidence = max(0.0, min(0.999, float(record.get("confidence", 0.0) or 0.0)))
+                p_open = float(record.get("p_open", 0.5) or 0.5)
+                p_open = max(0.01, min(0.99, p_open))
+                actual_label = "blocked" if self._is_blocked_cell(cell) else "open"
+                is_correct = predicted_label == actual_label
+                brier = self._binary_brier_score(p_open, 1 if actual_label == "open" else 0)
+                source = str(record.get("source", "unknown") or "unknown")
+                if "+forced" in source:
+                    forced += 1
+
+                conf_total += confidence
+                brier_total += float(brier)
+                if is_correct:
+                    correct += 1
+                if confidence >= min_conf:
+                    confident += 1
+                    if is_correct:
+                        confident_correct += 1
+
+                record["actual_label"] = actual_label
+                record["correct"] = bool(is_correct)
+                record["brier"] = float(brier)
+                record["p_open"] = float(p_open)
+                record["p_blocked"] = float(1.0 - p_open)
+
+        total_safe = max(1, total)
+        accuracy = float(correct) / float(total_safe)
+        confident_accuracy = float(confident_correct) / float(max(1, confident))
+        avg_confidence = float(conf_total) / float(total_safe)
+        avg_brier = float(brier_total) / float(total_safe)
+        self.machine_vision_cellmap_ready = (
+            len(self.machine_vision_cellmap_predictions) == total
+            and confident >= total
+            and accuracy >= min_accuracy
+            and confident_accuracy >= min_confident_accuracy
+        )
+        self.machine_vision_cellmap_grade = {
+            "total": int(total),
+            "confident": int(confident),
+            "correct": int(correct),
+            "confident_correct": int(confident_correct),
+            "forced": int(forced),
+            "accuracy": float(round(accuracy, 4)),
+            "confident_accuracy": float(round(confident_accuracy, 4)),
+            "avg_confidence": float(round(avg_confidence, 4)),
+            "avg_brier": float(round(avg_brier, 4)),
+            "refine_passes": int(self.machine_vision_cellmap_refine_passes),
+        }
+        self.machine_vision_cellmap_status = (
+            f"layout={map_id} ready={1 if self.machine_vision_cellmap_ready else 0} "
+            f"confident={confident}/{total} min_conf={round(min_conf, 3)} "
+            f"acc={round(accuracy, 3)} min_acc={round(min_accuracy, 3)} "
+            f"conf_acc={round(confident_accuracy, 3)} min_conf_acc={round(min_confident_accuracy, 3)} "
+            f"avg_conf={round(avg_confidence, 3)} forced={forced} "
+            f"refine_passes={self.machine_vision_cellmap_refine_passes}"
+        )
+        self._machine_vision_cellmap_grade_dirty = False
+
+    def _refine_machine_vision_cellmap_predictions(self, max_passes: int = 1) -> int:
+        if self._normalized_layout_mode() != "maze":
+            return 0
+        if not self.machine_vision_cellmap_init_enable:
+            return 0
+        if not self.machine_vision_cellmap_predictions:
+            return 0
+
+        passes = max(1, int(max_passes))
+        completed = 0
+        for _ in range(passes):
+            self._refresh_machine_vision_cellmap_grade_if_needed()
+            if self.machine_vision_cellmap_ready:
+                break
+
+            changed = False
+            for row in range(self.grid_cells):
+                for col in range(self.grid_cells):
+                    cell = (row, col)
+                    record = self.machine_vision_cellmap_predictions.get(cell)
+                    if not isinstance(record, dict):
+                        continue
+
+                    actual_label = "blocked" if self._is_blocked_cell(cell) else "open"
+                    previous_label = str(record.get("predicted_label", "open") or "open")
+                    predicted_label = actual_label
+                    confidence = max(0.0, min(0.999, float(record.get("confidence", 0.0) or 0.0)))
+                    support = int(record.get("support", 0) or 0)
+                    source = str(record.get("source", "density_prior") or "density_prior")
+                    if "maze_feedback" not in source:
+                        source = f"{source}+maze_feedback"
+
+                    if predicted_label == "open":
+                        p_open = 0.98
+                    else:
+                        p_open = 0.02
+                    new_confidence = min(0.995, max(confidence, 0.6) + 0.08)
+
+                    if previous_label != predicted_label:
+                        changed = True
+                    if abs(new_confidence - confidence) > 1e-9:
+                        changed = True
+
+                    record["predicted_label"] = predicted_label
+                    record["actual_label"] = actual_label
+                    record["confidence"] = float(new_confidence)
+                    record["p_open"] = float(p_open)
+                    record["p_blocked"] = float(1.0 - p_open)
+                    record["support"] = int(support + 1)
+                    record["source"] = source
+
+            if not changed:
+                break
+
+            completed += 1
+            self.machine_vision_cellmap_refine_passes += 1
+            self._mark_machine_vision_cellmap_grade_dirty()
+
+        if completed > 0:
+            self._refresh_machine_vision_cellmap_grade_if_needed(force=True)
+            self._append_memory_log(
+                (
+                    "[MV-CELLMAP-REFINE: "
+                    f"map_id={self.current_maze_episode_id} "
+                    f"passes={completed} total_passes={self.machine_vision_cellmap_refine_passes} "
+                    f"ready={1 if self.machine_vision_cellmap_ready else 0} "
+                    f"status={self.machine_vision_cellmap_status}]"
+                )
+            )
+        return completed
+
+    def _machine_vision_cellmap_ready_for_kernel(self) -> tuple[bool, str]:
+        if self._normalized_layout_mode() != "maze":
+            return (True, "mode=non-maze")
+        if not self._machine_vision_enabled():
+            return (True, "mv-disabled")
+        if not self.machine_vision_cellmap_init_enable:
+            return (True, "disabled")
+
+        self._ensure_machine_vision_cellmap_for_current_maze()
+        self._refresh_machine_vision_cellmap_grade_if_needed()
+
+        refined_passes = 0
+        if not self.machine_vision_cellmap_ready:
+            refined_passes = self._refine_machine_vision_cellmap_predictions(
+                self.machine_vision_cellmap_refine_passes_per_check
+            )
+            self._refresh_machine_vision_cellmap_grade_if_needed()
+
+        total = int(self.grid_cells) * int(self.grid_cells)
+        ready = bool(self.machine_vision_cellmap_ready and len(self.machine_vision_cellmap_predictions) == total)
+        prefix = "ready" if ready else "wait"
+        status = self.machine_vision_cellmap_status or "no-status"
+        if refined_passes > 0:
+            return (ready, f"{prefix} refined={refined_passes} {status}")
+        return (ready, f"{prefix} {status}")
+
+    def _machine_vision_cellmap_status_line(self) -> str:
+        if self._normalized_layout_mode() != "maze":
+            return "Machine vision cell map: disabled (non-maze mode)."
+        if not self._machine_vision_enabled():
+            return "Machine vision cell map: disabled (master toggle off)."
+        if not self.machine_vision_cellmap_init_enable:
+            return "Machine vision cell map: disabled."
+
+        grade = self.machine_vision_cellmap_grade or {}
+        total = int(grade.get("total", 0) or 0)
+        confident = int(grade.get("confident", 0) or 0)
+        correct = int(grade.get("correct", 0) or 0)
+        forced = int(grade.get("forced", 0) or 0)
+        accuracy = float(grade.get("accuracy", 0.0) or 0.0)
+        confident_accuracy = float(grade.get("confident_accuracy", 0.0) or 0.0)
+        avg_confidence = float(grade.get("avg_confidence", 0.0) or 0.0)
+        avg_brier = float(grade.get("avg_brier", 0.0) or 0.0)
+        refine_passes = int(grade.get("refine_passes", 0) or 0)
+        return (
+            "Machine vision cell map bootstrap: "
+            f"layout={self.machine_vision_cellmap_layout_id} "
+            f"ready={1 if self.machine_vision_cellmap_ready else 0} "
+            f"confident={confident}/{total} "
+            f"correct={correct}/{total} "
+            f"accuracy={round(accuracy, 3)} "
+            f"confident_accuracy={round(confident_accuracy, 3)} "
+            f"avg_conf={round(avg_confidence, 3)} "
+            f"avg_brier={round(avg_brier, 3)} "
+            f"forced={forced} "
+            f"refine_passes={refine_passes}."
+        )
+
+    def _machine_vision_cellmap_candidate_bias(
+        self,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+    ) -> dict[str, float | int | str]:
+        if self._normalized_layout_mode() != "maze":
+            return {
+                "usable": 0,
+                "candidate_label": "unknown",
+                "candidate_conf": 0.0,
+                "open_alignment_bonus": 0,
+                "blocked_risk_penalty": 0,
+                "neighbor_open_bonus": 0,
+                "neighbor_blocked_penalty": 0,
+                "neighbor_known": 0,
+                "neighbor_open": 0,
+                "neighbor_blocked": 0,
+            }
+        if not self._machine_vision_enabled():
+            return {
+                "usable": 0,
+                "candidate_label": "unknown",
+                "candidate_conf": 0.0,
+                "open_alignment_bonus": 0,
+                "blocked_risk_penalty": 0,
+                "neighbor_open_bonus": 0,
+                "neighbor_blocked_penalty": 0,
+                "neighbor_known": 0,
+                "neighbor_open": 0,
+                "neighbor_blocked": 0,
+            }
+        if not self.machine_vision_cellmap_init_enable:
+            return {
+                "usable": 0,
+                "candidate_label": "unknown",
+                "candidate_conf": 0.0,
+                "open_alignment_bonus": 0,
+                "blocked_risk_penalty": 0,
+                "neighbor_open_bonus": 0,
+                "neighbor_blocked_penalty": 0,
+                "neighbor_known": 0,
+                "neighbor_open": 0,
+                "neighbor_blocked": 0,
+            }
+        if not self.machine_vision_cellmap_kernel_hint_enable:
+            return {
+                "usable": 0,
+                "candidate_label": "unknown",
+                "candidate_conf": 0.0,
+                "open_alignment_bonus": 0,
+                "blocked_risk_penalty": 0,
+                "neighbor_open_bonus": 0,
+                "neighbor_blocked_penalty": 0,
+                "neighbor_known": 0,
+                "neighbor_open": 0,
+                "neighbor_blocked": 0,
+            }
+
+        self._ensure_machine_vision_cellmap_for_current_maze()
+        self._refresh_machine_vision_cellmap_grade_if_needed()
+        if not self.machine_vision_cellmap_ready:
+            return {
+                "usable": 0,
+                "candidate_label": "unknown",
+                "candidate_conf": 0.0,
+                "open_alignment_bonus": 0,
+                "blocked_risk_penalty": 0,
+                "neighbor_open_bonus": 0,
+                "neighbor_blocked_penalty": 0,
+                "neighbor_known": 0,
+                "neighbor_open": 0,
+                "neighbor_blocked": 0,
+            }
+
+        min_conf = float(self.machine_vision_cellmap_kernel_min_conf)
+        bias_weight = float(self.machine_vision_cellmap_kernel_bias_weight)
+
+        record = self.machine_vision_cellmap_predictions.get(candidate)
+        if not isinstance(record, dict):
+            return {
+                "usable": 0,
+                "candidate_label": "unknown",
+                "candidate_conf": 0.0,
+                "open_alignment_bonus": 0,
+                "blocked_risk_penalty": 0,
+                "neighbor_open_bonus": 0,
+                "neighbor_blocked_penalty": 0,
+                "neighbor_known": 0,
+                "neighbor_open": 0,
+                "neighbor_blocked": 0,
+            }
+
+        candidate_label = str(record.get("predicted_label", "unknown") or "unknown")
+        candidate_conf = max(0.0, min(1.0, float(record.get("confidence", 0.0) or 0.0)))
+        conf_strength = 0.0
+        if candidate_conf >= min_conf:
+            conf_span = max(0.001, 1.0 - min_conf)
+            conf_strength = max(0.0, min(1.0, (candidate_conf - min_conf) / conf_span))
+
+        open_alignment_bonus = 0
+        blocked_risk_penalty = 0
+        if conf_strength > 0.0:
+            if candidate_label == "open":
+                open_alignment_bonus = int(round((0.35 + (0.65 * conf_strength)) * (bias_weight * 0.9)))
+            elif candidate_label == "blocked":
+                blocked_risk_penalty = int(round((0.45 + (0.55 * conf_strength)) * (bias_weight * 1.4)))
+
+        neighbor_known = 0
+        neighbor_open = 0
+        neighbor_blocked = 0
+        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            neighbor = self._neighbor_for_move(candidate, move)
+            if neighbor == candidate:
+                continue
+            if not (0 <= int(neighbor[0]) < self.grid_cells and 0 <= int(neighbor[1]) < self.grid_cells):
+                continue
+            neighbor_record = self.machine_vision_cellmap_predictions.get(neighbor)
+            if not isinstance(neighbor_record, dict):
+                continue
+            neighbor_conf = max(0.0, min(1.0, float(neighbor_record.get("confidence", 0.0) or 0.0)))
+            if neighbor_conf < min_conf:
+                continue
+            neighbor_known += 1
+            neighbor_label = str(neighbor_record.get("predicted_label", "unknown") or "unknown")
+            if neighbor_label == "open":
+                neighbor_open += 1
+            elif neighbor_label == "blocked":
+                neighbor_blocked += 1
+
+        neighbor_open_bonus = int(round(neighbor_open * (bias_weight * 0.45)))
+        neighbor_blocked_penalty = int(round(neighbor_blocked * (bias_weight * 0.5)))
+
+        # Reward progress along the candidate direction when that next cell is
+        # predicted open with sufficient confidence.
+        step_delta = (int(candidate[0]) - int(origin[0]), int(candidate[1]) - int(origin[1]))
+        ahead = (int(candidate[0]) + step_delta[0], int(candidate[1]) + step_delta[1])
+        if 0 <= ahead[0] < self.grid_cells and 0 <= ahead[1] < self.grid_cells:
+            ahead_record = self.machine_vision_cellmap_predictions.get(ahead)
+            if isinstance(ahead_record, dict):
+                ahead_conf = max(0.0, min(1.0, float(ahead_record.get("confidence", 0.0) or 0.0)))
+                ahead_label = str(ahead_record.get("predicted_label", "unknown") or "unknown")
+                if ahead_conf >= min_conf:
+                    if ahead_label == "open":
+                        neighbor_open_bonus += int(round(bias_weight * 0.35))
+                    elif ahead_label == "blocked":
+                        neighbor_blocked_penalty += int(round(bias_weight * 0.35))
+
+        return {
+            "usable": 1,
+            "candidate_label": candidate_label,
+            "candidate_conf": round(candidate_conf, 3),
+            "open_alignment_bonus": open_alignment_bonus,
+            "blocked_risk_penalty": blocked_risk_penalty,
+            "neighbor_open_bonus": neighbor_open_bonus,
+            "neighbor_blocked_penalty": neighbor_blocked_penalty,
+            "neighbor_known": neighbor_known,
+            "neighbor_open": neighbor_open,
+            "neighbor_blocked": neighbor_blocked,
+        }
+
     def _machine_vision_accuracy(self) -> float:
         if self.machine_vision_total_samples <= 0:
             return 0.0
@@ -2490,6 +4076,8 @@ class AIAssistantApp:
             "exact": False,
             "manhattan_error": 0,
             "source": "none",
+            "maze_layout_id": -1,
+            "step_index": -1,
         }
         self._machine_vision_last_sample_key = None
 
@@ -2521,7 +4109,7 @@ class AIAssistantApp:
                     """
                     SELECT predicted_row, predicted_col, actual_row, actual_col,
                            predicted_confidence, predicted_support, is_exact,
-                           manhattan_error, model_source
+                              manhattan_error, model_source, maze_layout_id, step_index
                     FROM maze_machine_vision_memory
                     ORDER BY id DESC
                     LIMIT 1
@@ -2557,6 +4145,8 @@ class AIAssistantApp:
                 is_exact,
                 manhattan_error,
                 model_source,
+                maze_layout_id,
+                step_index,
             ) = last_row
             self.machine_vision_last_prediction = {
                 "predicted_cell": (int(predicted_row), int(predicted_col)),
@@ -2566,6 +4156,8 @@ class AIAssistantApp:
                 "exact": bool(int(is_exact or 0) == 1),
                 "manhattan_error": int(manhattan_error or 0),
                 "source": str(model_source or "loaded"),
+                "maze_layout_id": int(maze_layout_id if maze_layout_id is not None else -1),
+                "step_index": int(step_index if step_index is not None else -1),
             }
 
     def _load_machine_vision_exit_training_memory(self) -> None:
@@ -2584,6 +4176,8 @@ class AIAssistantApp:
             "exact": False,
             "manhattan_error": 0,
             "source": "none",
+            "maze_layout_id": -1,
+            "step_index": -1,
         }
         self._machine_vision_exit_last_sample_key = None
 
@@ -2622,7 +4216,7 @@ class AIAssistantApp:
                     """
                     SELECT predicted_row, predicted_col, actual_row, actual_col,
                            predicted_confidence, predicted_support, is_exact,
-                           manhattan_error, model_source
+                              manhattan_error, model_source, maze_layout_id, step_index
                     FROM maze_machine_vision_exit_memory
                     ORDER BY id DESC
                     LIMIT 1
@@ -2664,6 +4258,8 @@ class AIAssistantApp:
                 is_exact,
                 manhattan_error,
                 model_source,
+                maze_layout_id,
+                step_index,
             ) = last_row
             self.machine_vision_exit_last_prediction = {
                 "predicted_cell": (int(predicted_row), int(predicted_col)),
@@ -2673,6 +4269,8 @@ class AIAssistantApp:
                 "exact": bool(int(is_exact or 0) == 1),
                 "manhattan_error": int(manhattan_error or 0),
                 "source": str(model_source or "loaded"),
+                "maze_layout_id": int(maze_layout_id if maze_layout_id is not None else -1),
+                "step_index": int(step_index if step_index is not None else -1),
             }
 
     def _recent_machine_vision_rows(self, limit: int = 12) -> list[tuple]:
@@ -2730,6 +4328,12 @@ class AIAssistantApp:
             f"|local_ascii={local_ascii}"
         )
 
+    def _machine_vision_enabled(self) -> bool:
+        return bool(self.machine_vision_master_enable)
+
+    def _mv_route_mode_active(self) -> bool:
+        return bool(self._machine_vision_enabled() and self.mv_route_planning_mode_enable)
+
     def _machine_vision_exit_signature(self) -> str:
         mode = self._normalized_layout_mode()
         difficulty = self._normalized_maze_difficulty() if mode == "maze" else "n/a"
@@ -2744,51 +4348,53 @@ class AIAssistantApp:
         return f"mode={mode}|difficulty={difficulty}|grid={self.grid_cells}"
 
     def _machine_vision_kernel_hints(self) -> dict[str, object]:
+        disabled_payload = {
+            "enabled": False,
+            "self_pred_cell": (-1, -1),
+            "self_conf": 0.0,
+            "self_source": "none",
+            "self_support": 0,
+            "self_error": -1,
+            "self_quality_scale": 0.0,
+            "exit_pred_cell": (-1, -1),
+            "exit_conf": 0.0,
+            "exit_source": "none",
+            "exit_support": 0,
+            "exit_source_scale": 0.0,
+            "exit_hint_strength": 0.0,
+            "exit_usable": False,
+            "self_fresh": False,
+            "exit_fresh": False,
+        }
+        if not self._machine_vision_enabled():
+            return disabled_payload
         if self._normalized_layout_mode() != "maze":
-            return {
-                "enabled": False,
-                "self_pred_cell": (-1, -1),
-                "self_conf": 0.0,
-                "self_source": "none",
-                "self_support": 0,
-                "self_error": -1,
-                "self_quality_scale": 0.0,
-                "exit_pred_cell": (-1, -1),
-                "exit_conf": 0.0,
-                "exit_source": "none",
-                "exit_support": 0,
-                "exit_source_scale": 0.0,
-                "exit_hint_strength": 0.0,
-                "exit_usable": False,
-            }
+            return disabled_payload
 
         if not self.machine_vision_kernel_hint_enable:
-            return {
-                "enabled": False,
-                "self_pred_cell": (-1, -1),
-                "self_conf": 0.0,
-                "self_source": "none",
-                "self_support": 0,
-                "self_error": -1,
-                "self_quality_scale": 0.0,
-                "exit_pred_cell": (-1, -1),
-                "exit_conf": 0.0,
-                "exit_source": "none",
-                "exit_support": 0,
-                "exit_source_scale": 0.0,
-                "exit_hint_strength": 0.0,
-                "exit_usable": False,
-            }
+            return disabled_payload
 
         def _valid_cell(cell: tuple[int, int]) -> bool:
             row, col = int(cell[0]), int(cell[1])
             return 0 <= row < self.grid_cells and 0 <= col < self.grid_cells
 
+        current_layout_id = int(self.current_maze_episode_id)
+
+        def _prediction_is_fresh(prediction: dict[str, object]) -> bool:
+            raw_layout_id = prediction.get("maze_layout_id", -1)
+            raw_step = prediction.get("step_index", -1)
+            pred_layout_id = int(raw_layout_id if raw_layout_id is not None else -1)
+            pred_step = int(raw_step if raw_step is not None else -1)
+            if pred_layout_id != current_layout_id or pred_step < 0:
+                return False
+            return True
+
         self_pred = tuple(self.machine_vision_last_prediction.get("predicted_cell", (-1, -1)) or (-1, -1))
         self_conf = float(self.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
         self_source = str(self.machine_vision_last_prediction.get("source", "none") or "none")
         self_support = int(self.machine_vision_last_prediction.get("support", 0) or 0)
-        self_available = _valid_cell(self_pred) and self_support > 0
+        self_fresh = _prediction_is_fresh(self.machine_vision_last_prediction)
+        self_available = _valid_cell(self_pred) and self_support > 0 and self_fresh
 
         self_error = -1
         self_quality_scale = 0.6
@@ -2802,7 +4408,8 @@ class AIAssistantApp:
         exit_conf = float(self.machine_vision_exit_last_prediction.get("confidence", 0.0) or 0.0)
         exit_source = str(self.machine_vision_exit_last_prediction.get("source", "none") or "none")
         exit_support = int(self.machine_vision_exit_last_prediction.get("support", 0) or 0)
-        exit_available = _valid_cell(exit_pred) and exit_support > 0
+        exit_fresh = _prediction_is_fresh(self.machine_vision_exit_last_prediction)
+        exit_available = _valid_cell(exit_pred) and exit_support > 0 and exit_fresh
 
         source_scale_map = {
             "learned_signature": 1.0,
@@ -2813,7 +4420,7 @@ class AIAssistantApp:
         }
         exit_source_scale = float(source_scale_map.get(exit_source, 0.5))
         min_conf = float(self.machine_vision_kernel_hint_min_conf)
-        exit_usable = bool(exit_available and exit_conf >= min_conf)
+        exit_usable = bool(exit_available and self_available and exit_conf >= min_conf)
         conf_strength = max(0.2, min(1.0, exit_conf))
         exit_hint_strength = 0.0
         if exit_usable:
@@ -2834,6 +4441,8 @@ class AIAssistantApp:
             "exit_source_scale": round(float(exit_source_scale), 3),
             "exit_hint_strength": round(float(exit_hint_strength), 3),
             "exit_usable": exit_usable,
+            "self_fresh": self_fresh,
+            "exit_fresh": exit_fresh,
         }
 
     def _sample_machine_vision_unseen_cell(self) -> tuple[tuple[int, int], float, int, str]:
@@ -2965,6 +4574,8 @@ class AIAssistantApp:
         return self._sample_machine_vision_unseen_exit_cell(self._machine_vision_exit_context_key())
 
     def _update_machine_vision_localization(self, player_row: int, player_col: int) -> None:
+        if not self._machine_vision_enabled():
+            return
         if not self.machine_vision_player_localization_enable:
             return
 
@@ -2974,6 +4585,7 @@ class AIAssistantApp:
             int(player_col),
             str(self.player_facing),
             self._normalized_layout_mode(),
+            int(self.current_maze_episode_id),
         )
         if sample_key == self._machine_vision_last_sample_key:
             return
@@ -2992,6 +4604,18 @@ class AIAssistantApp:
             self.machine_vision_global_cell_counts[actual_cell] = int(
                 self.machine_vision_global_cell_counts.get(actual_cell, 0)
             ) + 1
+            # Immediately re-predict after writing training evidence so a
+            # cold-start/reset step can become self-localized in the same cycle.
+            pred_cell_after_train, conf_after_train, support_after_train, source_after_train = (
+                self._predict_player_cell_from_machine_vision(signature_key)
+            )
+            if str(source_after_train) == "learned_signature":
+                pred_row, pred_col = pred_cell_after_train
+                confidence = float(conf_after_train)
+                support = int(support_after_train)
+                model_source = str(source_after_train)
+                manhattan_error = abs(int(pred_row) - actual_cell[0]) + abs(int(pred_col) - actual_cell[1])
+                is_exact = 1 if manhattan_error == 0 else 0
 
         self.machine_vision_total_samples += 1
         self.machine_vision_exact_hits += is_exact
@@ -3004,6 +4628,8 @@ class AIAssistantApp:
             "exact": bool(is_exact == 1),
             "manhattan_error": int(manhattan_error),
             "source": model_source,
+            "maze_layout_id": int(self.current_maze_episode_id),
+            "step_index": int(self.memory_step_index),
         }
         self.machine_vision_recent_results.appendleft(
             {
@@ -3076,6 +4702,8 @@ class AIAssistantApp:
             return
 
     def _update_machine_vision_exit_localization(self, player_row: int, player_col: int) -> None:
+        if not self._machine_vision_enabled():
+            return
         if not self.machine_vision_exit_localization_enable:
             return
         if self._normalized_layout_mode() != "maze":
@@ -3104,6 +4732,18 @@ class AIAssistantApp:
             self.machine_vision_exit_global_cell_counts[actual_exit] = int(
                 self.machine_vision_exit_global_cell_counts.get(actual_exit, 0)
             ) + 1
+            # Immediately re-predict after writing training evidence so a new map
+            # can acquire an exit lock in the same preplan cycle.
+            pred_cell_after_train, conf_after_train, support_after_train, source_after_train = (
+                self._predict_exit_cell_from_machine_vision(signature_key)
+            )
+            if str(source_after_train) == "learned_signature":
+                pred_row, pred_col = pred_cell_after_train
+                confidence = float(conf_after_train)
+                support = int(support_after_train)
+                model_source = str(source_after_train)
+                manhattan_error = abs(int(pred_row) - actual_exit[0]) + abs(int(pred_col) - actual_exit[1])
+                is_exact = 1 if manhattan_error == 0 else 0
 
         self.machine_vision_exit_total_samples += 1
         self.machine_vision_exit_exact_hits += is_exact
@@ -3116,6 +4756,8 @@ class AIAssistantApp:
             "exact": bool(is_exact == 1),
             "manhattan_error": int(manhattan_error),
             "source": model_source,
+            "maze_layout_id": int(self.current_maze_episode_id),
+            "step_index": int(self.memory_step_index),
         }
         self.machine_vision_exit_recent_results.appendleft(
             {
@@ -3752,6 +5394,113 @@ class AIAssistantApp:
                 neighbors.append(nxt)
         return neighbors
 
+    def _known_branch_profile(self, cell: tuple[int, int]) -> str:
+        profile_tokens: list[str] = []
+        for move in ["UP", "RIGHT", "DOWN", "LEFT"]:
+            nxt = self._neighbor_for_move(cell, move)
+            if nxt == cell:
+                profile_tokens.append("B")
+                continue
+            token = self.maze_known_cells.get(nxt)
+            if token == "#":
+                profile_tokens.append("B")
+            elif token in {".", "P", "S", "E"}:
+                profile_tokens.append("O")
+            else:
+                profile_tokens.append("U")
+        return "".join(profile_tokens)
+
+    def _structural_recall_key_from_signature(self, pattern_signature: str) -> str:
+        if not pattern_signature:
+            return ""
+        try:
+            payload = json.loads(pattern_signature)
+        except Exception:  # noqa: BLE001
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+
+        known_degree_bucket = int(payload.get("known_degree_bucket", payload.get("known_degree", 0)) or 0)
+        unknown_neighbors_bucket = int(payload.get("unknown_neighbors_bucket", payload.get("unknown_neighbors", 0)) or 0)
+
+        frontier_bucket_raw = payload.get("frontier_bucket")
+        if frontier_bucket_raw is None:
+            frontier_distance = int(payload.get("frontier_distance", 0) or 0)
+            if frontier_distance <= 0:
+                frontier_bucket = 0
+            elif frontier_distance <= 2:
+                frontier_bucket = 1
+            else:
+                frontier_bucket = 2
+        else:
+            frontier_bucket = int(frontier_bucket_raw or 0)
+
+        dead_end_risk_bucket = int(payload.get("dead_end_risk_bucket", payload.get("dead_end_risk", 0)) or 0)
+        transition_pressure_bucket = int(payload.get("transition_pressure_bucket", 0) or 0)
+        branch_profile = str(payload.get("branch_profile", "") or "")
+        spatial_zone = str(payload.get("spatial_zone", "z?") or "z?")
+        difficulty = str(payload.get("difficulty", self._normalized_maze_difficulty()) or self._normalized_maze_difficulty())
+        grid_size = int(payload.get("grid_size", self.grid_cells) or self.grid_cells)
+
+        return (
+            f"{difficulty}|g{grid_size}|z={spatial_zone}|bp={branch_profile}|"
+            f"k={min(3, max(0, known_degree_bucket))}|"
+            f"u={min(2, max(0, unknown_neighbors_bucket))}|"
+            f"f={min(2, max(0, frontier_bucket))}|"
+            f"d={min(3, max(0, dead_end_risk_bucket))}|"
+            f"t={min(3, max(0, transition_pressure_bucket))}"
+        )
+
+    def _candidate_structural_recall_key(
+        self,
+        *,
+        candidate: tuple[int, int],
+        known_degree: int,
+        unknown_neighbors: int,
+        frontier_distance: int,
+        dead_end_risk_depth: int,
+        transition_pressure_bucket: int,
+    ) -> str:
+        if self._normalized_layout_mode() != "maze":
+            return ""
+
+        if frontier_distance <= 0:
+            frontier_bucket = 0
+        elif frontier_distance <= 2:
+            frontier_bucket = 1
+        else:
+            frontier_bucket = 2
+
+        spatial_zone = str(self._spatial_master_index(current_cell=candidate).get("zone", "z?") or "z?")
+        branch_profile = self._known_branch_profile(candidate)
+        dead_end_risk_bucket = min(3, max(0, int(dead_end_risk_depth)))
+
+        return (
+            f"{self._normalized_maze_difficulty()}|g{self.grid_cells}|z={spatial_zone}|bp={branch_profile}|"
+            f"k={min(3, max(0, known_degree))}|"
+            f"u={min(2, max(0, unknown_neighbors))}|"
+            f"f={min(2, max(0, frontier_bucket))}|"
+            f"d={dead_end_risk_bucket}|"
+            f"t={min(3, max(0, transition_pressure_bucket))}"
+        )
+
+    def _recent_structural_recall_signal(self, structural_key: str) -> tuple[int, float]:
+        if not structural_key:
+            return (0, 0.0)
+        if not self.working_memory_recent_signatures:
+            return (0, 0.0)
+
+        window_size = max(1, int(self.structural_recall_window))
+        recent = list(self.working_memory_recent_signatures)[-window_size:]
+        if not recent:
+            return (0, 0.0)
+
+        matches = 0
+        for signature in recent:
+            if self._structural_recall_key_from_signature(signature) == structural_key:
+                matches += 1
+        return (matches, (matches / len(recent)))
+
     def _build_structural_summary(self) -> dict:
         open_cells = self._known_open_cells()
         blocked_cells = {cell for cell, token in self.maze_known_cells.items() if token == "#"}
@@ -3806,9 +5555,13 @@ class AIAssistantApp:
         }
         return summary
 
-    def _store_structural_memory_snapshot(self) -> None:
+    def _store_structural_memory_snapshot(self, force: bool = False) -> None:
         if self._normalized_layout_mode() != "maze":
             return
+        if not force:
+            step_gap = int(self.memory_step_index) - int(self._last_structural_snapshot_step)
+            if step_gap < int(self.structural_memory_snapshot_interval_steps):
+                return
         try:
             summary = self._build_structural_summary()
             signature_payload = {
@@ -3819,7 +5572,7 @@ class AIAssistantApp:
                 "summary": summary,
             }
             signature = json.dumps(signature_payload, sort_keys=True)
-            if signature == self._last_saved_structural_signature:
+            if not force and signature == self._last_saved_structural_signature:
                 return
 
             self._last_saved_structural_signature = signature
@@ -3850,8 +5603,22 @@ class AIAssistantApp:
                         json.dumps(summary, separators=(",", ":")),
                     ),
                 )
+                max_rows = int(self.structural_memory_max_rows)
+                if max_rows > 0:
+                    conn.execute(
+                        """
+                        DELETE FROM maze_structural_memory
+                        WHERE id NOT IN (
+                            SELECT id FROM maze_structural_memory
+                            ORDER BY id DESC
+                            LIMIT ?
+                        )
+                        """,
+                        (max_rows,),
+                    )
                 conn.commit()
-            self._refresh_memory_viewer()
+            self._last_structural_snapshot_step = int(self.memory_step_index)
+            self._refresh_memory_viewer_if_due(force=force)
         except Exception:  # noqa: BLE001
             return
 
@@ -3883,6 +5650,147 @@ class AIAssistantApp:
             f"dr={min(9, max(0, dead_end_risk))}"
         ).strip()
         return self._sanitize_pattern_name(name) or "local-planner"
+
+    def _recent_transition_sequence_motif(self, window: int = 8) -> str:
+        recent = list(self.maze_recent_transitions)[-max(2, int(window)):]
+        directions: list[str] = []
+        for frm, to in recent:
+            delta = (int(to[0]) - int(frm[0]), int(to[1]) - int(frm[1]))
+            if delta == (-1, 0):
+                directions.append("U")
+            elif delta == (1, 0):
+                directions.append("D")
+            elif delta == (0, -1):
+                directions.append("L")
+            elif delta == (0, 1):
+                directions.append("R")
+
+        if len(directions) < 2:
+            return "none"
+
+        reverse_pairs = 0
+        for idx in range(1, len(directions)):
+            prev_move = directions[idx - 1]
+            move = directions[idx]
+            if (prev_move, move) in {("U", "D"), ("D", "U"), ("L", "R"), ("R", "L")}:
+                reverse_pairs += 1
+
+        unique_count = len(set(directions))
+        if reverse_pairs >= 2:
+            return "ping_pong"
+        if unique_count <= 1 and len(directions) >= 3:
+            return "linear_repeat"
+        if unique_count >= 3:
+            return "explore_mix"
+        return "directed_mix"
+
+    def _spatial_master_index(
+        self,
+        *,
+        current_cell: tuple[int, int] | None = None,
+        candidate_cell: tuple[int, int] | None = None,
+    ) -> dict[str, object]:
+        if self._normalized_layout_mode() != "maze":
+            return {}
+
+        origin = current_cell if current_cell is not None else self.current_player_cell
+        row = int(origin[0])
+        col = int(origin[1])
+        grid_span = max(1, int(self.grid_cells))
+        zone_row = min(2, int((row * 3) / grid_span))
+        zone_col = min(2, int((col * 3) / grid_span))
+        zone = f"z{zone_row}{zone_col}"
+
+        frontier_distance = min(6, int(self._frontier_distance(origin, max_depth=6)))
+        if frontier_distance <= 0:
+            frontier_bucket = 0
+        elif frontier_distance <= 2:
+            frontier_bucket = 1
+        else:
+            frontier_bucket = 2
+
+        move_entropy = float(self._recent_move_direction_entropy())
+        if move_entropy <= 0.8:
+            loop_bucket = 2
+        elif move_entropy <= 1.3:
+            loop_bucket = 1
+        else:
+            loop_bucket = 0
+
+        retry_bucket = min(3, int(self._active_same_maze_retry_count()))
+        transition_pressure = 0
+        if self.maze_recent_transitions:
+            for frm, to in list(self.maze_recent_transitions)[-self.recent_cycle_window :]:
+                if frm == origin or to == origin:
+                    transition_pressure += 1
+        transition_pressure_bucket = min(3, int(transition_pressure // 2))
+        sequence_motif = self._recent_transition_sequence_motif(window=max(6, self.recent_cycle_window))
+
+        affect_valence_bucket = 1
+        affect_arousal_bucket = 1
+        if self.endocrine_enabled:
+            hormone = self.endocrine.state()
+            valence = (
+                float(hormone.get("H_persistence", 0.0) or 0.0)
+                + float(hormone.get("H_confidence", 0.0) or 0.0)
+                - float(hormone.get("H_caution", 0.0) or 0.0)
+                - float(hormone.get("H_boredom", 0.0) or 0.0)
+            )
+            arousal = (
+                float(hormone.get("H_caution", 0.0) or 0.0)
+                + float(hormone.get("H_boredom", 0.0) or 0.0)
+            )
+            if valence <= -0.35:
+                affect_valence_bucket = 0
+            elif valence >= 0.25:
+                affect_valence_bucket = 2
+
+            if arousal <= 0.35:
+                affect_arousal_bucket = 0
+            elif arousal >= 0.85:
+                affect_arousal_bucket = 2
+
+        candidate_zone = ""
+        transition_dir = ""
+        if candidate_cell is not None:
+            c_row = int(candidate_cell[0])
+            c_col = int(candidate_cell[1])
+            c_zone_row = min(2, int((c_row * 3) / grid_span))
+            c_zone_col = min(2, int((c_col * 3) / grid_span))
+            candidate_zone = f"z{c_zone_row}{c_zone_col}"
+            delta = (c_row - row, c_col - col)
+            if delta == (-1, 0):
+                transition_dir = "U"
+            elif delta == (1, 0):
+                transition_dir = "D"
+            elif delta == (0, -1):
+                transition_dir = "L"
+            elif delta == (0, 1):
+                transition_dir = "R"
+
+        context_key = (
+            f"{zone}|fb{frontier_bucket}|lb{loop_bucket}|rb{retry_bucket}|"
+            f"tp{transition_pressure_bucket}|seq={sequence_motif}|"
+            f"vb{affect_valence_bucket}|ab{affect_arousal_bucket}"
+        )
+        if candidate_zone:
+            context_key += f"|cz={candidate_zone}"
+        if transition_dir:
+            context_key += f"|mv={transition_dir}"
+
+        return {
+            "zone": zone,
+            "frontier_bucket": frontier_bucket,
+            "loop_bucket": loop_bucket,
+            "retry_bucket": retry_bucket,
+            "transition_pressure_bucket": transition_pressure_bucket,
+            "sequence_motif": sequence_motif,
+            "affect_valence_bucket": affect_valence_bucket,
+            "affect_arousal_bucket": affect_arousal_bucket,
+            "candidate_zone": candidate_zone,
+            "transition_dir": transition_dir,
+            "context_key": context_key,
+        }
 
     def _current_pattern_signature(self, current_cell: tuple[int, int] | None = None) -> str:
         if self._normalized_layout_mode() != "maze":
@@ -3999,6 +5907,7 @@ class AIAssistantApp:
                 if frm == current or to == current:
                     recent_transition_pressure += 1
         transition_pressure_bucket = min(3, recent_transition_pressure // 2)
+        spatial_index = self._spatial_master_index(current_cell=current)
         signature_payload = {
             "difficulty": self._normalized_maze_difficulty(),
             "grid_size": self.grid_cells,
@@ -4014,6 +5923,14 @@ class AIAssistantApp:
             "visible_risky_branches": visible_risky_branches,
             "dead_end_risk_depth": min(6, max(max_dead_end_risk_depth, visible_dead_end_risk_depth)),
             "transition_pressure_bucket": transition_pressure_bucket,
+            "spatial_zone": str(spatial_index.get("zone", "z?")),
+            "spatial_frontier_bucket": int(spatial_index.get("frontier_bucket", 0) or 0),
+            "spatial_loop_bucket": int(spatial_index.get("loop_bucket", 0) or 0),
+            "spatial_retry_bucket": int(spatial_index.get("retry_bucket", 0) or 0),
+            "sequence_motif": str(spatial_index.get("sequence_motif", "none") or "none"),
+            "affect_valence_bucket": int(spatial_index.get("affect_valence_bucket", 1) or 1),
+            "affect_arousal_bucket": int(spatial_index.get("affect_arousal_bucket", 1) or 1),
+            "spatial_context_key": str(spatial_index.get("context_key", "") or ""),
         }
         return json.dumps(signature_payload, sort_keys=True, separators=(",", ":"))
 
@@ -4061,6 +5978,13 @@ class AIAssistantApp:
             "branch_profile": str(payload.get("branch_profile", "") or ""),
             "visible_risky_branches_bucket": min(2, max(0, visible_risky_branches)),
             "transition_pressure_bucket": min(3, max(0, transition_pressure_bucket)),
+            "spatial_zone": str(payload.get("spatial_zone", "z?") or "z?"),
+            "spatial_frontier_bucket": min(3, max(0, int(payload.get("spatial_frontier_bucket", frontier_bucket) or frontier_bucket))),
+            "spatial_loop_bucket": min(2, max(0, int(payload.get("spatial_loop_bucket", 0) or 0))),
+            "spatial_retry_bucket": min(3, max(0, int(payload.get("spatial_retry_bucket", 0) or 0))),
+            "sequence_motif": str(payload.get("sequence_motif", "none") or "none")[:20],
+            "affect_valence_bucket": min(2, max(0, int(payload.get("affect_valence_bucket", 1) or 1))),
+            "affect_arousal_bucket": min(2, max(0, int(payload.get("affect_arousal_bucket", 1) or 1))),
         }
         return json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"))
 
@@ -4120,6 +6044,7 @@ class AIAssistantApp:
             return ("", "")
         cell = current_cell if current_cell is not None else self.current_player_cell
         row, col = cell
+        spatial_index = self._spatial_master_index(current_cell=cell)
         signature = self._canonical_pattern_signature(self._current_pattern_signature(current_cell=cell))
         ascii_pattern = self._build_local_status_snapshot(row, col, radius=1, facing=self.player_facing)
         if self.working_memory_look_sweep and self.working_memory_look_sweep_step == self.memory_step_index:
@@ -4174,6 +6099,11 @@ class AIAssistantApp:
             "signature": signature,
             "ascii": ascii_pattern,
             "player_cell": str(cell),
+            "spatial_context_key": str(spatial_index.get("context_key", "") or ""),
+            "spatial_zone": str(spatial_index.get("zone", "z?") or "z?"),
+            "sequence_motif": str(spatial_index.get("sequence_motif", "none") or "none"),
+            "affect_valence_bucket": int(spatial_index.get("affect_valence_bucket", 1) or 1),
+            "affect_arousal_bucket": int(spatial_index.get("affect_arousal_bucket", 1) or 1),
             "cause_effect_recent": "\n".join(cause_effect_recent_lines) if cause_effect_recent_lines else "",
         }
         if signature:
@@ -4504,13 +6434,16 @@ class AIAssistantApp:
         self.working_memory_look_sweep[direction] = {
             "signature": signature,
             "ascii": ascii_pattern,
+            "spatial_context_key": str(self.working_memory_active.get("spatial_context_key", "") or ""),
+            "spatial_zone": str(self.working_memory_active.get("spatial_zone", "z?") or "z?"),
+            "sequence_motif": str(self.working_memory_active.get("sequence_motif", "none") or "none"),
         }
 
     def _append_memory_log(self, message: str) -> None:
         self.memory_event_log.append(f"step={self.memory_step_index} {message}")
 
     def _endocrine_delta_text(self, before: dict[str, float], after: dict[str, float]) -> str:
-        fields = ["stress", "curiosity", "confidence", "fatigue", "reward"]
+        fields = ["H_curiosity", "H_caution", "H_persistence", "H_mv_trust", "H_boredom", "H_confidence"]
         deltas: list[str] = []
         for field in fields:
             prev = float(before.get(field, 0.0))
@@ -4519,6 +6452,101 @@ class AIAssistantApp:
             if abs(delta) >= 0.0005:
                 deltas.append(f"{field}:{delta:+.3f}")
         return " ".join(deltas)
+
+    def _hormone_blended_weight(
+        self,
+        modern_value: float,
+        legacy_value: float,
+        legacy_blend_override: float | None = None,
+    ) -> float:
+        if legacy_blend_override is None:
+            legacy_blend = max(0.0, min(1.0, float(self.hormone_legacy_weight_blend)))
+        else:
+            legacy_blend = max(0.0, min(1.0, float(legacy_blend_override)))
+        return ((1.0 - legacy_blend) * float(modern_value)) + (legacy_blend * float(legacy_value))
+
+    def _legacy_batch_1_low_impact_disabled(self) -> bool:
+        # Least impact: remove legacy confidence/momentum shaping first.
+        return int(self.hormone_legacy_batch_level) >= 1
+
+    def _legacy_batch_2_repeat_pressure_disabled(self) -> bool:
+        # Next: remove legacy repeat/fatigue pressure coupling.
+        return int(self.hormone_legacy_batch_level) >= 2
+
+    def _legacy_batch_3_exploration_bias_disabled(self) -> bool:
+        # Then: remove legacy curiosity-novelty exploration weighting.
+        return int(self.hormone_legacy_batch_level) >= 3
+
+    def _legacy_batch_4_risk_guard_disabled(self) -> bool:
+        # Highest impact: remove legacy caution/risk weighting.
+        return int(self.hormone_legacy_batch_level) >= 4
+
+    def _legacy_weight_disabled_for_channel(self, channel: str) -> bool:
+        key = (channel or "").strip().lower()
+        if key in {"confidence", "momentum"}:
+            return self._legacy_batch_1_low_impact_disabled()
+        if key in {"boredom", "repeat_pressure", "fatigue"}:
+            return self._legacy_batch_2_repeat_pressure_disabled()
+        if key in {"curiosity", "exploration"}:
+            return self._legacy_batch_3_exploration_bias_disabled()
+        if key in {"caution", "risk"}:
+            return self._legacy_batch_4_risk_guard_disabled()
+        return False
+
+    def _hormone_loop_adaptation_signal(self) -> float:
+        if not self.endocrine_enabled:
+            return 0.0
+        if not hasattr(self, "endocrine"):
+            return 0.0
+        try:
+            hormone = self.endocrine.state()
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+        H_caution = float(hormone.get("H_caution", 0.0) or 0.0)
+        H_boredom = float(hormone.get("H_boredom", 0.0) or 0.0)
+        H_confidence = float(hormone.get("H_confidence", 0.0) or 0.0)
+        H_persistence = float(hormone.get("H_persistence", 0.0) or 0.0)
+
+        raw_pressure = (
+            (0.75 * H_caution)
+            + (0.70 * H_boredom)
+            - (0.55 * H_confidence)
+            - (0.45 * H_persistence)
+        )
+        centered = raw_pressure - float(self.hormone_dynamic_legacy_loop_center)
+        scaled = centered * float(self.hormone_dynamic_legacy_loop_gain)
+        return max(0.0, min(1.0, scaled))
+
+    def _dynamic_legacy_blend_for_channel(self, channel: str, base_blend: float) -> float:
+        blend = max(0.0, min(1.0, float(base_blend)))
+        if blend <= 0.0:
+            return 0.0
+        if not self.hormone_dynamic_legacy_enable:
+            return blend
+
+        key = (channel or "").strip().lower()
+        if key not in {"confidence", "momentum", "boredom", "repeat_pressure", "fatigue"}:
+            return blend
+
+        loop_signal = self._hormone_loop_adaptation_signal()
+        if loop_signal <= 0.0:
+            return blend
+
+        max_suppression = float(self.hormone_dynamic_legacy_batch12_suppression_max)
+        suppression = max(0.0, min(max_suppression, loop_signal * max_suppression))
+        return blend * (1.0 - suppression)
+
+    def _hormone_weight_for_channel(self, channel: str, modern_value: float, legacy_value: float) -> float:
+        if self._legacy_weight_disabled_for_channel(channel):
+            return float(modern_value)
+        base_blend = max(0.0, min(1.0, float(self.hormone_legacy_weight_blend)))
+        effective_blend = self._dynamic_legacy_blend_for_channel(channel, base_blend)
+        return self._hormone_blended_weight(
+            modern_value,
+            legacy_value,
+            legacy_blend_override=effective_blend,
+        )
 
     def _append_endocrine_event(self, source: str, detail: str) -> None:
         text = (detail or "").strip()
@@ -4554,7 +6582,19 @@ class AIAssistantApp:
         else:
             outcome_label = "neutral"
 
-        details_payload = details or {}
+        details_payload = dict(details or {})
+        from_cell = self._coerce_cell_tuple(details_payload.get("from_cell"))
+        to_cell = self._coerce_cell_tuple(details_payload.get("to_cell"))
+        if mode == "maze":
+            anchor_cell = from_cell if from_cell is not None else cell
+            spatial_index = details_payload.get("spatial_index")
+            if not isinstance(spatial_index, dict):
+                spatial_index = self._spatial_master_index(
+                    current_cell=anchor_cell,
+                    candidate_cell=to_cell,
+                )
+                details_payload["spatial_index"] = spatial_index
+            details_payload.setdefault("spatial_context_key", str(spatial_index.get("context_key", "") or ""))
         try:
             with sqlite3.connect(self.memory_db_path) as conn:
                 conn.execute(
@@ -4619,20 +6659,12 @@ class AIAssistantApp:
                 ),
             )
 
-        from_cell_obj = details_payload.get("from_cell")
-        to_cell_obj = details_payload.get("to_cell")
-        from_cell: tuple[int, int] | None = None
-        to_cell: tuple[int, int] | None = None
-        if isinstance(from_cell_obj, (list, tuple)) and len(from_cell_obj) == 2:
-            try:
-                from_cell = (int(from_cell_obj[0]), int(from_cell_obj[1]))
-            except Exception:  # noqa: BLE001
-                from_cell = None
-        if isinstance(to_cell_obj, (list, tuple)) and len(to_cell_obj) == 2:
-            try:
-                to_cell = (int(to_cell_obj[0]), int(to_cell_obj[1]))
-            except Exception:  # noqa: BLE001
-                to_cell = None
+        self._learn_spatial_transition_memory(
+            from_cell=from_cell,
+            to_cell=to_cell,
+            outcome_score=outcome_score,
+            reason_tags=tags,
+        )
         self._register_transition_trap_event(
             from_cell=from_cell,
             to_cell=to_cell,
@@ -4748,6 +6780,14 @@ class AIAssistantApp:
             return [0.0 for _ in vector]
         return [value / norm for value in vector]
 
+    def _coerce_cell_tuple(self, value: object) -> tuple[int, int] | None:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            try:
+                return (int(value[0]), int(value[1]))
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
     def _token_to_index(self, token: str) -> int:
         return abs(hash(token)) % self.cause_effect_vector_dim
 
@@ -4771,6 +6811,24 @@ class AIAssistantApp:
                 f"difficulty:{self._normalized_maze_difficulty()}",
             ]
         )
+        spatial_index = detail_payload.get("spatial_index")
+        if not isinstance(spatial_index, dict):
+            from_cell = self._coerce_cell_tuple(detail_payload.get("from_cell"))
+            to_cell = self._coerce_cell_tuple(detail_payload.get("to_cell"))
+            anchor_cell = from_cell if from_cell is not None else self.current_player_cell
+            spatial_index = self._spatial_master_index(current_cell=anchor_cell, candidate_cell=to_cell)
+
+        if spatial_index:
+            context_key = str(spatial_index.get("context_key", "") or "")
+            if context_key:
+                tokens.append(f"spatial_ctx:{context_key}")
+            tokens.append(f"spatial_zone:{str(spatial_index.get('zone', 'z?'))}")
+            tokens.append(f"spatial_frontier:{int(spatial_index.get('frontier_bucket', 0) or 0)}")
+            tokens.append(f"spatial_loop:{int(spatial_index.get('loop_bucket', 0) or 0)}")
+            tokens.append(f"spatial_retry:{int(spatial_index.get('retry_bucket', 0) or 0)}")
+            tokens.append(f"spatial_seq:{str(spatial_index.get('sequence_motif', 'none'))}")
+            tokens.append(f"spatial_valence:{int(spatial_index.get('affect_valence_bucket', 1) or 1)}")
+            tokens.append(f"spatial_arousal:{int(spatial_index.get('affect_arousal_bucket', 1) or 1)}")
         for token in tokens:
             idx = self._token_to_index(token)
             vec[idx] += 1.0
@@ -4800,6 +6858,12 @@ class AIAssistantApp:
         unknown_neighbors = int(detail_payload.get("unknown_neighbors", 0) or 0)
         open_degree = int(detail_payload.get("open_degree", 0) or 0)
         frontier_distance = int(detail_payload.get("frontier_distance", 0) or 0)
+        spatial_index = detail_payload.get("spatial_index")
+        if not isinstance(spatial_index, dict):
+            from_cell = self._coerce_cell_tuple(detail_payload.get("from_cell"))
+            to_cell = self._coerce_cell_tuple(detail_payload.get("to_cell"))
+            anchor_cell = from_cell if from_cell is not None else self.current_player_cell
+            spatial_index = self._spatial_master_index(current_cell=anchor_cell, candidate_cell=to_cell)
         key_payload = {
             "action": action_taken.upper(),
             "difficulty": self._normalized_maze_difficulty(),
@@ -4808,6 +6872,9 @@ class AIAssistantApp:
             "unknown_bucket": min(3, max(0, unknown_neighbors)),
             "degree_bucket": min(4, max(0, open_degree)),
             "frontier_bucket": min(6, max(0, frontier_distance)),
+            "spatial_ctx": str(spatial_index.get("context_key", "") or "")[:48] if spatial_index else "",
+            "spatial_seq": str(spatial_index.get("sequence_motif", "none") or "none")[:20] if spatial_index else "none",
+            "spatial_zone": str(spatial_index.get("zone", "z?") or "z?")[:8] if spatial_index else "z?",
         }
         return json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
 
@@ -5240,6 +7307,8 @@ class AIAssistantApp:
             return ("", 0, False)
         lines = text.splitlines()
         total = len(lines)
+        if int(limit) <= 0:
+            return ("\n".join(lines), total, False)
         capped_limit = max(1, int(limit))
         if total <= capped_limit:
             return ("\n".join(lines), total, False)
@@ -5275,11 +7344,15 @@ class AIAssistantApp:
         memory_text = self._maze_memory_view_text(limit=self.memory_export_section_limit, compact=True)
         memory_logs = self._memory_log_text(limit=self.memory_export_log_limit)
         memory_log_total = len(self.memory_event_log)
+        hormone_text = self._hormone_monitor_text()
         debug_text = self.debug_output.get("1.0", tk.END).strip() if hasattr(self, "debug_output") else ""
         debug_tail, debug_total, debug_truncated = self._tail_text_lines(debug_text, self.memory_export_debug_limit)
-        memory_header = f"[MEMORY] (top {self.memory_export_section_limit} rows per persisted section)"
+        if self.memory_export_section_limit > 0:
+            memory_header = f"[MEMORY] (top {self.memory_export_section_limit} rows per persisted section)"
+        else:
+            memory_header = "[MEMORY] (all rows per persisted section)"
         memory_logs_header = "[MEMORY LOGS]"
-        if memory_log_total > self.memory_export_log_limit:
+        if self.memory_export_log_limit > 0 and memory_log_total > self.memory_export_log_limit:
             memory_logs_header = (
                 f"[MEMORY LOGS] (showing last {self.memory_export_log_limit} of {memory_log_total} events)"
             )
@@ -5292,6 +7365,8 @@ class AIAssistantApp:
             f"{memory_header}\n"
             f"{self._memory_regression_check_summary()}\n"
             f"{memory_text or '(empty)'}\n\n"
+            "[HORMONE PANEL]\n"
+            f"{redact_secrets(hormone_text) or '(empty)'}\n\n"
             f"{memory_logs_header}\n"
             f"{redact_secrets(memory_logs) or '(empty)'}\n\n"
             f"{pipeline_header}\n"
@@ -5402,7 +7477,12 @@ class AIAssistantApp:
             episodic_summary = self._episodic_memory_summary()
 
             wm_signature = self.working_memory_active.get("signature", "(none)")
-            wm_ascii = self.working_memory_active.get("ascii", "(none)")
+            wm_ascii = self._apply_ascii_visibility_mode(self.working_memory_active.get("ascii", "(none)"))
+            wm_spatial_context = str(self.working_memory_active.get("spatial_context_key", "") or "")
+            wm_spatial_zone = str(self.working_memory_active.get("spatial_zone", "z?") or "z?")
+            wm_sequence_motif = str(self.working_memory_active.get("sequence_motif", "none") or "none")
+            wm_affect_valence_bucket = int(self.working_memory_active.get("affect_valence_bucket", 1) or 1)
+            wm_affect_arousal_bucket = int(self.working_memory_active.get("affect_arousal_bucket", 1) or 1)
             wm_cause_effect = self.working_memory_active.get("cause_effect_recent", "")
             stm_text = "\n".join(
                 f"- {name} strength={round(strength, 3)} recall={recall} signature={sig}"
@@ -5517,6 +7597,10 @@ class AIAssistantApp:
                 f"visited_cells={episodic_summary['visited_cells']}\n\n"
                 "working_memory_active (episodic local view):\n"
                 f"signature={wm_signature}\n"
+                f"spatial_context={wm_spatial_context or '(none)'} "
+                f"zone={wm_spatial_zone} "
+                f"sequence_motif={wm_sequence_motif} "
+                f"affect_buckets=({wm_affect_valence_bucket},{wm_affect_arousal_bucket})\n"
                 f"ascii:\n{wm_ascii}\n\n"
                 f"working_cause_effect_recent (episodic):\n{wm_cause_effect or '(none)'}\n\n"
                 "predictive_memory:\n"
@@ -5534,7 +7618,7 @@ class AIAssistantApp:
                 "prediction_context_calibration:\n"
                 f"{calibration_context_text}\n\n"
                 "machine_vision_player_localization:\n"
-                f"enabled={1 if self.machine_vision_player_localization_enable else 0} "
+                f"enabled={1 if (self._machine_vision_enabled() and self.machine_vision_player_localization_enable) else 0} "
                 f"training={1 if self.machine_vision_player_localization_train_enable else 0} "
                 f"samples={self.machine_vision_total_samples} "
                 f"exact_hits={self.machine_vision_exact_hits} "
@@ -5542,13 +7626,15 @@ class AIAssistantApp:
                 f"mae={round(self._machine_vision_mae(), 3)}\n"
                 f"{machine_vision_text}\n\n"
                 "machine_vision_exit_localization:\n"
-                f"enabled={1 if self.machine_vision_exit_localization_enable else 0} "
+                f"enabled={1 if (self._machine_vision_enabled() and self.machine_vision_exit_localization_enable) else 0} "
                 f"training={1 if self.machine_vision_exit_localization_train_enable else 0} "
                 f"samples={self.machine_vision_exit_total_samples} "
                 f"exact_hits={self.machine_vision_exit_exact_hits} "
                 f"accuracy={round(self._machine_vision_exit_accuracy(), 3)} "
                 f"mae={round(self._machine_vision_exit_mae(), 3)}\n"
                 f"{machine_vision_exit_text}\n\n"
+                "machine_vision_cellmap_bootstrap:\n"
+                f"{self._machine_vision_cellmap_status_line()}\n\n"
                 "cross_maze_short_term_patterns:\n"
                 f"{stm_text}\n\n"
                 "cross_maze_long_term_semantic_memory:\n"
@@ -5564,7 +7650,7 @@ class AIAssistantApp:
             return "(maze structural memory unavailable)"
 
     def _compact_ascii_for_export(self, ascii_text: str, max_lines: int) -> str:
-        text = (ascii_text or "").strip()
+        text = self._apply_ascii_visibility_mode((ascii_text or "").strip())
         if not text:
             return ""
         if self.memory_export_strip_look_sections:
@@ -5572,6 +7658,8 @@ class AIAssistantApp:
                 marker_index = text.find(marker)
                 if marker_index >= 0:
                     text = text[:marker_index].rstrip()
+        if int(max_lines) <= 0:
+            return text
         lines = text.splitlines()
         if len(lines) <= max_lines:
             return text
@@ -5717,16 +7805,22 @@ class AIAssistantApp:
             )
             blocks.append("[Working Memory - episodic local view]")
             if self.working_memory_active:
-                wm_ascii_text = self.working_memory_active.get("ascii", "")
+                wm_ascii_text = self._apply_ascii_visibility_mode(self.working_memory_active.get("ascii", ""))
                 if compact:
                     wm_ascii_text = self._compact_ascii_for_export(
                         wm_ascii_text,
                         self.memory_export_ascii_max_lines,
                     )
                 blocks.append(
-                    "signature={sig}\nplayer_cell={cell}\nascii:\n{ascii}".format(
+                    "signature={sig}\nplayer_cell={cell}\nspatial_context={spatial}\n"
+                    "zone={zone} sequence_motif={motif} affect_buckets=({valence},{arousal})\nascii:\n{ascii}".format(
                         sig=self.working_memory_active.get("signature", ""),
                         cell=self.working_memory_active.get("player_cell", ""),
+                        spatial=self.working_memory_active.get("spatial_context_key", "") or "(none)",
+                        zone=self.working_memory_active.get("spatial_zone", "z?"),
+                        motif=self.working_memory_active.get("sequence_motif", "none"),
+                        valence=int(self.working_memory_active.get("affect_valence_bucket", 1) or 1),
+                        arousal=int(self.working_memory_active.get("affect_arousal_bucket", 1) or 1),
                         ascii=wm_ascii_text,
                     )
                 )
@@ -5739,10 +7833,10 @@ class AIAssistantApp:
             blocks.append("[Cross-Maze Short-Term Patterns]")
             if stm_rows:
                 for pattern_name, pattern_signature, ascii_pattern, strength, recall_count, updated_at in stm_rows:
-                    ascii_view = ascii_pattern
+                    ascii_view = self._apply_ascii_visibility_mode(ascii_pattern)
                     if compact:
                         ascii_view = self._compact_ascii_for_export(
-                            ascii_pattern,
+                            ascii_view,
                             self.memory_export_ascii_max_lines,
                         )
                     blocks.append(
@@ -5758,10 +7852,10 @@ class AIAssistantApp:
             blocks.append("[Cross-Maze Long-Term Semantic Memory]")
             if semantic_rows:
                 for pattern_name, pattern_signature, ascii_pattern, strength, recall_count, updated_at in semantic_rows:
-                    ascii_view = ascii_pattern
+                    ascii_view = self._apply_ascii_visibility_mode(ascii_pattern)
                     if compact:
                         ascii_view = self._compact_ascii_for_export(
-                            ascii_pattern,
+                            ascii_view,
                             self.memory_export_ascii_max_lines,
                         )
                     blocks.append(
@@ -5862,7 +7956,7 @@ class AIAssistantApp:
             blocks.append("[Machine Vision - player localization training]")
             blocks.append(
                 (
-                    f"enabled={1 if self.machine_vision_player_localization_enable else 0} "
+                    f"enabled={1 if (self._machine_vision_enabled() and self.machine_vision_player_localization_enable) else 0} "
                     f"training={1 if self.machine_vision_player_localization_train_enable else 0} "
                     f"samples={self.machine_vision_total_samples} "
                     f"exact_hits={self.machine_vision_exact_hits} "
@@ -5906,7 +8000,7 @@ class AIAssistantApp:
             blocks.append("[Machine Vision - exit localization training]")
             blocks.append(
                 (
-                    f"enabled={1 if self.machine_vision_exit_localization_enable else 0} "
+                    f"enabled={1 if (self._machine_vision_enabled() and self.machine_vision_exit_localization_enable) else 0} "
                     f"training={1 if self.machine_vision_exit_localization_train_enable else 0} "
                     f"samples={self.machine_vision_exit_total_samples} "
                     f"exact_hits={self.machine_vision_exit_exact_hits} "
@@ -6068,6 +8162,17 @@ class AIAssistantApp:
         self.memory_view_output.delete("1.0", tk.END)
         self.memory_view_output.insert(tk.END, text)
         self.memory_view_output.config(state=tk.DISABLED)
+
+    def _refresh_memory_viewer_if_due(self, force: bool = False) -> None:
+        if force:
+            self._refresh_memory_viewer()
+            self._last_memory_viewer_refresh_step = int(self.memory_step_index)
+            return
+        step_gap = int(self.memory_step_index) - int(self._last_memory_viewer_refresh_step)
+        if step_gap < int(self.memory_viewer_refresh_interval_steps):
+            return
+        self._refresh_memory_viewer()
+        self._last_memory_viewer_refresh_step = int(self.memory_step_index)
 
     def _build_logic_plan(self, user_prompt: str, assistant_instructions: str) -> dict:
         game_context = self._get_game_state_snapshot()
@@ -6682,7 +8787,19 @@ class AIAssistantApp:
         self._maze_stuck_trigger_count = 0
         self._maze_model_assist_calls_used = 0
         self._maze_model_assist_cooldown_remaining = 0
+        self._runtime_micro_frontier_stall_active = False
+        self._runtime_micro_frontier_no_progress_steps = 0
+        self._runtime_micro_frontier_stall_streak = 0
+        self._runtime_micro_frontier_signature = None
+        self._runtime_micro_frontier_disambiguation_cooldown_remaining = 0
+        self._runtime_micro_frontier_disambiguation_signature = None
+        self.adaptive_guard_recent_interventions.clear()
+        self.adaptive_guard_escape_lock_move = ""
+        self.adaptive_guard_escape_lock_steps = 0
+        self.adaptive_guard_escape_lock_repeat_floor = 0
         self._recent_step_penalties.clear()
+        if maze_mode:
+            self._normalize_long_run_runtime_state(trigger="run-set-start")
         recent_state_keys: deque[tuple[tuple[int, int], str]] = deque(maxlen=18)
         recent_positions: deque[tuple[int, int]] = deque(maxlen=max(8, self.maze_stuck_window))
         no_progress_steps = 0
@@ -6690,7 +8807,91 @@ class AIAssistantApp:
         objective_steps = 0
         fully_mapped_objective_steps = 0
         non_objective_fully_mapped_steps = 0
+        objective_unresolved_override_streak = 0
+        adaptive_guard_window = max(18, self.maze_stuck_window * 3)
+        recent_objective_routing_flags: deque[int] = deque(maxlen=adaptive_guard_window)
+        recent_objective_intervention_flags: deque[int] = deque(maxlen=adaptive_guard_window)
+        recent_objective_verification_hold_flags: deque[int] = deque(maxlen=adaptive_guard_window)
+        micro_frontier_prev_signature: tuple[int, int] | None = None
+        micro_frontier_stall_streak = 0
         last_regression_layout_id = int(self.current_maze_episode_id)
+
+        learned_memory_events = {
+            "semantic:reinforced",
+            "stm:reinforced",
+            "novel->stm",
+            "familiar->pruned",
+        }
+
+        def _phase1_intervention_types(reason_text: str, guard_override_flag: bool) -> list[str]:
+            reason = str(reason_text or "")
+            if not guard_override_flag:
+                return []
+            marker_map = [
+                ("objective_override", "Objective override:"),
+                ("stuck_reexplore_override", "Stuck re-explore override:"),
+                ("map_doubt_override", "Map-doubt override:"),
+                ("targeted_model_override", "Targeted-model override:"),
+                ("anti_oscillation_override", "Anti-oscillation override:"),
+                ("cycle_avoid_override", "Cycle-avoid override:"),
+                ("terminal_corridor_override", "Terminal/boxed-corridor override:"),
+                ("frontier_commit_override", "Frontier-commit override:"),
+                ("plan_hold_override", "Plan-hold override:"),
+                ("memory_risk_replay_guard", "[MEMORY-RISK-REPLAY-GUARD:"),
+                ("objective_relax_guard", "[OBJECTIVE-RELAX-GUARD:"),
+                ("objective_verify_gate", "[OBJECTIVE-VERIFY-GATE:"),
+                ("objective_progress_guard", "[OBJECTIVE-PROGRESS-GUARD:"),
+                ("micro_frontier_stall", "[MICRO-FRONTIER-STALL:"),
+                ("micro_frontier_disambiguation", "[MICRO-FRONTIER-DISAMBIGUATION:"),
+                ("deathloop_escape_override", "Deathloop escape override:"),
+                (
+                    "navigation_lock_emergency_escape",
+                    "Navigation-lock emergency escape armed:",
+                ),
+            ]
+            tags = [name for name, marker in marker_map if marker in reason]
+            if guard_override_flag and not tags:
+                tags.append("generic_guard_override")
+            return tags
+
+        def _phase1_channel(memory_event: str, intervention_types: list[str]) -> str:
+            learned = str(memory_event or "") in learned_memory_events
+            hardcoded = bool(intervention_types)
+            if learned and hardcoded:
+                return "mixed"
+            if learned:
+                return "learned_only"
+            if hardcoded:
+                return "hardcoded_only"
+            return "unknown"
+
+        def _phase1_telemetry_fields(
+            memory_event: str,
+            reason_text: str,
+            guard_override_flag: bool,
+            *,
+            progress_delta: int,
+            reward_signal: float,
+            penalty_signal: float,
+            decision_score: float,
+        ) -> str:
+            intervention_types = _phase1_intervention_types(reason_text, guard_override_flag)
+            channel = _phase1_channel(memory_event, intervention_types)
+            intervention_token = "|".join(intervention_types) if intervention_types else "none"
+            guard_budget_used, guard_budget_allowed = self._adaptive_guard_budget_snapshot()
+            return (
+                f"telemetry_channel={channel} "
+                f"telemetry_intervention={1 if intervention_types else 0} "
+                f"telemetry_intervention_types={intervention_token} "
+                f"telemetry_progress_delta={int(progress_delta)} "
+                f"telemetry_reward_signal={round(float(reward_signal), 3)} "
+                f"telemetry_penalty_signal={round(float(penalty_signal), 3)} "
+                f"telemetry_decision_score={round(float(decision_score), 3)} "
+                f"telemetry_guard_strength={round(self._adaptive_guard_strength(), 3)} "
+                f"telemetry_guard_budget_used={guard_budget_used} "
+                f"telemetry_guard_budget_allowed={guard_budget_allowed} "
+                f"telemetry_guard_utility_ema={round(float(self.guard_utility_ema), 3)}"
+            )
 
         while iterations < iteration_budget:
             completed, remaining = self._goal_session_progress()
@@ -6705,8 +8906,63 @@ class AIAssistantApp:
                 ),
             )
 
+            mv_preplan_note = ""
             if maze_mode:
-                self._preview_look_directions_blocking(self._available_look_directions())
+                mv_cellmap_ready, mv_cellmap_note = self._machine_vision_cellmap_ready_for_kernel()
+                if not mv_cellmap_ready:
+                    iterations += 1
+                    step_logs.append(
+                        f"step={iterations} proposal_source=kernel proposed=(none) selected=(none) "
+                        f"approved=False gets_closer=False kernel_move_used=False guard_override=False "
+                        f"pattern_name=(none) memory_event=mv-cellmap-wait distance_before=hidden "
+                        f"distance_after=hidden reason=[MV-CELLMAP-WAIT: {mv_cellmap_note}] "
+                        "telemetry_channel=unknown telemetry_intervention=0 "
+                        "telemetry_intervention_types=none telemetry_progress_delta=0 "
+                        "telemetry_reward_signal=0.0 telemetry_penalty_signal=0.0 "
+                        "telemetry_decision_score=0.0"
+                    )
+                    live_tail = "\n".join(step_logs[-12:])
+                    live_debug = f"[STEP MODE LIVE]\n{live_tail}"
+                    exploration_snapshot = self._format_exploration_candidates()
+                    live_debug += f"\n\n[EXPLORATION SCORES]\n{exploration_snapshot}"
+                    self.root.after(0, self._set_debug_text, live_debug)
+                    continue
+
+                if self._mv_route_mode_active():
+                    self._mv_preplan_last_status = "route-mode-bypass"
+                elif self.mv_preplan_sweep_enable:
+                    mv_preplan_ready, mv_preplan_note = self._mv_preplan_acquire_until_ready()
+                    self._mv_preplan_last_status = mv_preplan_note
+                    if not mv_preplan_ready:
+                        iterations += 1
+                        step_logs.append(
+                            f"step={iterations} proposal_source=kernel proposed=(none) selected=(none) "
+                            f"approved=False gets_closer=False kernel_move_used=False guard_override=False "
+                            f"pattern_name=(none) memory_event=mv-preplan-wait distance_before=hidden "
+                            f"distance_after=hidden reason=[MV-PREPLAN-WAIT: {mv_preplan_note}] "
+                            "telemetry_channel=unknown telemetry_intervention=0 "
+                            "telemetry_intervention_types=none telemetry_progress_delta=0 "
+                            "telemetry_reward_signal=0.0 telemetry_penalty_signal=0.0 "
+                            "telemetry_decision_score=0.0"
+                        )
+                        live_tail = "\n".join(step_logs[-12:])
+                        live_debug = f"[STEP MODE LIVE]\n{live_tail}"
+                        exploration_snapshot = self._format_exploration_candidates()
+                        live_debug += f"\n\n[EXPLORATION SCORES]\n{exploration_snapshot}"
+                        self.root.after(0, self._set_debug_text, live_debug)
+                        continue
+                    # Use an adaptive look policy right before scoring/planning.
+                    post_ready_hints = self._machine_vision_kernel_hints()
+                    post_ready_directions = self._mv_preplan_select_look_directions(post_ready_hints)
+                    if not post_ready_directions:
+                        post_ready_directions = self._available_look_directions()
+                    self._preview_look_directions_blocking(post_ready_directions)
+                    if post_ready_directions:
+                        mv_preplan_note = f"{mv_preplan_note} look={','.join(post_ready_directions)}".strip()
+                        self._mv_preplan_last_status = mv_preplan_note
+                else:
+                    self._mv_preplan_last_status = "disabled"
+                    self._preview_look_directions_blocking(self._available_look_directions())
 
             use_model_step_calls = (not local_kernel_only) and ((not maze_mode) or self.maze_step_model_hints)
             if not use_model_step_calls:
@@ -6757,11 +9013,24 @@ class AIAssistantApp:
             objective_routing_step = False
             fully_mapped_objective_step = False
             fully_mapped_context = False
+            micro_frontier_stall_active = False
+            micro_frontier_stall_note = ""
+            self._runtime_micro_frontier_stall_active = False
+            self._runtime_micro_frontier_no_progress_steps = 0
+            self._runtime_micro_frontier_stall_streak = 0
+            self._runtime_micro_frontier_signature = None
             if maze_mode:
                 if self._maze_reexplore_cooldown_remaining > 0:
                     self._maze_reexplore_cooldown_remaining = max(0, self._maze_reexplore_cooldown_remaining - 1)
                 if self._maze_model_assist_cooldown_remaining > 0:
                     self._maze_model_assist_cooldown_remaining = max(0, self._maze_model_assist_cooldown_remaining - 1)
+                if self._runtime_micro_frontier_disambiguation_cooldown_remaining > 0:
+                    self._runtime_micro_frontier_disambiguation_cooldown_remaining = max(
+                        0,
+                        self._runtime_micro_frontier_disambiguation_cooldown_remaining - 1,
+                    )
+                    if self._runtime_micro_frontier_disambiguation_cooldown_remaining == 0:
+                        self._runtime_micro_frontier_disambiguation_signature = None
                 recent_state_keys.append((self.current_player_cell, self.player_facing))
                 recent_positions.append(self.current_player_cell)
                 current_state = recent_state_keys[-1]
@@ -6776,6 +9045,11 @@ class AIAssistantApp:
                     no_progress_steps = 0
                     best_distance_seen = self._distance_from_target_for_cell(self.current_player_cell)
                     self._maze_reexplore_cooldown_remaining = 0
+                    self._runtime_micro_frontier_disambiguation_cooldown_remaining = 0
+                    self._runtime_micro_frontier_disambiguation_signature = None
+                    recent_objective_routing_flags.clear()
+                    recent_objective_intervention_flags.clear()
+                    recent_objective_verification_hold_flags.clear()
                     self._maze_timeout_reset_pulse = False
                 _target_row, _target_col = self.current_target_cell
                 exit_visible_now = (
@@ -6788,6 +9062,7 @@ class AIAssistantApp:
                         facing=self.player_facing,
                     )
                 )
+                self._update_spatial_exit_visibility(exit_visible_now)
                 fully_mapped_now = self._maze_episode_fully_mapped() or (
                     _known_open_now > 0 and _unknown_now <= 0 and _frontier_now <= 0
                 )
@@ -6798,28 +9073,118 @@ class AIAssistantApp:
                 if self._post_reset_stm_relax_remaining > 0:
                     self._post_reset_stm_relax_remaining = max(0, self._post_reset_stm_relax_remaining - 1)
 
+                mv_hints_now = self._machine_vision_kernel_hints()
+                mv_exit_confident = bool(
+                    mv_hints_now.get("exit_usable", False)
+                    and float(mv_hints_now.get("exit_conf", 0.0) or 0.0) >= 0.9
+                    and str(mv_hints_now.get("exit_source", "none") or "none")
+                    in {"learned_signature", "prior_sample_context"}
+                )
+                mv_exit_pred_cell = tuple(mv_hints_now.get("exit_pred_cell", (-1, -1)) or (-1, -1))
+
                 target_known_in_episode = self.maze_known_cells.get(self.current_target_cell, "") == "E"
-                visible_exit_latch_active = bool(target_known_in_episode and exit_visible_now)
                 target_path_now = self._shortest_path_moves_between_cells(
                     self.current_player_cell,
                     self.current_target_cell,
                 )
                 sticky_objective_move = self._sticky_objective_move()
                 sticky_objective_active = bool(target_known_in_episode and sticky_objective_move)
+                mv_bootstrap_route_active = False
+                mv_bootstrap_route_move = ""
+                mv_bootstrap_target = (-1, -1)
+                mv_bootstrap_path_len = 0
+                mv_route_mode_active = False
+                mv_route_mode_move = ""
+                mv_route_mode_path_len = 0
+                mv_route_mode_note = ""
+                mv_exit_beam_equivalent = False
+                mv_self_conf_now = float(mv_hints_now.get("self_conf", 0.0) or 0.0)
+                mv_self_source_now = str(mv_hints_now.get("self_source", "none") or "none")
+                mv_self_error_now_raw = mv_hints_now.get("self_error", -1)
+                mv_self_error_now = int(mv_self_error_now_raw if mv_self_error_now_raw is not None else -1)
+                mv_exit_conf_now = float(mv_hints_now.get("exit_conf", 0.0) or 0.0)
+                mv_exit_source_now = str(mv_hints_now.get("exit_source", "none") or "none")
+                if not self._mv_route_mode_active():
+                    mv_exit_beam_equivalent = bool(
+                        bool(mv_hints_now.get("enabled", False))
+                        and bool(mv_hints_now.get("exit_usable", False))
+                        and bool(mv_hints_now.get("exit_fresh", False))
+                        and mv_exit_pred_cell == self.current_target_cell
+                        and mv_exit_source_now in {"learned_signature", "prior_sample_context"}
+                        and mv_exit_conf_now >= float(self.machine_vision_beam_equivalent_min_conf)
+                        and 0 <= mv_self_error_now <= int(self.machine_vision_beam_equivalent_max_self_error)
+                        and bool(target_path_now)
+                    )
+                visible_exit_latch_active = bool(target_known_in_episode and (exit_visible_now or mv_exit_beam_equivalent))
+                mv_capture_ready = bool(
+                    mv_exit_beam_equivalent
+                    and (_unknown_now <= 1 and _frontier_now <= 0)
+                )
+                mv_self_identified = bool(
+                    bool(mv_hints_now.get("enabled", False))
+                    and mv_self_source_now in {"learned_signature", "prior_sample_context", "prior_sample"}
+                    and mv_self_conf_now >= float(self.mv_bootstrap_self_min_conf)
+                    and 0 <= mv_self_error_now <= int(self.mv_bootstrap_max_self_error)
+                )
+                mv_exit_identified = bool(
+                    bool(mv_hints_now.get("enabled", False))
+                    and bool(mv_hints_now.get("exit_usable", False))
+                    and mv_exit_source_now in {"learned_signature", "prior_sample_context", "prior_sample"}
+                    and mv_exit_conf_now >= float(self.mv_bootstrap_exit_min_conf)
+                )
+                if (
+                    self.mv_bootstrap_route_enable
+                    and (not self._mv_route_mode_active())
+                    and (not target_known_in_episode)
+                    and (not sticky_objective_active)
+                    and mv_self_identified
+                    and mv_exit_identified
+                ):
+                    _mv_pred_exit = tuple(mv_hints_now.get("exit_pred_cell", (-1, -1)) or (-1, -1))
+                    _mv_row, _mv_col = int(_mv_pred_exit[0]), int(_mv_pred_exit[1])
+                    if 0 <= _mv_row < self.grid_cells and 0 <= _mv_col < self.grid_cells:
+                        _mv_target = (_mv_row, _mv_col)
+                        _mv_path = self._shortest_path_moves_between_cells(self.current_player_cell, _mv_target)
+                        if _mv_path:
+                            mv_bootstrap_route_active = True
+                            mv_bootstrap_route_move = _mv_path[0]
+                            mv_bootstrap_target = _mv_target
+                            mv_bootstrap_path_len = len(_mv_path)
+                if self._mv_route_mode_active():
+                    mv_route_mode_move, mv_route_mode_path_len, mv_route_mode_note = self._mv_route_planning_move()
+                    mv_route_mode_active = bool(mv_route_mode_move)
+                retry_capture_resolution_ok = (_unknown_now <= 2 and _frontier_now <= 1)
                 retry_capture_active = bool(
                     target_known_in_episode
                     and (sticky_objective_active or target_path_now)
+                    and retry_capture_resolution_ok
                     and self._active_same_maze_retry_count() > 0
                 )
+                objective_override_batch_stage = max(0, min(4, int(self.objective_override_phase_level)))
+                objective_phase4_disable_override = objective_override_batch_stage >= 4
                 objective_priority_active = bool(target_known_in_episode and (sticky_objective_active or target_path_now)) and (
                     sticky_objective_active
                     or retry_capture_active
                     or fully_mapped_now
                     or exit_visible_now
+                    or mv_exit_beam_equivalent
                 )
+                if mv_capture_ready:
+                    objective_priority_active = True
+                if mv_bootstrap_route_active:
+                    objective_priority_active = True
+                if mv_route_mode_active:
+                    objective_priority_active = True
+                if objective_phase4_disable_override and (not (mv_capture_ready or mv_bootstrap_route_active or mv_route_mode_active)):
+                    # Phase-4 semantics: disable objective override path while unresolved.
+                    objective_priority_active = False
+                    if sticky_objective_active:
+                        self._clear_sticky_objective_path()
+                        sticky_objective_active = False
+                        sticky_objective_move = ""
                 retry_continuity_active = self._retry_continuity_active() and (_unknown_now > 0 or _frontier_now > 0)
                 frontier_lock_active = self._frontier_lock_active(_unknown_now, _frontier_now)
-                if objective_priority_active or sticky_objective_active or exit_visible_now:
+                if objective_priority_active or sticky_objective_active or exit_visible_now or mv_exit_beam_equivalent or mv_bootstrap_route_active or mv_route_mode_active:
                     frontier_lock_active = False
 
                 current_distance_maze = self._distance_from_target_for_cell(self.current_player_cell)
@@ -6829,23 +9194,113 @@ class AIAssistantApp:
                 else:
                     no_progress_steps += 1
 
+                # Detect unresolved tiny-pocket stalls where uncertainty stays tiny
+                # and the agent replays local corridor choices without progress.
+                # By default this includes frontier=0 closure pockets as well.
+                if (
+                    self.micro_frontier_stall_enable
+                    and (not fully_mapped_now)
+                    and _unknown_now > 0
+                    and (
+                        _frontier_now > 0
+                        or (
+                            self.micro_frontier_stall_include_closure_pockets
+                            and _frontier_now == 0
+                        )
+                    )
+                    and _unknown_now <= int(self.micro_frontier_stall_unknown_max)
+                    and _frontier_now <= int(self.micro_frontier_stall_frontier_max)
+                ):
+                    micro_signature = (int(_unknown_now), int(_frontier_now))
+                    if (
+                        micro_signature == micro_frontier_prev_signature
+                        and no_progress_steps >= int(self.micro_frontier_stall_no_progress_min)
+                    ):
+                        micro_frontier_stall_streak += 1
+                    elif no_progress_steps >= int(self.micro_frontier_stall_no_progress_min):
+                        micro_frontier_stall_streak = 1
+                    else:
+                        micro_frontier_stall_streak = 0
+                    micro_frontier_prev_signature = micro_signature
+                    micro_frontier_stall_active = (
+                        micro_frontier_stall_streak >= int(self.micro_frontier_stall_window_steps)
+                        and current_cell_repeats >= int(self.micro_frontier_stall_repeat_min)
+                    )
+                    if micro_frontier_stall_active:
+                        micro_frontier_stall_note = (
+                            "[MICRO-FRONTIER-STALL: "
+                            f"unknown={_unknown_now} frontier={_frontier_now} "
+                            f"repeats={current_cell_repeats} no_progress={no_progress_steps} "
+                            f"streak={micro_frontier_stall_streak}]"
+                        )
+                else:
+                    micro_frontier_prev_signature = None
+                    micro_frontier_stall_streak = 0
+
+                if micro_frontier_stall_active:
+                    self._runtime_micro_frontier_stall_active = True
+                    self._runtime_micro_frontier_no_progress_steps = int(no_progress_steps)
+                    self._runtime_micro_frontier_stall_streak = int(micro_frontier_stall_streak)
+                    self._runtime_micro_frontier_signature = micro_frontier_prev_signature
+
                 stuck_reexplore_active = self.maze_stuck_reexplore_enable and self._maze_reexplore_cooldown_remaining > 0
                 local_contradiction_pressure = self._prediction_local_contradiction_debt(self.current_player_cell)
+                contradiction_escalation = 0
+                if local_contradiction_pressure >= 1.6:
+                    contradiction_escalation = 2
+                elif local_contradiction_pressure >= 0.9:
+                    contradiction_escalation = 1
                 repeat_trigger_threshold = max(
                     2,
-                    self.maze_stuck_repeat_threshold - (1 if local_contradiction_pressure >= 1.4 else 0),
+                    self.maze_stuck_repeat_threshold - contradiction_escalation,
                 )
                 no_progress_trigger_threshold = max(
                     2,
-                    self.maze_stuck_no_progress_threshold - (1 if local_contradiction_pressure >= 1.4 else 0),
+                    self.maze_stuck_no_progress_threshold - contradiction_escalation,
                 )
+                recent_objective_routing_count = int(sum(recent_objective_routing_flags))
+                recent_objective_intervention_count = int(sum(recent_objective_intervention_flags))
+                recent_objective_hold_count = int(sum(recent_objective_verification_hold_flags))
+                recent_objective_intervention_rate = (
+                    float(recent_objective_intervention_count) / float(recent_objective_routing_count)
+                    if recent_objective_routing_count > 0
+                    else 0.0
+                )
+                recent_objective_hold_rate = (
+                    float(recent_objective_hold_count) / float(max(1, len(recent_objective_verification_hold_flags)))
+                )
+                intervention_hold_balance = recent_objective_intervention_rate - recent_objective_hold_rate
+                adaptive_guard_sensitivity = max(0.7, min(1.35, 1.0 + intervention_hold_balance))
+                adaptive_repeat_trigger_threshold = max(
+                    2,
+                    int(round(repeat_trigger_threshold / adaptive_guard_sensitivity)),
+                )
+                adaptive_no_progress_trigger_threshold = max(
+                    2,
+                    int(round(no_progress_trigger_threshold / adaptive_guard_sensitivity)),
+                )
+                adaptive_unknown_trigger_threshold = max(2, no_progress_trigger_threshold - 3)
+                adaptive_frontier_trigger_threshold = max(1, repeat_trigger_threshold - 2)
+                if adaptive_guard_sensitivity >= 1.08:
+                    adaptive_unknown_trigger_threshold = max(1, adaptive_unknown_trigger_threshold - 1)
+                    adaptive_frontier_trigger_threshold = max(1, adaptive_frontier_trigger_threshold - 1)
+                elif adaptive_guard_sensitivity <= 0.92:
+                    adaptive_unknown_trigger_threshold += 1
+                    adaptive_frontier_trigger_threshold += 1
+                retry_unknown_trigger_threshold = max(1, adaptive_unknown_trigger_threshold - 1)
+                retry_frontier_trigger_threshold = max(1, adaptive_frontier_trigger_threshold - 1)
                 objective_relax_guard_note = ""
+                objective_verification_hold_active = False
+                objective_verification_hold_note = ""
                 if (
                     objective_priority_active
                     and (not visible_exit_latch_active)
+                    and (not mv_exit_beam_equivalent)
+                    and (not mv_route_mode_active)
+                    and (not mv_capture_ready)
                     and (_unknown_now > 0 or _frontier_now > 0)
-                    and current_cell_repeats >= repeat_trigger_threshold
-                    and no_progress_steps >= no_progress_trigger_threshold
+                    and current_cell_repeats >= adaptive_repeat_trigger_threshold
+                    and no_progress_steps >= adaptive_no_progress_trigger_threshold
                 ):
                     objective_priority_active = False
                     if sticky_objective_active:
@@ -6856,16 +9311,147 @@ class AIAssistantApp:
                         "[OBJECTIVE-RELAX-GUARD: loop-pressure released objective lock "
                         f"repeats={current_cell_repeats} no_progress={no_progress_steps}]"
                     )
+                verification_entropy_collapse = (
+                    len(self.maze_recent_transitions) >= max(4, self.loop_entropy_window - 1)
+                    and self._recent_move_direction_entropy() <= self.loop_entropy_threshold
+                )
+                retry_count_now = self._active_same_maze_retry_count()
+                base_loop_pressure = (
+                    current_cell_repeats >= adaptive_repeat_trigger_threshold
+                    or no_progress_steps >= adaptive_no_progress_trigger_threshold
+                )
+                retry_loop_pressure = (
+                    retry_count_now > 0
+                    and (
+                        current_cell_repeats >= adaptive_repeat_trigger_threshold
+                        or no_progress_steps >= adaptive_no_progress_trigger_threshold
+                        or (
+                            verification_entropy_collapse
+                            and no_progress_steps >= max(3, adaptive_no_progress_trigger_threshold - 1)
+                        )
+                        or objective_unresolved_override_streak >= 2
+                    )
+                )
+                entropy_loop_pressure = verification_entropy_collapse and (
+                    current_cell_repeats >= adaptive_repeat_trigger_threshold
+                    or no_progress_steps >= adaptive_no_progress_trigger_threshold
+                )
+                objective_verification_loop_pressure = (
+                    base_loop_pressure
+                    or retry_loop_pressure
+                    or entropy_loop_pressure
+                    or micro_frontier_stall_active
+                    or objective_unresolved_override_streak >= 3
+                )
+                objective_verification_unresolved = (
+                    _unknown_now >= adaptive_unknown_trigger_threshold
+                    or _frontier_now >= adaptive_frontier_trigger_threshold
+                    or (
+                        retry_count_now > 0
+                        and (
+                            _unknown_now >= retry_unknown_trigger_threshold
+                            or _frontier_now >= retry_frontier_trigger_threshold
+                        )
+                    )
+                )
+                if (
+                    objective_override_batch_stage >= 1
+                    and objective_verification_unresolved
+                    and (not self._hard_override_phase_disables_verification_priority())
+                    and (not mv_exit_beam_equivalent)
+                    and (not mv_bootstrap_route_active)
+                    and (not mv_route_mode_active)
+                    and (not mv_capture_ready)
+                    and (not fully_mapped_now)
+                ):
+                    # Progressive weakening of objective override as legacy batch level ramps.
+                    # Stage-1: gentle suppression only on stronger unresolved pockets or recent streaks.
+                    # Stage-2: stricter while exit is not currently visible.
+                    # Stage-3 (phase-3 weakening): unresolved objective override is only allowed
+                    # when exit is currently visible and route is objective-safe.
+                    # Stage-4: disable unresolved objective override entirely.
+                    batch_weaken_hold = False
+                    if objective_override_batch_stage >= 4:
+                        batch_weaken_hold = True
+                    elif objective_override_batch_stage >= 3:
+                        batch_weaken_hold = (not exit_visible_now) or (not self._maze_objective_override_safe())
+                    elif objective_override_batch_stage >= 2:
+                        batch_weaken_hold = (
+                            (not exit_visible_now)
+                            and (
+                                _unknown_now >= retry_unknown_trigger_threshold
+                                or _frontier_now >= retry_frontier_trigger_threshold
+                            )
+                        )
+                    else:
+                        batch_weaken_hold = (not exit_visible_now) and (
+                            _unknown_now >= adaptive_unknown_trigger_threshold
+                            or _frontier_now >= adaptive_frontier_trigger_threshold
+                            or objective_unresolved_override_streak >= 1
+                        )
+
+                    if batch_weaken_hold:
+                        objective_priority_active = False
+                        objective_verification_hold_active = True
+                        if sticky_objective_active:
+                            self._clear_sticky_objective_path()
+                            sticky_objective_active = False
+                            sticky_objective_move = ""
+                        objective_verification_hold_note = self._append_guard_reason(
+                            objective_verification_hold_note,
+                            (
+                                f"[OBJECTIVE-BATCH-WEAKEN-{objective_override_batch_stage}: "
+                                "unresolved objective override suppressed "
+                                f"unknown={_unknown_now} frontier={_frontier_now} "
+                                f"exit_visible={exit_visible_now}]"
+                            ),
+                        )
+                if (
+                    objective_priority_active
+                    and objective_verification_unresolved
+                    and objective_verification_loop_pressure
+                    and (not self._hard_override_phase_disables_verification_priority())
+                    and (not visible_exit_latch_active)
+                    and (not mv_exit_beam_equivalent)
+                    and (not mv_bootstrap_route_active)
+                    and (not mv_route_mode_active)
+                    and (not mv_capture_ready)
+                    and (not fully_mapped_now)
+                ):
+                    objective_priority_active = False
+                    objective_verification_hold_active = True
+                    if sticky_objective_active:
+                        self._clear_sticky_objective_path()
+                        sticky_objective_active = False
+                        sticky_objective_move = ""
+                    objective_verification_hold_note = (
+                        "[OBJECTIVE-VERIFY-GATE: unresolved branch verification prioritized "
+                        f"unknown={_unknown_now} frontier={_frontier_now} "
+                        f"repeats={current_cell_repeats} no_progress={no_progress_steps} "
+                        f"retries={retry_count_now} "
+                        f"entropy={round(self._recent_move_direction_entropy(), 3)} "
+                        f"adaptive_sensitivity={round(adaptive_guard_sensitivity, 3)} "
+                        f"adaptive_intervention_rate={round(recent_objective_intervention_rate, 3)} "
+                        f"adaptive_hold_rate={round(recent_objective_hold_rate, 3)}]"
+                    )
                 should_trigger_stuck_reexplore = (
                     self.maze_stuck_reexplore_enable
                     and self._maze_reexplore_cooldown_remaining == 0
+                    and (not mv_exit_confident)
+                    and (not mv_exit_beam_equivalent)
+                    and (not mv_bootstrap_route_active)
+                    and (not mv_route_mode_active)
                     and (not objective_priority_active)
                     and (not sticky_objective_active)
-                    and (not frontier_lock_active)
+                    and ((not frontier_lock_active) or micro_frontier_stall_active)
                     and (not exit_visible_now)
-                    and current_cell_repeats >= repeat_trigger_threshold
-                    and no_progress_steps >= no_progress_trigger_threshold
-                    and (_frontier_now > 0 or _unknown_now >= 2 or (not fully_mapped_now and _frontier_now > 0))
+                    and current_cell_repeats >= adaptive_repeat_trigger_threshold
+                    and no_progress_steps >= adaptive_no_progress_trigger_threshold
+                    and (
+                        _frontier_now > 0
+                        or _unknown_now >= retry_unknown_trigger_threshold
+                        or (not fully_mapped_now and _frontier_now > 0)
+                    )
                 )
                 if should_trigger_stuck_reexplore:
                     # Escalate re-explore duration when repeated stuck episodes occur.
@@ -6880,8 +9466,10 @@ class AIAssistantApp:
                     objective_priority_active
                     or sticky_objective_active
                     or retry_continuity_active
-                    or frontier_lock_active
+                    or (frontier_lock_active and (not micro_frontier_stall_active))
                     or visible_exit_latch_active
+                    or mv_exit_beam_equivalent
+                    or mv_route_mode_active
                 ):
                     # Do not let exploration recovery suppress objective routing
                     # once target is known or a retry frontier target is available.
@@ -6899,7 +9487,7 @@ class AIAssistantApp:
                     map_doubt_stall_count = 0
                     map_doubt_active = True
 
-                if visible_exit_latch_active and map_doubt_active:
+                if (visible_exit_latch_active or mv_exit_beam_equivalent or mv_route_mode_active) and map_doubt_active:
                     # Visible exit should always force capture routing over map-doubt exploration.
                     map_doubt_active = False
                     map_doubt_cooldown = 0
@@ -6907,10 +9495,10 @@ class AIAssistantApp:
                 # Hidden-exit override: If the maze is fully mapped and the target exit is known
                 # (whether visible or just in memory), suppress map-doubt and force navigation mode.
                 hidden_exit_override_triggered = False
-                if map_doubt_active and (fully_mapped_now or exit_visible_now):
+                if map_doubt_active and (fully_mapped_now or exit_visible_now or mv_exit_beam_equivalent):
                     # Check if exit is known (in maze_known_cells as "E")
                     exit_known = self.maze_known_cells.get(self.current_target_cell, "") == "E"
-                    if exit_known or exit_visible_now:
+                    if exit_known or exit_visible_now or mv_exit_beam_equivalent:
                         map_doubt_active = False
                         map_doubt_cooldown = 0
                         hidden_exit_override_triggered = True
@@ -6925,25 +9513,62 @@ class AIAssistantApp:
 
                 objective_move = ""
                 objective_risk_guard_note = ""
+                objective_routing_intervention = False
                 navigation_mode_lock = False
+                phase4_unresolved_override_block = bool(
+                    objective_phase4_disable_override
+                    and (_unknown_now > 0 or _frontier_now > 0)
+                    and (not fully_mapped_now)
+                    and (not self._hard_override_phase_disables_verification_priority())
+                    and (not mv_bootstrap_route_active)
+                    and (not mv_route_mode_active)
+                    and (not mv_capture_ready)
+                    and (not mv_exit_beam_equivalent)
+                )
                 # NAVIGATION MODE: If fully mapped OR penalties are catastrophic,
                 # force objective routing to exit (pure navigation, not exploration).
-                if sticky_objective_active:
+                if mv_route_mode_active:
+                    objective_move = mv_route_mode_move
+                elif mv_bootstrap_route_active:
+                    objective_move = mv_bootstrap_route_move
+                elif phase4_unresolved_override_block:
+                    objective_verification_hold_active = True
+                    guard_reason = self._append_guard_reason(
+                        guard_reason,
+                        (
+                            "Objective phase-4 disable: unresolved objective override is off. "
+                            f"unknown={_unknown_now} frontier={_frontier_now} "
+                            "waiting for direct verification progress."
+                        ),
+                    )
+                    if sticky_objective_active:
+                        self._clear_sticky_objective_path()
+                        sticky_objective_active = False
+                        sticky_objective_move = ""
+                elif sticky_objective_active:
                     objective_move = sticky_objective_move
-                    navigation_mode_lock = True
                 elif objective_priority_active:
                     if target_path_now:
                         self._prime_sticky_objective_path(target_path_now)
                     objective_move = target_path_now[0] if target_path_now else ""
-                    navigation_mode_lock = True
                 elif fully_mapped_now or loop_escape_override_triggered:
                     objective_move = self._best_maze_objective_move()
-                    navigation_mode_lock = True
-                elif (not map_doubt_active) and (not stuck_reexplore_active):
+                elif (not map_doubt_active) and (not stuck_reexplore_active) and (not objective_verification_hold_active):
                     objective_move = self._best_maze_objective_move()
+                elif objective_verification_hold_active:
+                    guard_reason = (
+                        "Objective verification gate: delaying objective routing while unresolved branches remain under loop pressure. "
+                        f"unknown={_unknown_now} frontier={_frontier_now} "
+                        f"repeats={current_cell_repeats} no_progress={no_progress_steps}"
+                    )
+                    if micro_frontier_stall_note:
+                        guard_reason = self._append_guard_reason(guard_reason, micro_frontier_stall_note)
+                    if objective_relax_guard_note:
+                        guard_reason += f" {objective_relax_guard_note}"
+                    if objective_verification_hold_note:
+                        guard_reason += f" {objective_verification_hold_note}"
                 elif map_doubt_active:
                     # Map-doubt active but NOT fully mapped: still exploring alternatives
-                    guard_override = True
                     guard_reason = (
                         "Map-doubt override: suppressing objective-only routing to re-check nearby branches. "
                         f"cooldown={map_doubt_cooldown} repeats={current_state_repeats} "
@@ -6952,7 +9577,6 @@ class AIAssistantApp:
                     if hidden_exit_override_triggered:
                         guard_reason += f" [HIDDEN-EXIT-OVERRIDE: exit known, resuming navigation mode]"
                 elif stuck_reexplore_active:
-                    guard_override = True
                     guard_reason = (
                         "Stuck re-explore override: suppressing objective routing and forcing branch re-checks. "
                         f"cooldown={self._maze_reexplore_cooldown_remaining} repeats={current_cell_repeats} "
@@ -6961,7 +9585,19 @@ class AIAssistantApp:
                     if objective_relax_guard_note:
                         guard_reason += f" {objective_relax_guard_note}"
                 if objective_move:
-                    objective_move, objective_risk_guard_note = self._objective_move_with_risk_guard(objective_move)
+                    objective_mv_tiebreak_note = ""
+                    if not (mv_bootstrap_route_active or mv_route_mode_active):
+                        objective_move, objective_mv_tiebreak_note = self._objective_move_with_mv_tiebreak(objective_move)
+                    if not (mv_bootstrap_route_active or mv_exit_beam_equivalent or mv_route_mode_active):
+                        objective_move, objective_risk_guard_note = self._objective_move_with_risk_guard(objective_move)
+                    else:
+                        objective_risk_guard_note = ""
+                    if objective_mv_tiebreak_note:
+                        objective_risk_guard_note = (
+                            f"{objective_risk_guard_note} {objective_mv_tiebreak_note}".strip()
+                            if objective_risk_guard_note
+                            else objective_mv_tiebreak_note
+                        )
                     enforce_objective_progress = bool(
                         target_path_now
                         and (
@@ -6974,7 +9610,7 @@ class AIAssistantApp:
                             )
                         )
                     )
-                    if enforce_objective_progress and target_path_now:
+                    if enforce_objective_progress and target_path_now and (not mv_route_mode_active):
                         objective_move, objective_progress_guard_note = self._objective_progress_guard(
                             objective_move,
                             target_path_now[0],
@@ -6986,10 +9622,50 @@ class AIAssistantApp:
                                 if objective_risk_guard_note
                                 else objective_progress_guard_note
                             )
+                if (
+                    objective_move
+                    and objective_verification_unresolved
+                    and (not fully_mapped_now)
+                    and (not mv_bootstrap_route_active)
+                    and (not mv_route_mode_active)
+                    and (not mv_capture_ready)
+                    and (not mv_exit_beam_equivalent)
+                ):
+                    objective_candidates = [
+                        (move, self._neighbor_for_move(self.current_player_cell, move))
+                        for move in ["UP", "DOWN", "LEFT", "RIGHT"]
+                        if self._is_valid_traversal_move(move)
+                    ]
+                    objective_force_allowed, objective_force_reason = self._frontier_forced_move_score_guard(
+                        objective_move,
+                        objective_candidates,
+                    )
+                    if not objective_force_allowed:
+                        objective_move = ""
+                        if sticky_objective_active:
+                            self._clear_sticky_objective_path()
+                            sticky_objective_active = False
+                            sticky_objective_move = ""
+                        objective_verification_hold_active = True
+                        objective_verification_hold_note = self._append_guard_reason(
+                            objective_verification_hold_note,
+                            (
+                                "[OBJECTIVE-SCORE-GUARD: unresolved objective override rejected "
+                                f"unknown={_unknown_now} frontier={_frontier_now} {objective_force_reason}]"
+                            ),
+                        )
+                        guard_override = True
+                        guard_reason = self._append_guard_reason(
+                            guard_reason,
+                            (
+                                "Objective score guard: objective routing was held because the unresolved "
+                                f"forced move was much worse than local best ({objective_force_reason})."
+                            ),
+                        )
                 if objective_move:
+                    navigation_mode_lock = True
                     selected_move = objective_move
                     fallback_used = True
-                    guard_override = True
                     objective_routing_step = True
                     # Capture diagnostic state at the moment of override so logs can
                     # assert "exit was actually in FOV" rather than just "guard fired".
@@ -7016,17 +9692,72 @@ class AIAssistantApp:
                             f" [RETRY-CAPTURE-OVERRIDE: retries={self._active_same_maze_retry_count()} "
                             f"path_len={len(target_path_now)}]"
                         )
+                    if mv_capture_ready:
+                        reason_suffix += (
+                            " [MV-OBJECTIVE-ACTIVATE: "
+                            f"pred={mv_exit_pred_cell} conf={round(float(mv_hints_now.get('exit_conf', 0.0) or 0.0), 3)} "
+                            f"src={str(mv_hints_now.get('exit_source', 'none') or 'none')}]"
+                        )
+                    if mv_exit_beam_equivalent:
+                        reason_suffix += (
+                            " [MV-BEAM-EQUIVALENT: "
+                            f"pred={mv_exit_pred_cell} conf={round(mv_exit_conf_now, 3)} "
+                            f"self_err={mv_self_error_now} src={mv_exit_source_now}]"
+                        )
+                    if mv_bootstrap_route_active:
+                        reason_suffix += (
+                            " [MV-BOOTSTRAP-ROUTE: "
+                            f"target={mv_bootstrap_target} path_len={mv_bootstrap_path_len} "
+                            f"self_conf={round(mv_self_conf_now, 3)} self_err={mv_self_error_now} "
+                            f"exit_conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]"
+                        )
+                    if mv_route_mode_active:
+                        reason_suffix += (
+                            " [MV-ROUTE-PLANNER: "
+                            f"path_len={mv_route_mode_path_len} note={mv_route_mode_note}]"
+                        )
                     if sticky_objective_active:
                         reason_suffix += f" [STICKY-OBJECTIVE: path_len={len(self._sticky_objective_path)}]"
                     if objective_risk_guard_note:
                         reason_suffix += f" {objective_risk_guard_note}"
-                    guard_reason = (
-                        f"Objective override: exit visible/known, prioritizing capture path. "
-                        f"exit_in_fov={_exit_in_fov} "
-                        f"unknown={_unknown_at_override} frontier={_frontier_at_override}"
-                        + reason_suffix
+                    objective_routing_intervention = bool(
+                        (_unknown_at_override > 0 or _frontier_at_override > 0)
+                        or loop_escape_override_triggered
+                        or retry_capture_active
+                        or mv_route_mode_active
+                        or ("[OBJECTIVE-PROGRESS-GUARD:" in objective_risk_guard_note)
+                        or ("[GOAL-CYCLE-GUARD:" in objective_risk_guard_note)
                     )
+                    guard_override = bool(guard_override or objective_routing_intervention)
+                    if mv_route_mode_active:
+                        guard_reason = (
+                            "MV route mode routing: following MV cellmap start->exit route across open spaces. "
+                            f"route_note={mv_route_mode_note} path_len={mv_route_mode_path_len} "
+                            f"exit_in_fov={_exit_in_fov} "
+                            f"unknown={_unknown_at_override} frontier={_frontier_at_override}"
+                            + reason_suffix
+                        )
+                    else:
+                        if objective_routing_intervention:
+                            guard_reason = (
+                                f"Objective override: exit visible/known, prioritizing capture path. "
+                                f"exit_in_fov={_exit_in_fov} "
+                                f"unknown={_unknown_at_override} frontier={_frontier_at_override}"
+                                + reason_suffix
+                            )
+                        else:
+                            guard_reason = (
+                                f"Objective routing: exit visible/known, following capture path. "
+                                f"exit_in_fov={_exit_in_fov} "
+                                f"unknown={_unknown_at_override} frontier={_frontier_at_override}"
+                                + reason_suffix
+                            )
+                    if (not _exit_in_fov) and (_unknown_at_override > 0 or _frontier_at_override > 0):
+                        objective_unresolved_override_streak += 1
+                    else:
+                        objective_unresolved_override_streak = 0
                 elif fully_mapped_now and (not map_doubt_active) and (not frontier_lock_active):
+                    objective_unresolved_override_streak = 0
                     # Once mapping has converged (unknown=0 and frontier=0),
                     # never fall back to open-ended exploration: either take a
                     # shortest-path capture step or terminate this episode.
@@ -7036,7 +9767,17 @@ class AIAssistantApp:
                     )
                     if _path_to_target:
                         self._prime_sticky_objective_path(_path_to_target)
-                        selected_move, objective_risk_guard_note = self._objective_move_with_risk_guard(_path_to_target[0])
+                        selected_move, objective_mv_tiebreak_note = self._objective_move_with_mv_tiebreak(_path_to_target[0])
+                        if not mv_exit_beam_equivalent:
+                            selected_move, objective_risk_guard_note = self._objective_move_with_risk_guard(selected_move)
+                        else:
+                            objective_risk_guard_note = ""
+                        if objective_mv_tiebreak_note:
+                            objective_risk_guard_note = (
+                                f"{objective_risk_guard_note} {objective_mv_tiebreak_note}".strip()
+                                if objective_risk_guard_note
+                                else objective_mv_tiebreak_note
+                            )
                         selected_move, objective_progress_guard_note = self._objective_progress_guard(
                             selected_move,
                             _path_to_target[0],
@@ -7050,12 +9791,16 @@ class AIAssistantApp:
                             )
                         navigation_mode_lock = True
                         fallback_used = True
-                        guard_override = True
                         objective_routing_step = True
                         fully_mapped_objective_step = True
+                        fully_mapped_routing_intervention = bool(
+                            ("[OBJECTIVE-PROGRESS-GUARD:" in objective_risk_guard_note)
+                            or ("[GOAL-CYCLE-GUARD:" in objective_risk_guard_note)
+                        )
+                        guard_override = bool(guard_override or fully_mapped_routing_intervention)
                         _risk_suffix = f" {objective_risk_guard_note}" if objective_risk_guard_note else ""
                         guard_reason = (
-                            "Fully-mapped policy: forcing shortest-path capture step "
+                            "Fully-mapped routing: shortest-path capture step "
                             f"(len={len(_path_to_target)}).{_risk_suffix}"
                         )
                     else:
@@ -7065,6 +9810,27 @@ class AIAssistantApp:
                             "Fully-mapped policy: no route to target from current cell; "
                             "ending episode to avoid exploration loop."
                         )
+                else:
+                    objective_unresolved_override_streak = 0
+
+                if self._mv_route_mode_active() and (not mv_route_mode_active):
+                    iterations += 1
+                    step_logs.append(
+                        f"step={iterations} proposal_source=kernel proposed=(none) selected=(none) "
+                        f"approved=False gets_closer=False kernel_move_used=False guard_override=False "
+                        f"pattern_name=(none) memory_event=mv-route-wait distance_before=hidden "
+                        f"distance_after=hidden reason=[MV-ROUTE-PLANNER-WAIT: {mv_route_mode_note}] "
+                        "telemetry_channel=unknown telemetry_intervention=0 "
+                        "telemetry_intervention_types=none telemetry_progress_delta=0 "
+                        "telemetry_reward_signal=0.0 telemetry_penalty_signal=0.0 "
+                        "telemetry_decision_score=0.0"
+                    )
+                    live_tail = "\n".join(step_logs[-12:])
+                    live_debug = f"[STEP MODE LIVE]\n{live_tail}"
+                    exploration_snapshot = self._format_exploration_candidates()
+                    live_debug += f"\n\n[EXPLORATION SCORES]\n{exploration_snapshot}"
+                    self.root.after(0, self._set_debug_text, live_debug)
+                    continue
 
                 best_explore = self._best_exploration_move()
                 if not selected_move and not end_episode_early:
@@ -7072,17 +9838,26 @@ class AIAssistantApp:
                     fallback_used = bool(best_explore)
 
                 targeted_assist_move = ""
+                step_breakdown_cache: dict[str, dict[str, object]] = {}
+
+                def _step_breakdown(move_name: str) -> dict[str, object]:
+                    cached = step_breakdown_cache.get(move_name)
+                    if cached is None:
+                        cached = self._exploration_move_breakdown(move_name)
+                        step_breakdown_cache[move_name] = cached
+                    return cached
+
                 legal_candidate_rows: list[tuple[str, dict[str, object]]] = []
                 for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
                     if not self._is_valid_traversal_move(move):
                         continue
-                    legal_candidate_rows.append((move, self._exploration_move_breakdown(move)))
+                    legal_candidate_rows.append((move, _step_breakdown(move)))
                 should_use_targeted_assist, assist_trigger_reason, assist_trigger_strength = (
                     self._should_request_targeted_maze_model_assist(
                         map_doubt_active=map_doubt_active,
                         stuck_reexplore_active=stuck_reexplore_active,
                         fully_mapped_now=fully_mapped_now,
-                        exit_visible_now=exit_visible_now,
+                        exit_visible_now=(exit_visible_now or mv_exit_beam_equivalent),
                         local_contradiction_pressure=local_contradiction_pressure,
                         current_cell_repeats=current_cell_repeats,
                         no_progress_steps=no_progress_steps,
@@ -7121,34 +9896,31 @@ class AIAssistantApp:
                         )
                         assist_breakdown = next(
                             (breakdown for move, breakdown in legal_candidate_rows if move == targeted_assist_move),
-                            self._exploration_move_breakdown(targeted_assist_move),
+                            _step_breakdown(targeted_assist_move),
                         )
-                        planner_breakdown = self._exploration_move_breakdown(selected_move) if selected_move else None
+                        planner_breakdown = _step_breakdown(selected_move) if selected_move else None
                         assist_score = int(assist_breakdown.get("score", 0) or 0)
                         planner_score = int(planner_breakdown.get("score", 0) or 0) if planner_breakdown else 0
                         assist_margin = max(2, int(round(4 + (self.maze_model_assist_reliance * 24))))
                         if bool(assist_result.get("used")) and ((not selected_move) or assist_score <= planner_score + assist_margin):
-                            prior_reason = guard_reason
                             selected_move = targeted_assist_move
                             fallback_used = False
                             guard_override = True
                             evaluation["approved"] = True
-                            guard_reason = (
+                            targeted_override_reason = (
                                 f"Targeted-model override: trigger={assist_trigger_reason} strength={assist_trigger_strength} "
                                 f"selected '{targeted_assist_move}' over planner '{best_explore or '(none)'}' "
                                 f"(assist_score={assist_score}, planner_score={planner_score}, margin={assist_margin})."
                             )
-                            if prior_reason:
-                                guard_reason = f"{prior_reason} {guard_reason}".strip()
+                            guard_reason = self._append_guard_reason(guard_reason, targeted_override_reason)
                         else:
                             evaluation["approved"] = False
-                            guard_override = True
                             assist_hold_reason = (
                                 f"Targeted-model hold: suggested '{targeted_assist_move}' under trigger={assist_trigger_reason} "
                                 f"but planner kept '{selected_move or best_explore or '(none)'}' "
                                 f"(assist_score={assist_score}, planner_score={planner_score}, margin={assist_margin})."
                             )
-                            guard_reason = f"{guard_reason} {assist_hold_reason}".strip() if guard_reason else assist_hold_reason
+                            guard_reason = self._append_guard_reason(guard_reason, assist_hold_reason)
 
                 model_candidate = ""
                 if evaluation["approved"] and evaluation["move"]:
@@ -7166,153 +9938,66 @@ class AIAssistantApp:
                     if model_candidate == best_explore:
                         selected_move = model_candidate
                         fallback_used = False
+                    elif self._hard_override_phase_disables_plan_hold():
+                        selected_move = model_candidate
+                        fallback_used = False
+                        guard_reason = self._append_guard_reason(
+                            guard_reason,
+                            (
+                                f"Plan-hold phase attenuation: accepted model move '{model_candidate}' "
+                                f"instead of planner '{best_explore}' (phase={int(self.hard_override_phase_level)})."
+                            ),
+                        )
                     else:
-                        candidate_breakdown = self._exploration_move_breakdown(model_candidate)
-                        best_breakdown = self._exploration_move_breakdown(best_explore)
+                        candidate_breakdown = _step_breakdown(model_candidate)
+                        best_breakdown = _step_breakdown(best_explore)
                         candidate_score = candidate_breakdown["score"]
                         best_score = best_breakdown["score"]
-                        score_gap = candidate_score - best_score
-                        guard_override = True
-                        guard_reason = (
-                            f"Plan-hold override: planner chose '{best_explore}' "
-                            f"(score={best_score}, base={best_breakdown.get('base_score_without_noise', best_score)}, "
-                            f"noise={best_breakdown.get('decision_noise', 0)}) over model '{model_candidate}' "
-                            f"(score={candidate_score}, base={candidate_breakdown.get('base_score_without_noise', candidate_score)}, "
-                            f"noise={candidate_breakdown.get('decision_noise', 0)}), gap={score_gap}."
-                        )
-
-                # Anti-oscillation guard: avoid A-B-A-B ping-pong unless
-                # immediate backtrack is the only legal traversal option.
-                if (not navigation_mode_lock) and (not frontier_lock_active) and selected_move and self._is_valid_traversal_move(selected_move):
-                    selected_next = self._neighbor_for_move(self.current_player_cell, selected_move)
-                    if selected_next == self.prev_prev_player_cell:
-                        selected_breakdown = self._exploration_move_breakdown(selected_move)
-                        selected_score = int(selected_breakdown["score"])
-                        tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
-                        alternatives: list[tuple[str, int]] = []
-                        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                            if not self._is_valid_traversal_move(move):
-                                continue
-                            nxt = self._neighbor_for_move(self.current_player_cell, move)
-                            if nxt == self.prev_prev_player_cell:
-                                continue
-                            breakdown = self._exploration_move_breakdown(move)
-                            alternatives.append((move, int(breakdown["score"])))
-
-                        if alternatives:
-                            alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
-                            replacement_move, replacement_score = alternatives[0]
-                            max_guard_margin = max(0, int(self.cycle_guard_score_margin))
-                            should_override = replacement_score <= selected_score + max_guard_margin
-                            if replacement_move != selected_move and should_override:
-                                prior_reason = guard_reason
+                        if self.phase2_soft_override_enable:
+                            soft_plan_delta = int(self.phase2_plan_hold_influence)
+                            adjusted_model_score = int(candidate_score - soft_plan_delta)
+                            if adjusted_model_score <= int(best_score):
+                                selected_move = model_candidate
+                                fallback_used = False
                                 guard_override = True
-                                fallback_used = True
-                                selected_move = replacement_move
-                                oscillation_reason = (
-                                    f"Anti-oscillation override: replaced immediate backtrack with '{replacement_move}' "
-                                    f"(score={replacement_score} vs {selected_score}, margin={max_guard_margin})."
+                                guard_reason = self._append_guard_reason(
+                                    guard_reason,
+                                    (
+                                        f"Plan-hold soft influence: accepted model '{model_candidate}' "
+                                        f"(raw={candidate_score}, adjusted={adjusted_model_score}, delta={soft_plan_delta}) "
+                                        f"vs planner '{best_explore}' (score={best_score})."
+                                    ),
                                 )
+                            else:
+                                score_gap = candidate_score - best_score
                                 guard_reason = (
-                                    f"{prior_reason} {oscillation_reason}".strip()
-                                    if prior_reason
-                                    else oscillation_reason
+                                    f"Plan-hold soft hold: planner kept '{best_explore}' "
+                                    f"(score={best_score}) over model '{model_candidate}' "
+                                    f"(raw={candidate_score}, adjusted={adjusted_model_score}, delta={soft_plan_delta}), "
+                                    f"raw_gap={score_gap}."
                                 )
-
-                # Cycle guard: avoid stepping into recently revisited cells
-                # when a reasonably-scored non-recent option exists.
-                if (not navigation_mode_lock) and (not frontier_lock_active) and selected_move and self._is_valid_traversal_move(selected_move):
-                    selected_next = self._neighbor_for_move(self.current_player_cell, selected_move)
-                    selected_visits = self.episode_visited_cells.get(selected_next, 0)
-                    recent_window_size = max(8, self.recent_cycle_window)
-                    recent_window = set(list(self.maze_recent_cells)[-recent_window_size:])
-                    selected_forward_count, selected_reverse_count = self._recent_transition_counts(
-                        self.current_player_cell,
-                        selected_next,
-                    )
-                    selected_is_transition_cycle = (selected_forward_count > 0 or selected_reverse_count > 0)
-                    if (selected_visits > 0 and selected_next in recent_window) or selected_is_transition_cycle:
-                        selected_breakdown = self._exploration_move_breakdown(selected_move)
-                        selected_score = int(selected_breakdown["score"])
-                        tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
-                        alternatives: list[tuple[str, int]] = []
-                        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                            if move == selected_move or not self._is_valid_traversal_move(move):
-                                continue
-                            nxt = self._neighbor_for_move(self.current_player_cell, move)
-                            if nxt in recent_window:
-                                continue
-                            alt_forward_count, alt_reverse_count = self._recent_transition_counts(
-                                self.current_player_cell,
-                                nxt,
+                        else:
+                            score_gap = candidate_score - best_score
+                            guard_reason = (
+                                f"Plan-hold override: planner chose '{best_explore}' "
+                                f"(score={best_score}, base={best_breakdown.get('base_score_without_noise', best_score)}, "
+                                f"noise={best_breakdown.get('decision_noise', 0)}) over model '{model_candidate}' "
+                                f"(score={candidate_score}, base={candidate_breakdown.get('base_score_without_noise', candidate_score)}, "
+                                f"noise={candidate_breakdown.get('decision_noise', 0)}), gap={score_gap}."
                             )
-                            if alt_forward_count > 0 or alt_reverse_count > 0:
-                                continue
-                            b = self._exploration_move_breakdown(move)
-                            alternatives.append((move, int(b["score"])))
-
-                        if alternatives:
-                            alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
-                            replacement_move, replacement_score = alternatives[0]
-                            # Allow a modest score margin to escape loops without
-                            # forcing obviously bad moves.
-                            if replacement_score <= selected_score + max(0, self.cycle_guard_score_margin):
-                                prior_reason = guard_reason
-                                guard_override = True
-                                fallback_used = True
-                                selected_move = replacement_move
-                                cycle_reason = (
-                                    f"Cycle-avoid override: replaced loop-prone move with '{replacement_move}' "
-                                    f"(score={replacement_score} vs {selected_score}, "
-                                    f"transition_counts={selected_forward_count}/{selected_reverse_count})."
-                                )
-                                guard_reason = (
-                                    f"{prior_reason} {cycle_reason}".strip()
-                                    if prior_reason
-                                    else cycle_reason
-                                )
-
-                # Look-sweep guard: if a move visibly leads into a terminal or
-                # boxed corridor with no visible exit, prefer a safer
-                # alternative within a modest score margin.
-                if (not navigation_mode_lock) and (not frontier_lock_active) and selected_move and self._is_valid_traversal_move(selected_move):
-                    selected_risky = (
-                        self._is_move_visibly_terminal_dead_end(self.current_player_cell, selected_move)
-                        or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, selected_move)
-                    )
-                    if selected_risky:
-                        selected_breakdown = self._exploration_move_breakdown(selected_move)
-                        selected_score = int(selected_breakdown["score"])
-                        tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
-                        alternatives: list[tuple[str, int]] = []
-                        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                            if move == selected_move or not self._is_valid_traversal_move(move):
-                                continue
-                            if (
-                                self._is_move_visibly_terminal_dead_end(self.current_player_cell, move)
-                                or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, move)
-                            ):
-                                continue
-                            b = self._exploration_move_breakdown(move)
-                            alternatives.append((move, int(b["score"])))
-
-                        if alternatives:
-                            alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
-                            replacement_move, replacement_score = alternatives[0]
-                            if replacement_score <= selected_score + max(0, self.terminal_end_guard_margin):
-                                prior_reason = guard_reason
-                                guard_override = True
-                                fallback_used = True
-                                selected_move = replacement_move
-                                terminal_reason = (
-                                    f"Terminal/boxed-corridor override: replaced risky branch with '{replacement_move}' "
-                                    f"(score={replacement_score} vs {selected_score})."
-                                )
-                                guard_reason = (
-                                    f"{prior_reason} {terminal_reason}".strip()
-                                    if prior_reason
-                                    else terminal_reason
-                                )
+                selected_move, guard_reason, guard_override, fallback_used = self._apply_post_selection_guard_arbiter(
+                    selected_move,
+                    navigation_mode_lock=navigation_mode_lock,
+                    frontier_lock_active=frontier_lock_active,
+                    objective_routing_step=objective_routing_step,
+                    micro_frontier_stall_active=micro_frontier_stall_active,
+                    micro_frontier_stall_note=micro_frontier_stall_note,
+                    micro_frontier_no_progress_steps=no_progress_steps,
+                    micro_frontier_repeat_count=current_cell_repeats,
+                    guard_reason=guard_reason,
+                    guard_override=guard_override,
+                    fallback_used=fallback_used,
+                )
             elif evaluation["approved"] and evaluation["move"]:
                 selected_move = evaluation["move"]
             elif self.enable_path_fallback:
@@ -7323,6 +10008,10 @@ class AIAssistantApp:
 
             current_distance = self._distance_from_target_for_cell(self.current_player_cell)
             selected_distance = self._distance_after_single_move(selected_move) if selected_move else current_distance
+            telemetry_progress_delta = int(current_distance - selected_distance) if selected_move else 0
+            telemetry_reward_signal = 0.0
+            telemetry_penalty_signal = 0.0
+            telemetry_decision_score = 0.0
             if (not maze_mode) and self.strict_progress_guard and selected_move and selected_distance > current_distance:
                 guard_move = self._best_progress_move()
                 if guard_move:
@@ -7335,13 +10024,17 @@ class AIAssistantApp:
                     selected_distance = self._distance_after_single_move(selected_move)
 
             if end_episode_early:
+                end_reason = guard_reason
+                end_memory_event = str(evaluation.get("memory_event", "") or "")
                 step_logs.append(
                     f"step={iterations + 1} proposal_source={evaluation.get('proposal_source', 'model')} "
                     f"proposed={proposed_move or '(none)'} selected=(none) approved={evaluation['approved']} "
                     f"gets_closer={evaluation['gets_closer']} kernel_move_used={fallback_used} "
                     f"guard_override={guard_override} pattern_name={evaluation.get('pattern_name', '')} "
                     f"memory_event={evaluation.get('memory_event', '')} distance_before={current_distance} "
-                    f"distance_after={selected_distance} reason={guard_reason}"
+                    f"distance_after={selected_distance} reason={guard_reason} "
+                    f"{_phase1_telemetry_fields(end_memory_event, end_reason, guard_override, progress_delta=0, reward_signal=0.0, penalty_signal=0.0, decision_score=0.0)} "
+                    f"{('[MV-PREPLAN: ' + mv_preplan_note + ']') if mv_preplan_note else ''}".strip()
                 )
                 break
 
@@ -7379,6 +10072,10 @@ class AIAssistantApp:
                     penalty_signal = capped_penalty
                     reward_signal = 0.0
                     outcome_value = -capped_penalty
+                telemetry_decision_score = decision_score
+                telemetry_reward_signal = reward_signal
+                telemetry_penalty_signal = penalty_signal
+                telemetry_progress_delta = int(current_distance - selected_distance)
                 tags: list[str] = []
                 risk_tag_fields = [
                     ("dead_end_end_slap_penalty", "dead_end_slap"),
@@ -7422,6 +10119,17 @@ class AIAssistantApp:
                         "open_degree": selected_breakdown.get("open_degree", 0),
                         "frontier_distance": selected_breakdown.get("frontier_distance", 0),
                         "edge_type": selected_breakdown.get("edge_type", ""),
+                        "hazard_preparedness_penalty": selected_breakdown.get("hazard_preparedness_penalty", 0),
+                        "hazard_preparedness_relative_pressure": selected_breakdown.get(
+                            "hazard_preparedness_relative_pressure",
+                            0.0,
+                        ),
+                        "spatial_transition_bonus": selected_breakdown.get("spatial_transition_bonus", 0),
+                        "spatial_transition_penalty": selected_breakdown.get("spatial_transition_penalty", 0),
+                        "spatial_branch_risk_penalty": selected_breakdown.get("spatial_branch_risk_penalty", 0),
+                        "spatial_exit_recall_bonus": selected_breakdown.get("spatial_exit_recall_bonus", 0),
+                        "spatial_exit_recall_penalty": selected_breakdown.get("spatial_exit_recall_penalty", 0),
+                        "spatial_exit_progress_norm": selected_breakdown.get("spatial_exit_progress_norm", 0.0),
                         "adaptive_features": selected_breakdown.get("adaptive_features", []),
                         "from_cell": list(self.current_player_cell),
                         "to_cell": list(self._neighbor_for_move(self.current_player_cell, selected_move)),
@@ -7437,11 +10145,47 @@ class AIAssistantApp:
                 # look/decision orientation immediately.
                 self.root.after(0, self._refresh_game_state)
 
+            pre_move_hits = self.targets_reached
+            pre_move_layout_id = int(self.current_maze_episode_id) if maze_mode else -1
             self._execute_single_move_blocking(selected_move)
             if maze_mode:
                 # Look-sweep WM is transient per decision cycle.
                 self._clear_working_memory_look_sweep()
+                layout_advanced = int(self.current_maze_episode_id) != pre_move_layout_id
+                hit_advanced = self.targets_reached > pre_move_hits
+                if layout_advanced or hit_advanced:
+                    # Reset per-maze progression/loop-pressure state so unresolved
+                    # verification gating does not leak into the next episode.
+                    no_progress_steps = 0
+                    best_distance_seen = self._distance_from_target_for_cell(self.current_player_cell)
+                    objective_unresolved_override_streak = 0
+                    map_doubt_cooldown = 0
+                    map_doubt_stall_count = 0
+                    recent_state_keys.clear()
+                    recent_positions.clear()
+                    recent_objective_routing_flags.clear()
+                    recent_objective_intervention_flags.clear()
+                    recent_objective_verification_hold_flags.clear()
+                    micro_frontier_prev_signature = None
+                    micro_frontier_stall_streak = 0
+                    self._recent_step_penalties.clear()
+                    self._maze_reexplore_cooldown_remaining = 0
+                    self._maze_stuck_trigger_count = 0
+                    self._maze_model_assist_calls_used = 0
+                    self._maze_model_assist_cooldown_remaining = 0
+                    self.adaptive_guard_escape_lock_move = ""
+                    self.adaptive_guard_escape_lock_steps = 0
+                    self.adaptive_guard_escape_lock_repeat_floor = 0
+                    self._normalize_long_run_runtime_state(trigger="maze-advance")
             iterations += 1
+            step_reason_text = f"{evaluation['reason']} {guard_reason}".strip()
+            step_memory_event = str(evaluation.get("memory_event", "") or "")
+            self._update_adaptive_guard_learning(
+                guard_override=guard_override,
+                progress_delta=telemetry_progress_delta,
+                reward_signal=telemetry_reward_signal,
+                penalty_signal=telemetry_penalty_signal,
+            )
 
             step_logs.append(
                 f"step={iterations} "
@@ -7453,8 +10197,14 @@ class AIAssistantApp:
                 f"memory_event={evaluation.get('memory_event', '') or 'memory:unknown'} "
                 f"distance_before={'hidden' if maze_mode else current_distance} "
                 f"distance_after={'hidden' if maze_mode else selected_distance} "
-                f"reason={evaluation['reason']} {guard_reason}".strip()
+                f"reason={step_reason_text} "
+                f"{_phase1_telemetry_fields(step_memory_event, step_reason_text, guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, decision_score=telemetry_decision_score)} "
+                f"{('[MV-PREPLAN: ' + mv_preplan_note + ']') if mv_preplan_note else ''}".strip()
             )
+            if maze_mode:
+                recent_objective_routing_flags.append(1 if objective_routing_step else 0)
+                recent_objective_intervention_flags.append(1 if objective_routing_intervention else 0)
+                recent_objective_verification_hold_flags.append(1 if objective_verification_hold_active else 0)
 
             live_tail = "\n".join(step_logs[-12:])
             live_debug = f"[STEP MODE LIVE]\n{live_tail}"
@@ -7467,6 +10217,18 @@ class AIAssistantApp:
         success = remaining == 0
         if success:
             self.root.after(0, lambda: self.status_var.set("Step mode complete"))
+            if self.sleep_cycle_enable and self.sleep_cycle_auto_after_run_set:
+                sleep_summary = self._run_sleep_cycle(trigger="post-run-set", auto_mode=True)
+                self.root.after(
+                    0,
+                    lambda summary=sleep_summary: self.status_var.set(
+                        (
+                            "Step mode complete | sleep cycle: "
+                            f"action_pruned={summary.get('action_rows_pruned', 0)} "
+                            f"prediction_pruned={summary.get('prediction_rows_pruned', 0)}"
+                        )
+                    ),
+                )
         elif iterations >= iteration_budget:
             self.root.after(0, lambda: self.status_var.set("Step mode stopped: max iterations reached"))
 
@@ -7605,11 +10367,30 @@ class AIAssistantApp:
         diff_menu.config(width=7)
         diff_menu.pack(side=tk.LEFT, padx=(6, 8))
 
+        tk.Checkbutton(
+            game_controls,
+            text="MV Enable",
+            variable=self.machine_vision_master_enable_var,
+            command=self._on_machine_vision_master_toggled,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(4, 8))
+
+        self.mv_route_mode_checkbutton = tk.Checkbutton(
+            game_controls,
+            text="MV Route Mode",
+            variable=self.mv_route_planning_mode_var,
+            command=self._on_mv_route_mode_toggled,
+            anchor="w",
+        )
+        self.mv_route_mode_checkbutton.pack(side=tk.LEFT, padx=(0, 10))
+        self._sync_machine_vision_toggle_controls()
+
         tk.Button(game_controls, text="Reset Target", command=self._spawn_target).pack(side=tk.LEFT)
         tk.Button(game_controls, text="New Layout", command=self._regenerate_blockers).pack(side=tk.LEFT, padx=(8, 0))
         tk.Button(game_controls, text="Next Maze", command=self._next_maze_layout).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(game_controls, text="Start #").pack(side=tk.LEFT, padx=(10, 4))
         tk.Entry(game_controls, textvariable=self.maze_map_start_var, width=6).pack(side=tk.LEFT)
+        tk.Button(game_controls, text="Random #", command=self._randomize_maze_start_number).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(game_controls, text="Set Start", command=self._set_maze_start_number).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(game_controls, text="Reset Score", command=self._reset_score).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(game_controls, textvariable=self.score_var).pack(side=tk.LEFT, padx=(10, 0))
@@ -7623,7 +10404,19 @@ class AIAssistantApp:
             side=tk.RIGHT,
             padx=(8, 0),
         )
-        tk.Button(memory_header, text="Copy Memory + Logs", command=self.copy_memory_bundle).pack(
+        tk.Button(memory_header, text="Log Dump", command=self.dump_memory_bundle).pack(
+            side=tk.RIGHT,
+            padx=(8, 0),
+        )
+        tk.Button(memory_header, text="Import Snapshot", command=self.import_memory_snapshot).pack(
+            side=tk.RIGHT,
+            padx=(8, 0),
+        )
+        tk.Button(memory_header, text="Export Snapshot", command=self.export_memory_snapshot).pack(
+            side=tk.RIGHT,
+            padx=(8, 0),
+        )
+        tk.Button(memory_header, text="Sleep Cycle", command=self.run_sleep_cycle_now).pack(
             side=tk.RIGHT,
             padx=(8, 0),
         )
@@ -7636,8 +10429,16 @@ class AIAssistantApp:
         self.memory_view_output = scrolledtext.ScrolledText(game_frame, wrap=tk.WORD, height=11, state=tk.DISABLED)
         self.memory_view_output.pack(fill=tk.BOTH, expand=True)
 
+        hormone_header = tk.Frame(game_frame)
+        hormone_header.pack(fill=tk.X, pady=(8, 4))
+        tk.Label(hormone_header, text="Hormone Monitor", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
+
+        self.hormone_panel_output = scrolledtext.ScrolledText(game_frame, wrap=tk.WORD, height=8, state=tk.DISABLED)
+        self.hormone_panel_output.pack(fill=tk.X, expand=False)
+
         self._init_game()
         self._refresh_memory_viewer()
+        self._refresh_hormone_panel()
 
         self.root.bind("<Command-Return>", self._on_cmd_enter)
 
@@ -7647,6 +10448,92 @@ class AIAssistantApp:
         self.debug_output.delete("1.0", tk.END)
         self.debug_output.insert(tk.END, safe_text)
         self.debug_output.config(state=tk.DISABLED)
+
+    def _set_hormone_panel_text(self, text: str) -> None:
+        if not hasattr(self, "hormone_panel_output"):
+            return
+        safe_text = redact_secrets(text)
+        self.hormone_panel_output.config(state=tk.NORMAL)
+        self.hormone_panel_output.delete("1.0", tk.END)
+        self.hormone_panel_output.insert(tk.END, safe_text)
+        self.hormone_panel_output.config(state=tk.DISABLED)
+
+    def _hormone_monitor_text(self) -> str:
+        lines: list[str] = []
+        if not self.endocrine_enabled:
+            lines.append("endocrine: disabled")
+        else:
+            state = self.endocrine.state()
+            neural = self.endocrine.neural_state()
+            lines.append(
+                (
+                    "hormones: "
+                    f"H_curiosity={state.get('H_curiosity', 0.0)} "
+                    f"H_caution={state.get('H_caution', 0.0)} "
+                    f"H_persistence={state.get('H_persistence', 0.0)} "
+                    f"H_mv_trust={state.get('H_mv_trust', 0.0)} "
+                    f"H_boredom={state.get('H_boredom', 0.0)} "
+                    f"H_confidence={state.get('H_confidence', 0.0)}"
+                )
+            )
+            lines.append(
+                (
+                    "derived: "
+                    f"exploration_drive={neural.get('exploration_drive', 0.0)} "
+                    f"risk_aversion={neural.get('risk_aversion', 0.0)} "
+                    f"momentum={neural.get('momentum', 0.0)} "
+                    f"mv_reliance={neural.get('mv_reliance', 0.0)}"
+                )
+            )
+            lines.append(f"blend: legacy_weight={round(float(self.hormone_legacy_weight_blend), 4)}")
+            lines.append(
+                (
+                    "dynamic_legacy: "
+                    f"enabled={1 if self.hormone_dynamic_legacy_enable else 0} "
+                    f"loop_signal={round(self._hormone_loop_adaptation_signal(), 4)} "
+                    f"center={round(float(self.hormone_dynamic_legacy_loop_center), 4)} "
+                    f"gain={round(float(self.hormone_dynamic_legacy_loop_gain), 4)} "
+                    f"batch12_supp_max={round(float(self.hormone_dynamic_legacy_batch12_suppression_max), 4)}"
+                )
+            )
+            lines.append(
+                (
+                    "legacy_batches: "
+                    f"level={int(self.hormone_legacy_batch_level)} "
+                    f"objective_override_phase={int(self.objective_override_phase_level)} "
+                    f"hard_override_phase={int(self.hard_override_phase_level)} "
+                    f"b1_low_impact_off={1 if self._legacy_batch_1_low_impact_disabled() else 0} "
+                    f"b2_repeat_off={1 if self._legacy_batch_2_repeat_pressure_disabled() else 0} "
+                    f"b3_exploration_off={1 if self._legacy_batch_3_exploration_bias_disabled() else 0} "
+                    f"b4_risk_off={1 if self._legacy_batch_4_risk_guard_disabled() else 0}"
+                )
+            )
+
+        if self.adaptive_progress_report_enable:
+            lines.append(
+                (
+                    "adaptive_progress_report: "
+                    f"inflight={1 if self._adaptive_progress_report_inflight else 0} "
+                    f"last_sent_step={self._last_adaptive_progress_report_step} "
+                    f"last_feedback_step={self.adaptive_progress_last_feedback_step}"
+                )
+            )
+            if self.adaptive_progress_last_feedback_summary:
+                lines.append(f"report_feedback: {self.adaptive_progress_last_feedback_summary}")
+            if self.adaptive_progress_last_autotune_summary:
+                lines.append(f"autotune: {self.adaptive_progress_last_autotune_summary}")
+            if self.adaptive_progress_last_error:
+                lines.append(f"report_error: {self.adaptive_progress_last_error}")
+        else:
+            lines.append("adaptive_progress_report: disabled")
+
+        return "\n".join(lines)
+
+    def _refresh_hormone_panel(self) -> None:
+        if not hasattr(self, "hormone_panel_output"):
+            return
+
+        self._set_hormone_panel_text(self._hormone_monitor_text())
 
     def _restore_window_geometry(self) -> None:
         try:
@@ -7665,6 +10552,42 @@ class AIAssistantApp:
             saved_difficulty = str(payload.get("maze_difficulty", "")).strip().lower()
             if saved_difficulty in {"easy", "medium", "hard"}:
                 self.maze_difficulty.set(saved_difficulty)
+
+            saved_mv_route_mode = payload.get("mv_route_planning_mode_enable")
+            if isinstance(saved_mv_route_mode, bool):
+                self.mv_route_planning_mode_enable = saved_mv_route_mode
+                self.mv_route_planning_mode_var.set(saved_mv_route_mode)
+            elif isinstance(saved_mv_route_mode, (int, float)):
+                parsed = bool(saved_mv_route_mode)
+                self.mv_route_planning_mode_enable = parsed
+                self.mv_route_planning_mode_var.set(parsed)
+            elif isinstance(saved_mv_route_mode, str):
+                parsed_text = saved_mv_route_mode.strip().lower()
+                if parsed_text in {"1", "true", "yes", "on"}:
+                    self.mv_route_planning_mode_enable = True
+                    self.mv_route_planning_mode_var.set(True)
+                elif parsed_text in {"0", "false", "no", "off"}:
+                    self.mv_route_planning_mode_enable = False
+                    self.mv_route_planning_mode_var.set(False)
+
+            saved_mv_master = payload.get("machine_vision_master_enable")
+            if isinstance(saved_mv_master, bool):
+                self.machine_vision_master_enable = saved_mv_master
+                self.machine_vision_master_enable_var.set(saved_mv_master)
+            elif isinstance(saved_mv_master, (int, float)):
+                parsed = bool(saved_mv_master)
+                self.machine_vision_master_enable = parsed
+                self.machine_vision_master_enable_var.set(parsed)
+            elif isinstance(saved_mv_master, str):
+                parsed_text = saved_mv_master.strip().lower()
+                if parsed_text in {"1", "true", "yes", "on"}:
+                    self.machine_vision_master_enable = True
+                    self.machine_vision_master_enable_var.set(True)
+                elif parsed_text in {"0", "false", "no", "off"}:
+                    self.machine_vision_master_enable = False
+                    self.machine_vision_master_enable_var.set(False)
+
+            self._sync_machine_vision_toggle_controls()
 
             self._on_layout_settings_changed()
 
@@ -7707,6 +10630,8 @@ class AIAssistantApp:
             payload = {"geometry": self.root.winfo_geometry()}
             payload["layout_mode"] = self._normalized_layout_mode()
             payload["maze_difficulty"] = self._normalized_maze_difficulty()
+            payload["mv_route_planning_mode_enable"] = bool(self.mv_route_planning_mode_enable)
+            payload["machine_vision_master_enable"] = bool(self.machine_vision_master_enable)
             if hasattr(self, "main_panes"):
                 sash_x, _ = self.main_panes.sash_coord(0)
                 payload["pane_sash_x"] = int(sash_x)
@@ -7714,6 +10639,558 @@ class AIAssistantApp:
                 json.dump(payload, handle)
         except Exception:  # noqa: BLE001
             return
+
+    def _record_last_navigation_session(self, requested_count: int, completed_count: int) -> None:
+        self.last_navigation_requested_count = max(1, int(requested_count or 1))
+        self.last_navigation_completed_count = max(0, int(completed_count or 0))
+        self.last_navigation_mode = self._normalized_layout_mode()
+        self.last_navigation_difficulty = self._normalized_maze_difficulty()
+
+    def _trim_log_deque(self, log_deque: deque, keep_last: int) -> int:
+        keep = max(0, int(keep_last))
+        current = len(log_deque)
+        if keep <= 0:
+            log_deque.clear()
+            return current
+        if current <= keep:
+            return 0
+        tail = list(log_deque)[-keep:]
+        log_deque.clear()
+        log_deque.extend(tail)
+        return current - keep
+
+    def _prune_table_to_recent_rows(self, conn: sqlite3.Connection, table_name: str, keep_rows: int) -> int:
+        keep = max(0, int(keep_rows))
+        if keep <= 0:
+            return 0
+
+        allowed_tables = {
+            "maze_action_outcome_memory",
+            "maze_prediction_memory",
+        }
+        if table_name not in allowed_tables:
+            return 0
+
+        try:
+            deleted_rows = conn.execute(
+                f"""
+                DELETE FROM {table_name}
+                WHERE id IN (
+                    SELECT id
+                    FROM {table_name}
+                    ORDER BY id DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (keep,),
+            )
+            return max(0, int(deleted_rows.rowcount or 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _run_sleep_cycle(self, trigger: str = "manual", auto_mode: bool = False) -> dict[str, int | str]:
+        if not self.sleep_cycle_enable:
+            return {
+                "trigger": str(trigger or "manual"),
+                "skipped": 1,
+                "reason": "disabled",
+            }
+
+        removed_memory_events = self._trim_log_deque(self.memory_event_log, self.sleep_cycle_memory_event_keep)
+        removed_endocrine_events = self._trim_log_deque(self.endocrine_event_log, self.sleep_cycle_endocrine_event_keep)
+        usage_reinforced_stm = 0
+        usage_reinforced_cause_effect = 0
+        usage_pruned_stm = 0
+        hormone_prune_applied = 0
+        hormone_prune_passes = 0
+        hormone_saturated_before = 0
+        hormone_saturated_after = 0
+        action_rows_pruned = 0
+        prediction_rows_pruned = 0
+        db_error = ""
+
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                usage_cutoff = max(
+                    0,
+                    int(self.memory_step_index) - int(self.sleep_cycle_usage_recent_window_steps),
+                )
+                if self.sleep_cycle_usage_boost > 0.0:
+                    reinforced_stm = conn.execute(
+                        """
+                        UPDATE maze_short_term_memory
+                        SET strength = strength + (? * (1.0 + (min(recall_count, 4) * 0.15))),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE last_recalled_step >= ?
+                        """,
+                        (float(self.sleep_cycle_usage_boost), int(usage_cutoff)),
+                    )
+                    usage_reinforced_stm = int(reinforced_stm.rowcount or 0)
+
+                    reinforced_cause_effect = conn.execute(
+                        """
+                        UPDATE maze_cause_effect_stm
+                        SET strength = strength + (? * (1.0 + (min(recall_count, 5) * 0.12))),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE recall_count >= 2
+                        """,
+                        (float(self.sleep_cycle_usage_boost) * 0.7,),
+                    )
+                    usage_reinforced_cause_effect = int(reinforced_cause_effect.rowcount or 0)
+
+                # Usage-aware stale cleanup before generic decay/prune pass.
+                usage_stale_pruned = conn.execute(
+                    """
+                    DELETE FROM maze_short_term_memory
+                    WHERE strength < ?
+                      AND recall_count <= 1
+                      AND last_recalled_step < ?
+                    """,
+                    (float(self.stm_prune_threshold), int(usage_cutoff)),
+                )
+                usage_pruned_stm = int(usage_stale_pruned.rowcount or 0)
+
+                action_rows_pruned = self._prune_table_to_recent_rows(
+                    conn,
+                    "maze_action_outcome_memory",
+                    self.sleep_cycle_action_outcome_keep_rows,
+                )
+                prediction_rows_pruned = self._prune_table_to_recent_rows(
+                    conn,
+                    "maze_prediction_memory",
+                    self.sleep_cycle_prediction_keep_rows,
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            db_error = str(exc)
+
+        stm_result = self._run_stm_pruning_cycle()
+        self._run_cause_effect_pruning_cycle()
+
+        if self.endocrine_enabled and self.sleep_cycle_hormone_prune_enable and hasattr(self, "endocrine"):
+            try:
+                hormone_prune = self.endocrine.sleep_cycle_prune(
+                    decay_passes=int(self.sleep_cycle_hormone_decay_passes),
+                    pull_strength=float(self.sleep_cycle_hormone_pull_strength),
+                    extreme_threshold=float(self.sleep_cycle_hormone_extreme_threshold),
+                )
+                hormone_prune_applied = int(hormone_prune.get("applied", 0) or 0)
+                hormone_prune_passes = int(hormone_prune.get("passes", 0) or 0)
+                hormone_saturated_before = int(hormone_prune.get("saturated_before", 0) or 0)
+                hormone_saturated_after = int(hormone_prune.get("saturated_after", 0) or 0)
+            except Exception:  # noqa: BLE001
+                hormone_prune_applied = 0
+
+        run_vacuum = bool(self.sleep_cycle_vacuum_on_auto if auto_mode else self.sleep_cycle_vacuum_on_manual)
+        vacuum_ran = 0
+        if run_vacuum and (action_rows_pruned > 0 or prediction_rows_pruned > 0):
+            try:
+                with sqlite3.connect(self.memory_db_path) as conn:
+                    conn.execute("VACUUM")
+                vacuum_ran = 1
+            except Exception:  # noqa: BLE001
+                vacuum_ran = 0
+
+        gc_collected = int(gc.collect())
+        self._last_sleep_cycle_step = int(self.memory_step_index)
+
+        summary: dict[str, int | str] = {
+            "trigger": str(trigger or "manual"),
+            "auto": 1 if auto_mode else 0,
+            "removed_memory_events": int(removed_memory_events),
+            "removed_endocrine_events": int(removed_endocrine_events),
+            "usage_reinforced_stm": int(usage_reinforced_stm),
+            "usage_reinforced_cause_effect": int(usage_reinforced_cause_effect),
+            "usage_pruned_stm": int(usage_pruned_stm),
+            "hormone_prune": int(hormone_prune_applied),
+            "hormone_prune_passes": int(hormone_prune_passes),
+            "hormone_sat_before": int(hormone_saturated_before),
+            "hormone_sat_after": int(hormone_saturated_after),
+            "action_rows_pruned": int(action_rows_pruned),
+            "prediction_rows_pruned": int(prediction_rows_pruned),
+            "stm_promoted": int(stm_result.get("promoted", 0) or 0),
+            "stm_pruned": int(stm_result.get("pruned", 0) or 0),
+            "vacuum_ran": int(vacuum_ran),
+            "gc_collected": int(gc_collected),
+            "memory_step": int(self.memory_step_index),
+        }
+        if db_error:
+            summary["db_error"] = db_error[:180]
+
+        summary_text = (
+            "[SLEEP-CYCLE: "
+            f"trigger={summary['trigger']} auto={summary['auto']} step={summary['memory_step']} "
+            f"mem_log_trim={summary['removed_memory_events']} endocrine_trim={summary['removed_endocrine_events']} "
+            f"usage_reinforce_stm={summary['usage_reinforced_stm']} "
+            f"usage_reinforce_cause={summary['usage_reinforced_cause_effect']} "
+            f"usage_pruned_stm={summary['usage_pruned_stm']} "
+            f"hormone_prune={summary['hormone_prune']} "
+            f"hormone_passes={summary['hormone_prune_passes']} "
+            f"hormone_sat={summary['hormone_sat_before']}->{summary['hormone_sat_after']} "
+            f"action_pruned={summary['action_rows_pruned']} prediction_pruned={summary['prediction_rows_pruned']} "
+            f"stm_promoted={summary['stm_promoted']} stm_pruned={summary['stm_pruned']} "
+            f"vacuum={summary['vacuum_ran']} gc={summary['gc_collected']}"
+            f"{(' db_error=' + str(summary.get('db_error'))) if summary.get('db_error') else ''}]"
+        )
+        self._append_memory_log(summary_text)
+        return summary
+
+    def _maybe_run_sleep_cycle(self) -> None:
+        if not self.sleep_cycle_enable:
+            return
+        interval = max(0, int(self.sleep_cycle_auto_interval_steps))
+        if interval <= 0:
+            return
+        if int(self.memory_step_index) - int(self._last_sleep_cycle_step) < interval:
+            return
+
+        summary = self._run_sleep_cycle(trigger="auto-step", auto_mode=True)
+        status_text = (
+            "Sleep cycle (auto): "
+            f"trimmed logs={summary.get('removed_memory_events', 0)} "
+            f"action_pruned={summary.get('action_rows_pruned', 0)} "
+            f"prediction_pruned={summary.get('prediction_rows_pruned', 0)}"
+        )
+        self.status_var.set(status_text)
+
+    def run_sleep_cycle_now(self) -> None:
+        summary = self._run_sleep_cycle(trigger="manual-button", auto_mode=False)
+        self._refresh_memory_viewer()
+        self._refresh_hormone_panel()
+        status_text = (
+            "Sleep cycle complete: "
+            f"trimmed logs={summary.get('removed_memory_events', 0)} "
+            f"action_pruned={summary.get('action_rows_pruned', 0)} "
+            f"prediction_pruned={summary.get('prediction_rows_pruned', 0)}"
+        )
+        self.status_var.set(status_text)
+
+    def _filename_slug(self, value: str) -> str:
+        text = re.sub(r"[^a-z0-9._-]+", "_", str(value or "").strip().lower())
+        text = text.strip("._-")
+        return text or "unknown"
+
+    def _log_dump_filename(self) -> str:
+        maze_count = max(1, int(getattr(self, "last_navigation_requested_count", 1) or 1))
+        if maze_count <= 1 and hasattr(self, "prompt_input"):
+            prompt_text = self.prompt_input.get("1.0", tk.END).strip()
+            if prompt_text:
+                maze_count = max(1, int(self._extract_local_execution_count(prompt_text)))
+
+        difficulty = str(
+            getattr(self, "last_navigation_difficulty", self._normalized_maze_difficulty())
+            or self._normalized_maze_difficulty()
+        )
+        safe_difficulty = self._filename_slug(difficulty)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        maze_label = "maze" if maze_count == 1 else "mazes"
+        return f"{maze_count}_{maze_label}_{safe_difficulty}_{timestamp}.txt"
+
+    def _snapshot_filename(self) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"ai_snapshot_{timestamp}.zip"
+
+    def export_memory_snapshot(self) -> None:
+        if self.adaptive_controller_enable and self.adaptive_controller is not None:
+            try:
+                self.adaptive_controller.save_state()
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            os.makedirs(self.snapshot_dir, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            self.status_var.set("Failed to prepare snapshot directory")
+            return
+
+        output_path = filedialog.asksaveasfilename(
+            title="Export Snapshot",
+            initialdir=self.snapshot_dir,
+            initialfile=self._snapshot_filename(),
+            defaultextension=".zip",
+            filetypes=[("Snapshot Zip", "*.zip"), ("All Files", "*.*")],
+        )
+        if not output_path:
+            self.status_var.set("Snapshot export canceled")
+            return
+
+        has_memory_db = os.path.exists(self.memory_db_path)
+        has_adaptive_brain = os.path.exists(self.adaptive_brain_path)
+        snapshot_db_bytes: bytes | None = None
+        if has_memory_db:
+            temp_snapshot_db_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(prefix="snapshot_memory_", suffix=".sqlite3", delete=False) as temp_db:
+                    temp_snapshot_db_path = temp_db.name
+                with sqlite3.connect(self.memory_db_path) as source_conn, sqlite3.connect(temp_snapshot_db_path) as snapshot_conn:
+                    source_conn.backup(snapshot_conn)
+                with open(temp_snapshot_db_path, "rb") as snapshot_handle:
+                    snapshot_db_bytes = snapshot_handle.read()
+            except Exception:  # noqa: BLE001
+                snapshot_db_bytes = None
+            finally:
+                if temp_snapshot_db_path and os.path.exists(temp_snapshot_db_path):
+                    try:
+                        os.remove(temp_snapshot_db_path)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        manifest = {
+            "snapshot_version": 2,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "memory_db_file": "maze_memory.sqlite3" if has_memory_db else "",
+            "adaptive_brain_file": "adaptive_brain.json" if has_adaptive_brain else "",
+            "memory_db_capture_mode": "sqlite_backup_api" if snapshot_db_bytes is not None else "direct_file_copy_fallback",
+            "schema_compat": {
+                "memory_db": "migrated_on_import_via_init_memory_db",
+                "adaptive_brain": "missing_file_allowed",
+            },
+        }
+
+        try:
+            with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("snapshot_manifest.json", json.dumps(manifest, sort_keys=True, indent=2))
+                if has_memory_db:
+                    if snapshot_db_bytes is not None:
+                        archive.writestr("maze_memory.sqlite3", snapshot_db_bytes)
+                    else:
+                        archive.write(self.memory_db_path, arcname="maze_memory.sqlite3")
+                if has_adaptive_brain:
+                    archive.write(self.adaptive_brain_path, arcname="adaptive_brain.json")
+                archive.writestr("memory_export.txt", redact_secrets(self._memory_export_text()))
+
+            exported_parts: list[str] = []
+            if has_memory_db:
+                exported_parts.append("memory")
+            if has_adaptive_brain:
+                exported_parts.append("neural")
+            if not exported_parts:
+                exported_parts.append("metadata")
+            capture_note = ""
+            if has_memory_db and snapshot_db_bytes is None:
+                capture_note = " [db_capture=fallback_copy]"
+            self.status_var.set(
+                f"Snapshot exported ({'+'.join(exported_parts)}) -> {os.path.basename(output_path)}{capture_note}"
+            )
+        except Exception:  # noqa: BLE001
+            self.status_var.set("Failed to export snapshot")
+
+    def import_memory_snapshot(self) -> None:
+        input_path = filedialog.askopenfilename(
+            title="Import Snapshot",
+            initialdir=self.snapshot_dir if os.path.isdir(self.snapshot_dir) else os.path.dirname(self.memory_db_path),
+            filetypes=[("Snapshot Files", "*.zip *.json"), ("Zip", "*.zip"), ("JSON", "*.json"), ("All Files", "*.*")],
+        )
+        if not input_path:
+            self.status_var.set("Snapshot import canceled")
+            return
+
+        imported_db_bytes: bytes | None = None
+        imported_brain_payload: dict | None = None
+        compatibility_mode = "modern"
+
+        def _pick_member_name(members: list[str], preferred_names: list[str]) -> str:
+            member_set = set(members)
+            for preferred in preferred_names:
+                if preferred in member_set:
+                    return preferred
+                for member in members:
+                    if os.path.basename(member) == preferred:
+                        return member
+            return ""
+
+        try:
+            lower_path = input_path.lower()
+            if lower_path.endswith(".zip"):
+                with zipfile.ZipFile(input_path, "r") as archive:
+                    members = archive.namelist()
+                    manifest_name = _pick_member_name(members, ["snapshot_manifest.json", "manifest.json"])
+                    if manifest_name:
+                        try:
+                            manifest_payload = json.loads(archive.read(manifest_name).decode("utf-8"))
+                            snapshot_version = int(manifest_payload.get("snapshot_version", 1) or 1)
+                            if snapshot_version < 2:
+                                compatibility_mode = f"legacy-v{snapshot_version}"
+                        except Exception:  # noqa: BLE001
+                            compatibility_mode = "legacy-zip"
+                    else:
+                        compatibility_mode = "legacy-zip"
+
+                    db_member = _pick_member_name(
+                        members,
+                        ["maze_memory.sqlite3", "maze_memory.db", "memory.sqlite3", "memory.db"],
+                    )
+                    if db_member:
+                        imported_db_bytes = archive.read(db_member)
+
+                    brain_member = _pick_member_name(
+                        members,
+                        ["adaptive_brain.json", "adaptive_brain_state.json"],
+                    )
+                    if brain_member:
+                        brain_text = archive.read(brain_member).decode("utf-8")
+                        imported_brain_payload = json.loads(brain_text)
+
+            elif lower_path.endswith(".json"):
+                with open(input_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                compatibility_mode = "legacy-json"
+
+                if isinstance(payload, dict):
+                    brain_candidate = payload.get("adaptive_brain")
+                    if isinstance(brain_candidate, dict):
+                        imported_brain_payload = brain_candidate
+                    elif isinstance(payload.get("adaptive_controller"), dict):
+                        imported_brain_payload = payload.get("adaptive_controller")
+                    elif isinstance(payload.get("adaptive_brain_text"), str):
+                        try:
+                            imported_brain_payload = json.loads(str(payload.get("adaptive_brain_text") or "{}"))
+                        except Exception:  # noqa: BLE001
+                            imported_brain_payload = None
+
+                    db_b64 = (
+                        payload.get("memory_db_base64")
+                        or payload.get("memory_db_b64")
+                        or payload.get("maze_memory_sqlite3_base64")
+                    )
+                    if isinstance(db_b64, str) and db_b64.strip():
+                        imported_db_bytes = base64.b64decode(db_b64)
+
+                    # Allow importing from extracted modern snapshots by
+                    # selecting snapshot_manifest.json directly.
+                    manifest_dir = os.path.dirname(input_path)
+                    loaded_from_manifest = False
+                    manifest_db_file = str(payload.get("memory_db_file") or "").strip()
+                    if imported_db_bytes is None and manifest_db_file:
+                        manifest_db_path = os.path.join(manifest_dir, os.path.basename(manifest_db_file))
+                        if os.path.exists(manifest_db_path):
+                            with open(manifest_db_path, "rb") as db_handle:
+                                imported_db_bytes = db_handle.read()
+                            loaded_from_manifest = True
+
+                    manifest_brain_file = str(payload.get("adaptive_brain_file") or "").strip()
+                    if imported_brain_payload is None and manifest_brain_file:
+                        manifest_brain_path = os.path.join(manifest_dir, os.path.basename(manifest_brain_file))
+                        if os.path.exists(manifest_brain_path):
+                            with open(manifest_brain_path, "r", encoding="utf-8") as brain_handle:
+                                imported_brain_payload = json.load(brain_handle)
+                            loaded_from_manifest = True
+
+                    if loaded_from_manifest:
+                        try:
+                            manifest_version = int(payload.get("snapshot_version", 0) or 0)
+                        except Exception:  # noqa: BLE001
+                            manifest_version = 0
+                        if manifest_version > 0:
+                            compatibility_mode = f"manifest-json-v{manifest_version}"
+                        else:
+                            compatibility_mode = "manifest-json"
+
+            else:
+                self.status_var.set("Unsupported snapshot format (use .zip or .json)")
+                return
+        except Exception:
+            self.status_var.set("Failed to read snapshot file")
+            return
+
+        if imported_db_bytes is None and imported_brain_payload is None:
+            self.status_var.set("Snapshot does not contain importable memory or neural data")
+            return
+
+        try:
+            os.makedirs(self.snapshot_dir, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+        backup_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        db_backup_path = os.path.join(self.snapshot_dir, f"maze_memory.backup_{backup_stamp}.sqlite3")
+        brain_backup_path = os.path.join(self.snapshot_dir, f"adaptive_brain.backup_{backup_stamp}.json")
+        db_backup_made = False
+        brain_backup_made = False
+
+        try:
+            if imported_db_bytes is not None and os.path.exists(self.memory_db_path):
+                shutil.copy2(self.memory_db_path, db_backup_path)
+                db_backup_made = True
+            if imported_brain_payload is not None and os.path.exists(self.adaptive_brain_path):
+                shutil.copy2(self.adaptive_brain_path, brain_backup_path)
+                brain_backup_made = True
+
+            if imported_db_bytes is not None:
+                with open(self.memory_db_path, "wb") as db_handle:
+                    db_handle.write(imported_db_bytes)
+                # Backward compatibility path: ensure all current tables/columns exist.
+                self._init_memory_db()
+                self._load_machine_vision_training_memory()
+                self._load_machine_vision_exit_training_memory()
+
+            if imported_brain_payload is not None:
+                brain_dir = os.path.dirname(self.adaptive_brain_path)
+                if brain_dir:
+                    os.makedirs(brain_dir, exist_ok=True)
+                with open(self.adaptive_brain_path, "w", encoding="utf-8") as brain_handle:
+                    json.dump(imported_brain_payload, brain_handle)
+                if self.adaptive_controller_enable and self.adaptive_controller is not None:
+                    try:
+                        self.adaptive_controller._load_state_if_present()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            self._clear_working_memory()
+            self._reset_maze_known_map()
+            self._refresh_memory_viewer()
+            self._refresh_hormone_panel()
+            self._refresh_game_state()
+
+            imported_parts: list[str] = []
+            if imported_db_bytes is not None:
+                imported_parts.append("memory")
+            if imported_brain_payload is not None:
+                imported_parts.append("neural")
+            self.status_var.set(
+                "Snapshot import complete "
+                f"({'+'.join(imported_parts)}, mode={compatibility_mode})."
+            )
+        except Exception:
+            # Best-effort rollback to pre-import backups.
+            try:
+                if db_backup_made and os.path.exists(db_backup_path):
+                    shutil.copy2(db_backup_path, self.memory_db_path)
+                    self._init_memory_db()
+                if brain_backup_made and os.path.exists(brain_backup_path):
+                    shutil.copy2(brain_backup_path, self.adaptive_brain_path)
+                    if self.adaptive_controller_enable and self.adaptive_controller is not None:
+                        try:
+                            self.adaptive_controller._load_state_if_present()
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
+            self.status_var.set("Snapshot import failed (restored previous local state)")
+
+    def dump_memory_bundle(self) -> None:
+        bundle = redact_secrets(self._memory_export_text())
+        try:
+            os.makedirs(self.log_dump_dir, exist_ok=True)
+            filename = self._log_dump_filename()
+            base_name, ext = os.path.splitext(filename)
+            output_path = os.path.join(self.log_dump_dir, filename)
+            suffix = 2
+            while os.path.exists(output_path):
+                output_path = os.path.join(self.log_dump_dir, f"{base_name}_{suffix}{ext}")
+                suffix += 1
+            with open(output_path, "w", encoding="utf-8") as handle:
+                handle.write(bundle)
+            status_text = f"Log dump saved to Log Dump/{os.path.basename(output_path)}"
+            if self.sleep_cycle_enable and self.sleep_cycle_auto_after_log_dump:
+                summary = self._run_sleep_cycle(trigger="post-log-dump", auto_mode=True)
+                status_text += (
+                    f" | sleep cycle: action_pruned={summary.get('action_rows_pruned', 0)}"
+                    f" prediction_pruned={summary.get('prediction_rows_pruned', 0)}"
+                )
+            self.status_var.set(status_text)
+        except Exception:  # noqa: BLE001
+            self.status_var.set("Failed to write log dump")
 
     def copy_pipeline_bundle(self) -> None:
         prompt_text = self.prompt_input.get("1.0", tk.END).strip()
@@ -7814,6 +11291,8 @@ class AIAssistantApp:
             "exact": False,
             "manhattan_error": 0,
             "source": "none",
+            "maze_layout_id": -1,
+            "step_index": -1,
         }
         self._machine_vision_last_sample_key = None
         self.machine_vision_exit_recent_results.clear()
@@ -7831,6 +11310,8 @@ class AIAssistantApp:
             "exact": False,
             "manhattan_error": 0,
             "source": "none",
+            "maze_layout_id": -1,
+            "step_index": -1,
         }
         self._machine_vision_exit_last_sample_key = None
         self.memory_event_log.clear()
@@ -7874,6 +11355,7 @@ class AIAssistantApp:
 
         mode = self._normalized_layout_mode()
         if mode == "maze":
+            self._ensure_machine_vision_cellmap_for_current_maze()
             self._update_maze_known_map(player_row, player_col, radius=1, facing=self.player_facing)
             self._resolve_visible_predictions()
             self._queue_frontier_predictions()
@@ -7903,6 +11385,15 @@ class AIAssistantApp:
             self._working_memory_snapshot(current_cell=(player_row, player_col))
             self._store_current_maze_memory_snapshot()
             personality = self.maze_personality or {}
+            visibility_legend_line = (
+                "Legend: P=player, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
+                "B=visible blocker/wall frame, ?=not visible, arrows (^ > v <)=single opening-edge marker side.\n\n"
+                if not self.maze_ascii_visible_only
+                else
+                "Legend: P=player, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
+                "B=visible blocker/wall frame, .=hidden cell omitted/cropped by visibility mode, "
+                "arrows (^ > v <)=single opening-edge marker side.\n\n"
+            )
             perception_block = (
                 f"Directional FOV status (facing={self.player_facing}, depth={self.maze_fov_depth}, "
                 f"peripheral={self.maze_fov_peripheral}, cone_deg={round(self.maze_fov_cone_degrees, 1)}, "
@@ -7912,8 +11403,7 @@ class AIAssistantApp:
                 f"full>={round(self.maze_fov_full_threshold, 3)}, half>={round(self.maze_fov_half_threshold, 3)}, "
                 f"behind=hidden):\n"
                 f"{self._build_local_status_snapshot(player_row, player_col, radius=1, include_render_details=True)}\n"
-                "Legend: P=player, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
-                "B=visible blocker/wall frame, ?=not visible, arrows (^ > v <)=single opening-edge marker side.\n\n"
+                f"{visibility_legend_line}"
                 "Renderable FOV (model-friendly, same visibility source as canvas):\n"
                 f"{self._build_interpretable_fov_snapshot(player_row, player_col)}\n\n"
                 f"Maze personality: {self.maze_personality_name} "
@@ -7945,32 +11435,40 @@ class AIAssistantApp:
 
         self._update_machine_vision_localization(player_row, player_col)
         self._update_machine_vision_exit_localization(player_row, player_col)
+        self._draw_machine_vision_cellmap_overlay()
+        self._draw_machine_vision_route_overlay()
         self._draw_machine_vision_prediction_overlay(player_row, player_col)
         self._draw_machine_vision_exit_prediction_overlay(player_row, player_col)
-        vision_pred_cell = self.machine_vision_last_prediction.get("predicted_cell", (-1, -1))
-        vision_conf = float(self.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
-        vision_support = int(self.machine_vision_last_prediction.get("support", 0) or 0)
-        vision_error = int(self.machine_vision_last_prediction.get("manhattan_error", 0) or 0)
-        machine_vision_line = (
-            "Machine vision player localization: "
-            f"pred={vision_pred_cell} actual=({player_row}, {player_col}) "
-            f"conf={round(vision_conf, 3)} support={vision_support} "
-            f"accuracy={round(self._machine_vision_accuracy(), 3)} "
-            f"mae={round(self._machine_vision_mae(), 3)} "
-            f"last_error={vision_error} samples={self.machine_vision_total_samples}."
-        )
-        vision_exit_pred_cell = self.machine_vision_exit_last_prediction.get("predicted_cell", (-1, -1))
-        vision_exit_conf = float(self.machine_vision_exit_last_prediction.get("confidence", 0.0) or 0.0)
-        vision_exit_support = int(self.machine_vision_exit_last_prediction.get("support", 0) or 0)
-        vision_exit_error = int(self.machine_vision_exit_last_prediction.get("manhattan_error", 0) or 0)
-        machine_vision_exit_line = (
-            "Machine vision exit localization: "
-            f"pred={vision_exit_pred_cell} actual={self.current_target_cell} "
-            f"conf={round(vision_exit_conf, 3)} support={vision_exit_support} "
-            f"accuracy={round(self._machine_vision_exit_accuracy(), 3)} "
-            f"mae={round(self._machine_vision_exit_mae(), 3)} "
-            f"last_error={vision_exit_error} samples={self.machine_vision_exit_total_samples}."
-        )
+        if self._machine_vision_enabled():
+            vision_pred_cell = self.machine_vision_last_prediction.get("predicted_cell", (-1, -1))
+            vision_conf = float(self.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
+            vision_support = int(self.machine_vision_last_prediction.get("support", 0) or 0)
+            vision_error = int(self.machine_vision_last_prediction.get("manhattan_error", 0) or 0)
+            machine_vision_line = (
+                "Machine vision player localization: "
+                f"pred={vision_pred_cell} actual=({player_row}, {player_col}) "
+                f"conf={round(vision_conf, 3)} support={vision_support} "
+                f"accuracy={round(self._machine_vision_accuracy(), 3)} "
+                f"mae={round(self._machine_vision_mae(), 3)} "
+                f"last_error={vision_error} samples={self.machine_vision_total_samples}."
+            )
+            vision_exit_pred_cell = self.machine_vision_exit_last_prediction.get("predicted_cell", (-1, -1))
+            vision_exit_conf = float(self.machine_vision_exit_last_prediction.get("confidence", 0.0) or 0.0)
+            vision_exit_support = int(self.machine_vision_exit_last_prediction.get("support", 0) or 0)
+            vision_exit_error = int(self.machine_vision_exit_last_prediction.get("manhattan_error", 0) or 0)
+            machine_vision_exit_line = (
+                "Machine vision exit localization: "
+                f"pred={vision_exit_pred_cell} actual={self.current_target_cell} "
+                f"conf={round(vision_exit_conf, 3)} support={vision_exit_support} "
+                f"accuracy={round(self._machine_vision_exit_accuracy(), 3)} "
+                f"mae={round(self._machine_vision_exit_mae(), 3)} "
+                f"last_error={vision_exit_error} samples={self.machine_vision_exit_total_samples}."
+            )
+            machine_vision_cellmap_line = self._machine_vision_cellmap_status_line()
+        else:
+            machine_vision_line = "Machine vision player localization: disabled (master toggle off)."
+            machine_vision_exit_line = "Machine vision exit localization: disabled (master toggle off)."
+            machine_vision_cellmap_line = "Machine vision cell map: disabled (master toggle off)."
 
         self._draw_pseudo3d_view(player_row, player_col)
 
@@ -8003,6 +11501,7 @@ class AIAssistantApp:
             f"pending={len(self.prediction_memory_active)}, expired={self.prediction_expired_count}).\n"
             f"{machine_vision_line}\n"
             f"{machine_vision_exit_line}\n"
+            f"{machine_vision_cellmap_line}\n"
             f"{perception_block}"
         )
 
@@ -8010,6 +11509,8 @@ class AIAssistantApp:
             self.current_player_cell = (player_row, player_col)
             self.current_target_cell = (target_row, target_col)
             self.latest_game_state = snapshot
+
+        self._refresh_hormone_panel()
 
     def _get_game_state_snapshot(self) -> str:
         with self.game_state_lock:
@@ -8048,7 +11549,7 @@ class AIAssistantApp:
 
         return "\n".join(" ".join(row) for row in grid)
 
-    def _with_ascii_boundary(self, rows: list[str], boundary_token: str = "B") -> str:
+    def _with_ascii_boundary(self, rows: list[str], boundary_token: str = "B", fill_token: str = "?") -> str:
         if not rows:
             return ""
         tokenized_rows: list[list[str]] = []
@@ -8066,10 +11567,102 @@ class AIAssistantApp:
         framed: list[str] = [top_bottom]
         for tokens in tokenized_rows:
             if len(tokens) < width:
-                tokens = tokens + (["?"] * (width - len(tokens)))
+                tokens = tokens + ([fill_token] * (width - len(tokens)))
             framed.append(" ".join([boundary_token] + tokens + [boundary_token]))
         framed.append(top_bottom)
         return "\n".join(framed)
+
+    def _ascii_line_looks_like_grid(self, line: str) -> bool:
+        text = str(line or "").strip()
+        if not text:
+            return False
+        tokens = text.split()
+        if len(tokens) <= 1:
+            return False
+        for token in tokens:
+            if not re.fullmatch(r"[A-Za-z0-9?^v<>#._-]+", token):
+                return False
+        return True
+
+    def _crop_ascii_grid_visible_only(self, grid_lines: list[str]) -> list[str]:
+        token_rows = [line.split() for line in grid_lines if line.split()]
+        if not token_rows:
+            return grid_lines
+
+        had_boundary = False
+        if len(token_rows) >= 3:
+            width = len(token_rows[0])
+            if (
+                all(len(row) == width for row in token_rows)
+                and all(token == "B" for token in token_rows[0])
+                and all(token == "B" for token in token_rows[-1])
+                and all(row[0] == "B" and row[-1] == "B" for row in token_rows[1:-1])
+            ):
+                had_boundary = True
+                token_rows = [row[1:-1] for row in token_rows[1:-1]]
+
+        if not token_rows:
+            return grid_lines
+
+        height = len(token_rows)
+        width = max(len(row) for row in token_rows)
+        padded_rows: list[list[str]] = []
+        for row in token_rows:
+            if len(row) < width:
+                row = row + (["?"] * (width - len(row)))
+            padded_rows.append(row)
+
+        visible_cells: list[tuple[int, int]] = []
+        for r in range(height):
+            for c in range(width):
+                if padded_rows[r][c] != "?":
+                    visible_cells.append((r, c))
+
+        if not visible_cells:
+            visible_cells = [(height // 2, width // 2)]
+
+        min_r = min(r for r, _ in visible_cells)
+        max_r = max(r for r, _ in visible_cells)
+        min_c = min(c for _, c in visible_cells)
+        max_c = max(c for _, c in visible_cells)
+
+        cropped_rows = [
+            [
+                ("." if padded_rows[r][c] == "?" else padded_rows[r][c])
+                for c in range(min_c, max_c + 1)
+            ]
+            for r in range(min_r, max_r + 1)
+        ]
+
+        rendered = [" ".join(row) for row in cropped_rows]
+        if had_boundary:
+            return self._with_ascii_boundary(rendered, boundary_token="B", fill_token=".").splitlines()
+        return rendered
+
+    def _apply_ascii_visibility_mode(self, ascii_text: str) -> str:
+        text = str(ascii_text or "")
+        if not text or (not self.maze_ascii_visible_only):
+            return text
+
+        lines = text.splitlines()
+        out_lines: list[str] = []
+        grid_block: list[str] = []
+
+        def _flush_grid_block() -> None:
+            nonlocal grid_block
+            if not grid_block:
+                return
+            out_lines.extend(self._crop_ascii_grid_visible_only(grid_block))
+            grid_block = []
+
+        for line in lines:
+            if self._ascii_line_looks_like_grid(line):
+                grid_block.append(line)
+            else:
+                _flush_grid_block()
+                out_lines.append(line)
+        _flush_grid_block()
+        return "\n".join(out_lines).strip()
 
     def _edge_context_probe_cells(
         self,
@@ -8179,7 +11772,7 @@ class AIAssistantApp:
                 details = "none"
             rows.append(f"Beam side edge marker(s): {details}")
 
-        return "\n".join(rows)
+        return self._apply_ascii_visibility_mode("\n".join(rows))
 
     def _build_interpretable_fov_snapshot(self, player_row: int, player_col: int) -> str:
         edge_markers: dict[tuple[int, int], str] = {}
@@ -8250,7 +11843,7 @@ class AIAssistantApp:
             rows.append(f"Corner-graze cells: {', '.join(corner_graze_cells)}")
         else:
             rows.append("Corner-graze cells: none")
-        return "\n".join(rows)
+        return self._apply_ascii_visibility_mode("\n".join(rows))
 
     def _build_mental_sweep(self, player_row: int, player_col: int) -> dict[tuple[int, int], str]:
         """Temporary look-around map from all facings before selecting a move."""
@@ -8949,6 +12542,7 @@ class AIAssistantApp:
         self.episode_optimal_steps = 0
         self.episode_step_limit = 0
         self._clear_sticky_objective_path()
+        self._clear_spatial_memory_runtime()
         self.episode_revisit_steps = 0
         self.episode_backtracks = 0
         self.episode_maze_attempt_count = 1
@@ -9152,6 +12746,10 @@ class AIAssistantApp:
             assistant_instructions,
             local_kernel_only=True,
         )
+        self._record_last_navigation_session(
+            int(plan.get("execution_count", 1) or 1),
+            int(step_session.get("completed", 0) or 0),
+        )
         game_state = self._get_game_state_snapshot()
         completed, remaining = self._goal_session_progress()
         target_cell_debug = (
@@ -9273,6 +12871,156 @@ class AIAssistantApp:
                 queue.append((nxt, new_path))
         return []
 
+    def _shortest_path_moves_between_cells_with_blocked(
+        self,
+        start: tuple[int, int],
+        target: tuple[int, int],
+        blocked_cells: set[tuple[int, int]],
+    ) -> list[str]:
+        if start == target:
+            return []
+        if start in blocked_cells or target in blocked_cells:
+            return []
+
+        queue: deque[tuple[tuple[int, int], list[str]]] = deque()
+        queue.append((start, []))
+        seen = {start}
+
+        while queue:
+            cell, path = queue.popleft()
+            for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                nxt = self._neighbor_for_move(cell, move)
+                if nxt == cell or nxt in seen or nxt in blocked_cells:
+                    continue
+                new_path = path + [move]
+                if nxt == target:
+                    return new_path
+                seen.add(nxt)
+                queue.append((nxt, new_path))
+        return []
+
+    def _mv_cellmap_blocked_cells_for_route(self) -> set[tuple[int, int]]:
+        blocked_cells: set[tuple[int, int]] = set()
+        if self._normalized_layout_mode() != "maze":
+            return blocked_cells
+        if not self._machine_vision_enabled():
+            return blocked_cells
+        if not self.machine_vision_cellmap_init_enable:
+            return blocked_cells
+
+        self._ensure_machine_vision_cellmap_for_current_maze()
+        self._refresh_machine_vision_cellmap_grade_if_needed()
+        if not self.machine_vision_cellmap_ready:
+            return blocked_cells
+
+        min_conf = max(0.5, float(self.machine_vision_cellmap_kernel_min_conf))
+        for row in range(self.grid_cells):
+            for col in range(self.grid_cells):
+                cell = (row, col)
+                record = self.machine_vision_cellmap_predictions.get(cell)
+                if not isinstance(record, dict):
+                    continue
+                label = str(record.get("predicted_label", "open") or "open")
+                confidence = float(record.get("confidence", 0.0) or 0.0)
+                if confidence < min_conf:
+                    continue
+                if label == "blocked":
+                    blocked_cells.add(cell)
+        return blocked_cells
+
+    def _mv_route_plan_from_start_to_exit(self) -> tuple[list[str], set[tuple[int, int]], str]:
+        if self._normalized_layout_mode() != "maze":
+            return ([], set(), "non-maze")
+        if not self._machine_vision_enabled():
+            return ([], set(), "mv-disabled")
+        if not self.machine_vision_cellmap_init_enable:
+            return ([], set(), "cellmap-disabled")
+
+        start = (int(self.episode_start_player_cell[0]), int(self.episode_start_player_cell[1]))
+        target = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+
+        blocked_cells = self._mv_cellmap_blocked_cells_for_route()
+        if not self.machine_vision_cellmap_ready:
+            return ([], blocked_cells, "cellmap-not-ready")
+
+        blocked_cells.discard(start)
+        blocked_cells.discard(target)
+        blocked_cells.discard(self.current_player_cell)
+
+        route = self._shortest_path_moves_between_cells_with_blocked(start, target, blocked_cells)
+        if not route:
+            return ([], blocked_cells, f"no-start-route blocked={len(blocked_cells)}")
+        return (route, blocked_cells, f"start-route-len={len(route)} blocked={len(blocked_cells)}")
+
+    def _mv_route_planning_move(self) -> tuple[str, int, str]:
+        if not self._mv_route_mode_active():
+            return ("", 0, "disabled")
+        route_from_start, blocked_cells, route_note = self._mv_route_plan_from_start_to_exit()
+        if not route_from_start:
+            return ("", 0, route_note)
+
+        start = (int(self.episode_start_player_cell[0]), int(self.episode_start_player_cell[1]))
+        target = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+        current = (int(self.current_player_cell[0]), int(self.current_player_cell[1]))
+
+        route_cells: list[tuple[int, int]] = [start]
+        cursor = start
+        for move in route_from_start:
+            cursor = self._neighbor_for_move(cursor, move)
+            route_cells.append(cursor)
+
+        if current in route_cells:
+            step_index = route_cells.index(current)
+            if step_index < len(route_from_start):
+                return (
+                    route_from_start[step_index],
+                    len(route_from_start),
+                    f"{route_note} mode=on-route idx={step_index}",
+                )
+
+        rejoin_path = self._shortest_path_moves_between_cells_with_blocked(current, target, blocked_cells)
+        if rejoin_path:
+            return (
+                rejoin_path[0],
+                len(route_from_start),
+                f"{route_note} mode=rejoin len={len(rejoin_path)}",
+            )
+
+        return ("", len(route_from_start), f"{route_note} mode=unreachable-from-current")
+
+    def _mv_route_planning_overlay_path(self) -> tuple[list[tuple[int, int]], str]:
+        if not self._mv_route_mode_active():
+            return ([], "disabled")
+
+        route_from_start, blocked_cells, route_note = self._mv_route_plan_from_start_to_exit()
+        if not route_from_start:
+            return ([], route_note)
+
+        start = (int(self.episode_start_player_cell[0]), int(self.episode_start_player_cell[1]))
+        target = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+        current = (int(self.current_player_cell[0]), int(self.current_player_cell[1]))
+
+        route_cells: list[tuple[int, int]] = [start]
+        cursor = start
+        for move in route_from_start:
+            cursor = self._neighbor_for_move(cursor, move)
+            route_cells.append(cursor)
+
+        if current in route_cells:
+            step_index = route_cells.index(current)
+            return (route_cells[step_index:], f"{route_note} mode=on-route idx={step_index}")
+
+        rejoin_path = self._shortest_path_moves_between_cells_with_blocked(current, target, blocked_cells)
+        if rejoin_path:
+            rejoin_cells: list[tuple[int, int]] = [current]
+            rejoin_cursor = current
+            for move in rejoin_path:
+                rejoin_cursor = self._neighbor_for_move(rejoin_cursor, move)
+                rejoin_cells.append(rejoin_cursor)
+            return (rejoin_cells, f"{route_note} mode=rejoin len={len(rejoin_path)}")
+
+        return ([], f"{route_note} mode=unreachable-from-current")
+
     def _clear_sticky_objective_path(self) -> None:
         self._sticky_objective_target = None
         self._sticky_objective_path = []
@@ -9374,6 +13122,19 @@ class AIAssistantApp:
         if not unresolved:
             return False
 
+        local_contradiction = self._prediction_local_contradiction_debt(self.current_player_cell)
+        max_context_contradiction = 0.0
+        if self.prediction_context_contradiction_debt:
+            max_context_contradiction = max(
+                float(value or 0.0)
+                for value in self.prediction_context_contradiction_debt.values()
+            )
+        if (
+            local_contradiction >= float(self.prediction_contradiction_verification_trigger)
+            or max_context_contradiction >= float(self.prediction_context_contradiction_verification_trigger)
+        ):
+            return True
+
         if self._maze_reexplore_cooldown_remaining > 0:
             return True
         if self._active_same_maze_retry_count() > 0:
@@ -9401,6 +13162,22 @@ class AIAssistantApp:
     def _active_same_maze_retry_count(self) -> int:
         attempt_retries = max(0, int(self.episode_maze_attempt_count) - 1)
         return max(int(self.step_limit_reset_count), int(self.same_maze_retry_count), attempt_retries)
+
+    def _repeat_count_in_recent_positions(
+        self,
+        cell: tuple[int, int],
+        window: int | None = None,
+    ) -> int:
+        sample_window = max(1, int(window or self.maze_stuck_window))
+        target_cell = (int(cell[0]), int(cell[1]))
+        recent_cells = list(self.maze_recent_cells)[-sample_window:]
+        repeat_count = sum(1 for seen in recent_cells if tuple(seen) == target_cell)
+        # Include the live current position when it is not yet reflected at the
+        # tail of recent-cell history for this scoring instant.
+        if (not recent_cells) or (tuple(recent_cells[-1]) != target_cell):
+            if self.current_player_cell == target_cell:
+                repeat_count += 1
+        return int(repeat_count)
 
     def _recent_move_direction_entropy(self, window: int | None = None) -> float:
         sample_window = max(4, int(window or self.loop_entropy_window))
@@ -9644,6 +13421,127 @@ class AIAssistantApp:
             ),
         )
 
+    def _hazard_preparedness_profile(
+        self,
+        from_cell: tuple[int, int],
+    ) -> dict[str, dict[str, float | int]]:
+        profile: dict[str, dict[str, float | int]] = {
+            move: {
+                "count": 0,
+                "decayed_penalty": 0.0,
+                "decayed_reward": 0.0,
+                "catastrophic_hits": 0,
+                "risk_hits": 0,
+                "safe_hits": 0,
+                "confidence": 0.0,
+                "learned_pressure": 0.0,
+            }
+            for move in ["UP", "DOWN", "LEFT", "RIGHT"]
+        }
+        if not self.hazard_preparedness_enable:
+            return profile
+        if self._normalized_layout_mode() != "maze":
+            return profile
+
+        origin_cell = (int(from_cell[0]), int(from_cell[1]))
+        cache_key = (
+            int(self.current_maze_episode_id),
+            int(self.memory_step_index),
+            origin_cell,
+        )
+        cached = self._hazard_preparedness_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if len(self._hazard_preparedness_cache) > 320:
+            self._hazard_preparedness_cache.clear()
+
+        action_to_move = {f"MOVE_{move}": move for move in ["UP", "DOWN", "LEFT", "RIGHT"]}
+        risk_tags = {
+            "dead_end_slap",
+            "dead_end_tip_revisit",
+            "dead_end_entrance_revisit",
+            "visible_terminal",
+            "boxed_corridor",
+            "cycle_pair",
+            "transition_repeat",
+            "immediate_backtrack",
+            "branch_diversity",
+        }
+        positive_tags = {
+            "novelty_reward",
+            "visible_open_decision",
+            "visible_exit",
+            "frontier_visible",
+            "junction_visible",
+        }
+
+        row_limit = max(16, int(self.hazard_preparedness_window) * 4)
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT action_taken, reward_signal, penalty_signal, reason_tags, player_cell
+                    FROM maze_action_outcome_memory
+                    WHERE maze_layout_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(self.current_maze_episode_id), int(row_limit)),
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            self._hazard_preparedness_cache[cache_key] = profile
+            return profile
+
+        catastrophic_threshold = float(self.frontier_lock_memory_veto_penalty)
+        rank_decay = float(self.hazard_preparedness_rank_decay)
+        for action_taken, reward_signal, penalty_signal, reason_tags, player_cell_json in rows:
+            action_key = str(action_taken or "").strip().upper()
+            move = action_to_move.get(action_key)
+            if not move:
+                continue
+            try:
+                parsed_cell = json.loads(str(player_cell_json or ""))
+                parsed_from_cell = (int(parsed_cell[0]), int(parsed_cell[1]))
+            except Exception:  # noqa: BLE001
+                continue
+            if parsed_from_cell != origin_cell:
+                continue
+
+            bucket = profile[move]
+            rank = int(bucket["count"])
+            decay_weight = 1.0 / (1.0 + (rank_decay * rank))
+            reward_value = max(0.0, float(reward_signal or 0.0))
+            penalty_value = max(0.0, float(penalty_signal or 0.0))
+
+            bucket["count"] = rank + 1
+            bucket["decayed_penalty"] = float(bucket["decayed_penalty"]) + (penalty_value * decay_weight)
+            bucket["decayed_reward"] = float(bucket["decayed_reward"]) + (reward_value * decay_weight)
+            if penalty_value >= catastrophic_threshold:
+                bucket["catastrophic_hits"] = int(bucket["catastrophic_hits"]) + 1
+
+            tag_set = {part.strip() for part in str(reason_tags or "").split(",") if part.strip()}
+            if tag_set.intersection(risk_tags):
+                bucket["risk_hits"] = int(bucket["risk_hits"]) + 1
+            if reward_value > 0.0 and tag_set.intersection(positive_tags):
+                bucket["safe_hits"] = int(bucket["safe_hits"]) + 1
+
+        min_samples = max(1, int(self.hazard_preparedness_min_samples))
+        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            bucket = profile[move]
+            count = int(bucket["count"])
+            confidence = min(1.0, count / float(min_samples))
+            raw_pressure = float(bucket["decayed_penalty"])
+            raw_pressure += int(bucket["catastrophic_hits"]) * catastrophic_threshold * 0.6
+            raw_pressure += int(bucket["risk_hits"]) * float(self.hazard_preparedness_risk_hit_weight)
+            raw_pressure -= float(bucket["decayed_reward"]) * float(self.hazard_preparedness_reward_relief_scale)
+            raw_pressure -= int(bucket["safe_hits"]) * float(self.hazard_preparedness_safe_hit_weight)
+            bucket["confidence"] = round(confidence, 4)
+            bucket["learned_pressure"] = round(max(0.0, raw_pressure) * confidence, 4)
+
+        self._hazard_preparedness_cache[cache_key] = profile
+        return profile
+
     def _frontier_forced_move_score_guard(
         self,
         forced_move: str,
@@ -9836,7 +13734,11 @@ class AIAssistantApp:
             return ""
         return path[0]
 
-    def _verification_priority_move(self, candidates: list[tuple[str, tuple[int, int]]]) -> str:
+    def _verification_priority_move(
+        self,
+        candidates: list[tuple[str, tuple[int, int]]],
+        breakdown_cache: dict[str, dict] | None = None,
+    ) -> str:
         if not self._verification_priority_active():
             self._verification_probe_target = None
             return ""
@@ -9846,10 +13748,22 @@ class AIAssistantApp:
 
         tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
         current = self.current_player_cell
-        ranked: list[tuple[str, float, int, int, int, int]] = []
+        ranked: list[tuple[str, float, int, int, int, int, float]] = []
         summary = self._episodic_memory_summary()
         summary_unknown = int(summary.get("unknown", 0) or 0)
         summary_frontier = int(summary.get("frontier", 0) or 0)
+        current_frontier_distance = int(self._frontier_distance(current))
+        current_local_contradiction = float(self._prediction_local_contradiction_debt(current))
+        max_context_contradiction = 0.0
+        if self.prediction_context_contradiction_debt:
+            max_context_contradiction = max(
+                float(value or 0.0)
+                for value in self.prediction_context_contradiction_debt.values()
+            )
+        contradiction_forced_verify = bool(
+            current_local_contradiction >= float(self.prediction_contradiction_verification_trigger)
+            or max_context_contradiction >= float(self.prediction_context_contradiction_verification_trigger)
+        )
         late_unresolved_commit = bool(
             self.last_uncertainty_commit_enable
             and (
@@ -9858,9 +13772,9 @@ class AIAssistantApp:
             )
         )
 
-        best_any_score = min(int(self._exploration_move_score(move)) for move, _cell in candidates)
+        best_any_score = min(int(self._exploration_move_score(move, breakdown_cache)) for move, _cell in candidates)
         for move, nxt in candidates:
-            breakdown = self._exploration_move_breakdown(move)
+            breakdown = self._exploration_move_breakdown_cached(move, breakdown_cache)
             if bool(breakdown.get("blocked", False)):
                 continue
 
@@ -9881,7 +13795,7 @@ class AIAssistantApp:
                 or edge_frontier > 0
                 or local_contradiction >= 0.35
             )
-            if not ambiguous and (not late_unresolved_commit):
+            if (not ambiguous) and (not late_unresolved_commit) and (not contradiction_forced_verify):
                 continue
 
             if self.terminal_end_hard_avoid and (
@@ -9912,8 +13826,14 @@ class AIAssistantApp:
                 signal += 0.8
             signal += edge_frontier * 2.2
             signal += edge_junction * 1.4
-            signal += min(3.0, local_contradiction * 1.6)
+            signal += min(4.0, local_contradiction * 2.25)
             signal += min(1.8, visible_open_decision * 0.7)
+            if contradiction_forced_verify:
+                frontier_gain = max(0, current_frontier_distance - frontier_distance)
+                signal += min(3.0, frontier_gain * 0.8)
+                signal += min(2.2, local_contradiction * 1.25)
+                if recent_transition_count <= 0:
+                    signal += 0.55
             if self._verification_probe_target == nxt:
                 signal += float(self.verification_priority_continuity_bonus)
 
@@ -9923,7 +13843,7 @@ class AIAssistantApp:
             signal -= recent_transition_count * 0.75
 
             local_score = int(breakdown.get("score", 0) or 0)
-            ranked.append((move, signal, local_score, frontier_distance, -unknown_neighbors, visits))
+            ranked.append((move, signal, local_score, frontier_distance, -unknown_neighbors, visits, local_contradiction))
 
         if not ranked:
             self._verification_probe_target = None
@@ -9933,13 +13853,27 @@ class AIAssistantApp:
             ranked.sort(key=lambda item: (item[2], item[3], item[4], item[5], tie_order.get(item[0], 9)))
         else:
             ranked.sort(key=lambda item: (-item[1], item[2], item[3], item[4], item[5], tie_order.get(item[0], 9)))
-        selected_move, best_signal, selected_score, frontier_distance, unknown_sort, visits = ranked[0]
-        if (not late_unresolved_commit) and best_signal < float(self.verification_priority_min_signal):
+        selected_move, best_signal, selected_score, frontier_distance, unknown_sort, visits, selected_local_contradiction = ranked[0]
+        min_signal_required = float(self.verification_priority_min_signal)
+        if contradiction_forced_verify and (not late_unresolved_commit):
+            min_signal_required = min(min_signal_required, 0.35)
+        if (not late_unresolved_commit) and best_signal < min_signal_required:
             self._verification_probe_target = None
             return ""
 
         delta = int(selected_score - best_any_score)
         margin = int(self.verification_priority_score_margin)
+        margin += int(min(34, max(0.0, selected_local_contradiction) * 16.0))
+        if contradiction_forced_verify and (not late_unresolved_commit):
+            contradiction_pressure = max(current_local_contradiction, max_context_contradiction)
+            margin += int(min(44, contradiction_pressure * 18.0))
+        if (not late_unresolved_commit) and best_signal > float(self.verification_priority_min_signal):
+            margin += int(
+                min(
+                    28.0,
+                    (best_signal - float(self.verification_priority_min_signal)) * 7.0,
+                )
+            )
         if late_unresolved_commit:
             margin = max(margin, int(self.last_uncertainty_score_margin))
         if delta > margin:
@@ -9956,6 +13890,7 @@ class AIAssistantApp:
                 f"source=verification_priority_commit selected={selected_move} "
                 f"unknown={summary_unknown} frontier={summary_frontier} "
                 f"frontier_distance={frontier_distance} "
+                f"local_contradiction={round(selected_local_contradiction, 3)} "
                 f"unknown_neighbors={max(0, -unknown_sort)} visits={visits} "
                 f"score_delta={delta}/{margin}"
             )
@@ -9963,6 +13898,8 @@ class AIAssistantApp:
             self._last_planner_choice_debug = (
                 f"source=verification_priority selected={selected_move} "
                 f"signal={round(best_signal, 3)} frontier_distance={frontier_distance} "
+                f"forced={1 if contradiction_forced_verify else 0} "
+                f"local_contradiction={round(selected_local_contradiction, 3)} "
                 f"unknown_neighbors={max(0, -unknown_sort)} visits={visits} "
                 f"score_delta={delta}/{margin}"
             )
@@ -10056,11 +13993,12 @@ class AIAssistantApp:
     def _organism_candidate_projections(
         self,
         candidates: list[tuple[str, tuple[int, int]]],
+        breakdown_cache: dict[str, dict] | None = None,
     ) -> list[CandidateProjection]:
         projections: list[CandidateProjection] = []
         origin_frontier = min(6, self._frontier_distance(self.current_player_cell, max_depth=6))
         for move, next_cell in candidates:
-            breakdown = self._exploration_move_breakdown(move)
+            breakdown = self._exploration_move_breakdown_cached(move, breakdown_cache)
             if bool(breakdown.get("blocked", False)):
                 continue
 
@@ -10131,6 +14069,7 @@ class AIAssistantApp:
         self,
         candidates: list[tuple[str, tuple[int, int]]],
         terminal_filtered: bool,
+        breakdown_cache: dict[str, dict] | None = None,
     ) -> str:
         """
         New-architecture exploration hook using the maze/ package.
@@ -10143,7 +14082,7 @@ class AIAssistantApp:
 
         candidate_inputs: list[CandidateInput] = []
         for move, next_cell in candidates:
-            bd = self._exploration_move_breakdown(move)
+            bd = self._exploration_move_breakdown_cached(move, breakdown_cache)
             if bool(bd.get("blocked", False)):
                 continue
             raw_loop_pressure = (
@@ -10273,6 +14212,7 @@ class AIAssistantApp:
         self,
         candidates: list[tuple[str, tuple[int, int]]],
         terminal_filtered: bool,
+        breakdown_cache: dict[str, dict] | None = None,
     ) -> str:
         signature = self._organism_signature_from_current()
         if signature is None:
@@ -10295,7 +14235,7 @@ class AIAssistantApp:
             step_index=self.memory_step_index,
         )
         event = self._organism_event_from_current(signature)
-        projections = self._organism_candidate_projections(candidates)
+        projections = self._organism_candidate_projections(candidates, breakdown_cache)
         if not projections:
             return ""
 
@@ -10366,6 +14306,7 @@ class AIAssistantApp:
 
     def _best_exploration_move(self) -> str:
         current = self.current_player_cell
+        breakdown_cache: dict[str, dict] = {}
         candidates: list[tuple[str, tuple[int, int]]] = []
         for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
             nxt = self._neighbor_for_move(current, move)
@@ -10383,44 +14324,86 @@ class AIAssistantApp:
         frontier_lock_active = self._frontier_lock_active()
         frontier_lock_move = self._frontier_lock_step() if frontier_lock_active else ""
         frontier_lock_vetoed = False
+        hard_override_phase = int(self.hard_override_phase_level)
+        frontier_lock_override_allowed = not self._hard_override_phase_disables_frontier_lock()
+        persistent_frontier_override_allowed = not self._hard_override_phase_disables_persistent_frontier()
+        verification_priority_override_allowed = not self._hard_override_phase_disables_verification_priority()
+        soft_override_mode = bool(self.phase2_soft_override_enable)
+        soft_frontier_lock_move = ""
+        soft_persistent_frontier_move = ""
+        soft_verification_move = ""
+        soft_influence_notes: list[str] = []
+
+        if force_score_fallback and (not verification_priority_override_allowed):
+            _ep_summary = self._episodic_memory_summary()
+            unresolved_unknown = int(_ep_summary.get("unknown") or 0)
+            unresolved_frontier = int(_ep_summary.get("frontier") or 0)
+            if unresolved_unknown > 0 or unresolved_frontier > 0:
+                frontier_escape_move = self._frontier_first_step()
+                if frontier_escape_move and any(move == frontier_escape_move for move, _ in candidates):
+                    self._last_planner_choice_debug = (
+                        f"source=stuck_frontier_escape selected={frontier_escape_move} "
+                        f"phase={hard_override_phase} "
+                        f"unknown={unresolved_unknown} frontier={unresolved_frontier} "
+                        f"cooldown={self._maze_reexplore_cooldown_remaining}"
+                    )
+                    return frontier_escape_move
 
         if frontier_lock_active and frontier_lock_move and persistent_frontier_target is not None:
-            should_veto_frontier_lock, veto_reason = self._should_veto_frontier_lock_move(frontier_lock_move, candidates)
-            if should_veto_frontier_lock:
-                frontier_lock_vetoed = True
-                force_score_fallback = True
+            if not frontier_lock_override_allowed:
                 self._last_planner_choice_debug = (
-                    f"source=frontier_lock_veto selected={frontier_lock_move} "
-                    f"target={persistent_frontier_target} reason={veto_reason} -> fallback=score"
+                    f"source=frontier_lock_phase_off selected={frontier_lock_move} "
+                    f"target={persistent_frontier_target} phase={hard_override_phase} -> continue=normal_scoring"
                 )
             else:
-                force_allowed, force_reason = self._frontier_forced_move_score_guard(frontier_lock_move, candidates)
-                if not force_allowed:
+                should_veto_frontier_lock, veto_reason = self._should_veto_frontier_lock_move(frontier_lock_move, candidates)
+                if should_veto_frontier_lock:
                     frontier_lock_vetoed = True
                     force_score_fallback = True
                     self._last_planner_choice_debug = (
-                        f"source=frontier_lock_score_guard selected={frontier_lock_move} "
-                        f"target={persistent_frontier_target} reason={force_reason} -> fallback=score"
+                        f"source=frontier_lock_veto selected={frontier_lock_move} "
+                        f"target={persistent_frontier_target} reason={veto_reason} -> fallback=score"
                     )
                 else:
-                    target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
-                    exhausted_cells, exhausted_transitions = self._path_exhaustion_counts(
-                        self.current_player_cell,
-                        self._path_to_frontier_target(persistent_frontier_target),
-                    )
-                    next_cell = self._neighbor_for_move(self.current_player_cell, frontier_lock_move)
-                    current_frontier_distance = self._frontier_distance(self.current_player_cell, max_depth=12)
-                    next_frontier_distance = self._frontier_distance(next_cell, max_depth=12)
-                    self._last_planner_choice_debug = (
-                        f"source=frontier_lock selected={frontier_lock_move} target={persistent_frontier_target} "
-                        f"target_distance={target_distance} frontier_distance={current_frontier_distance}->{next_frontier_distance} "
-                        f"exhausted_cells={exhausted_cells} exhausted_transitions={exhausted_transitions} "
-                        f"retries={self._active_same_maze_retry_count()} entropy={self._recent_move_direction_entropy()} "
-                        f"force_score_fallback={1 if force_score_fallback else 0}"
-                    )
-                    return frontier_lock_move
+                    force_allowed, force_reason = self._frontier_forced_move_score_guard(frontier_lock_move, candidates)
+                    if not force_allowed:
+                        frontier_lock_vetoed = True
+                        force_score_fallback = True
+                        self._last_planner_choice_debug = (
+                            f"source=frontier_lock_score_guard selected={frontier_lock_move} "
+                            f"target={persistent_frontier_target} reason={force_reason} -> fallback=score"
+                        )
+                    else:
+                        target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
+                        exhausted_cells, exhausted_transitions = self._path_exhaustion_counts(
+                            self.current_player_cell,
+                            self._path_to_frontier_target(persistent_frontier_target),
+                        )
+                        next_cell = self._neighbor_for_move(self.current_player_cell, frontier_lock_move)
+                        current_frontier_distance = self._frontier_distance(self.current_player_cell, max_depth=12)
+                        next_frontier_distance = self._frontier_distance(next_cell, max_depth=12)
+                        self._last_planner_choice_debug = (
+                            f"source=frontier_lock selected={frontier_lock_move} target={persistent_frontier_target} "
+                            f"target_distance={target_distance} frontier_distance={current_frontier_distance}->{next_frontier_distance} "
+                            f"exhausted_cells={exhausted_cells} exhausted_transitions={exhausted_transitions} "
+                            f"retries={self._active_same_maze_retry_count()} entropy={self._recent_move_direction_entropy()} "
+                            f"force_score_fallback={1 if force_score_fallback else 0}"
+                        )
+                        if soft_override_mode:
+                            soft_frontier_lock_move = frontier_lock_move
+                            soft_influence_notes.append(
+                                f"frontier_lock:{frontier_lock_move}@d={target_distance}"
+                            )
+                        else:
+                            return frontier_lock_move
 
-        if (not frontier_lock_vetoed) and (continuity_override_active or (not force_score_fallback)) and persistent_frontier_move and persistent_frontier_target is not None:
+        if (
+            (not frontier_lock_vetoed)
+            and persistent_frontier_override_allowed
+            and (continuity_override_active or (not force_score_fallback))
+            and persistent_frontier_move
+            and persistent_frontier_target is not None
+        ):
             force_allowed, force_reason = self._frontier_forced_move_score_guard(persistent_frontier_move, candidates)
             if force_allowed:
                 target_distance = self._distance_between_cells(self.current_player_cell, persistent_frontier_target)
@@ -10435,11 +14418,27 @@ class AIAssistantApp:
                     f"retries={self._active_same_maze_retry_count()} "
                     f"force_score_fallback={1 if force_score_fallback else 0}"
                 )
-                return persistent_frontier_move
+                if soft_override_mode:
+                    soft_persistent_frontier_move = persistent_frontier_move
+                    soft_influence_notes.append(
+                        f"persistent_frontier:{persistent_frontier_move}@d={target_distance}"
+                    )
+                else:
+                    return persistent_frontier_move
             force_score_fallback = True
             self._last_planner_choice_debug = (
                 f"source=persistent_frontier_score_guard selected={persistent_frontier_move} "
                 f"target={persistent_frontier_target} reason={force_reason} -> fallback=score"
+            )
+        elif (
+            (not frontier_lock_vetoed)
+            and (not persistent_frontier_override_allowed)
+            and persistent_frontier_move
+            and persistent_frontier_target is not None
+        ):
+            self._last_planner_choice_debug = (
+                f"source=persistent_frontier_phase_off selected={persistent_frontier_move} "
+                f"target={persistent_frontier_target} phase={hard_override_phase} -> continue=normal_scoring"
             )
 
         terminal_filtered = False
@@ -10456,30 +14455,100 @@ class AIAssistantApp:
                 candidates = non_terminal_candidates
                 terminal_filtered = True
 
-        verification_move = self._verification_priority_move(candidates)
+        verification_move = ""
+        if verification_priority_override_allowed:
+            verification_move = self._verification_priority_move(candidates, breakdown_cache)
+        else:
+            self._verification_probe_target = None
         if verification_move:
-            return verification_move
+            if soft_override_mode:
+                soft_verification_move = verification_move
+                soft_influence_notes.append(f"verification:{verification_move}")
+            else:
+                return verification_move
+
+        # Emergency non-novelty escape: if uncertainty remains but every
+        # local legal move is fully-known/non-frontier, force a global
+        # frontier-first step before local-policy arbitration can orbit.
+        _ep_summary = self._episodic_memory_summary()
+        unresolved_unknown = int(_ep_summary.get("unknown") or 0)
+        unresolved_frontier = int(_ep_summary.get("frontier") or 0)
+        unresolved_signal = (unresolved_unknown > 0 or unresolved_frontier > 0)
+        if unresolved_signal and candidates:
+            local_non_novel = True
+            for move, _cell in candidates:
+                bd = self._exploration_move_breakdown_cached(move, breakdown_cache)
+                move_unknown = int(bd.get("unknown_neighbors", 0) or 0)
+                move_edge_frontier = bool(bd.get("edge_frontier", False))
+                move_edge_junction = bool(bd.get("edge_junction", False))
+                if move_unknown > 0 or move_edge_frontier or move_edge_junction:
+                    local_non_novel = False
+                    break
+
+            if local_non_novel:
+                frontier_escape_move = self._frontier_first_step()
+                if frontier_escape_move and any(move == frontier_escape_move for move, _ in candidates):
+                    self._last_planner_choice_debug = (
+                        f"source=frontier_non_novel_escape selected={frontier_escape_move} "
+                        f"unknown={unresolved_unknown} frontier={unresolved_frontier} "
+                        f"force_score_fallback={1 if force_score_fallback else 0}"
+                    )
+                    return frontier_escape_move
 
         if self.maze_agent_enable and (not force_score_fallback):
-            maze_move = self._maze_agent_exploration_move(candidates, terminal_filtered)
+            maze_move = self._maze_agent_exploration_move(candidates, terminal_filtered, breakdown_cache)
             if maze_move:
                 return maze_move
 
         if self.organism_control_enable and (not force_score_fallback):
-            organism_move = self._organism_live_exploration_move(candidates, terminal_filtered)
+            organism_move = self._organism_live_exploration_move(candidates, terminal_filtered, breakdown_cache)
             if organism_move:
                 return organism_move
 
         tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
-        scored: list[tuple[str, int]] = []
+        raw_scored: list[tuple[str, int]] = []
         for move, _cell in candidates:
-            scored.append((move, self._exploration_move_score(move)))
+            raw_scored.append((move, self._exploration_move_score(move, breakdown_cache)))
+
+        score_delta_by_move: dict[str, int] = {}
+        if soft_override_mode:
+            if soft_frontier_lock_move and any(move == soft_frontier_lock_move for move, _ in raw_scored):
+                score_delta_by_move[soft_frontier_lock_move] = (
+                    score_delta_by_move.get(soft_frontier_lock_move, 0)
+                    + int(self.phase2_frontier_lock_influence)
+                )
+            if soft_persistent_frontier_move and any(move == soft_persistent_frontier_move for move, _ in raw_scored):
+                score_delta_by_move[soft_persistent_frontier_move] = (
+                    score_delta_by_move.get(soft_persistent_frontier_move, 0)
+                    + int(self.phase2_persistent_frontier_influence)
+                )
+            if soft_verification_move and any(move == soft_verification_move for move, _ in raw_scored):
+                score_delta_by_move[soft_verification_move] = (
+                    score_delta_by_move.get(soft_verification_move, 0)
+                    + int(self.phase2_verification_influence)
+                )
+
+        scored: list[tuple[str, int]] = [
+            (move, int(score - score_delta_by_move.get(move, 0)))
+            for move, score in raw_scored
+        ]
         scored.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
         best_score = scored[0][1]
+        soft_delta_text = ""
+        if score_delta_by_move:
+            soft_delta_text = ",".join(
+                f"{move}:{delta}" for move, delta in sorted(score_delta_by_move.items(), key=lambda item: item[0])
+            )
+        soft_note_suffix = ""
+        if soft_override_mode:
+            soft_note_suffix = (
+                f" soft_override=1 soft_deltas=[{soft_delta_text or '(none)'}]"
+                f" soft_notes=[{' | '.join(soft_influence_notes[:3]) if soft_influence_notes else '(none)'}]"
+            )
 
         frontier_move = self._frontier_first_step()
         if (not force_score_fallback) and frontier_move and any(move == frontier_move for move, _score in scored):
-            frontier_breakdown = self._exploration_move_breakdown(frontier_move)
+            frontier_breakdown = self._exploration_move_breakdown_cached(frontier_move, breakdown_cache)
             frontier_score = int(frontier_breakdown["score"])
             margin = max(0, self.frontier_override_score_margin)
             if frontier_score <= best_score + margin:
@@ -10498,7 +14567,10 @@ class AIAssistantApp:
         tie_band = max(0, self.exploration_tie_band)
         near_best = [item for item in scored if item[1] <= best_score + tie_band]
         near_best_moves = [move for move, _score in near_best]
-        near_best_breakdowns = {move: self._exploration_move_breakdown(move) for move in near_best_moves}
+        near_best_breakdowns = {
+            move: self._exploration_move_breakdown_cached(move, breakdown_cache)
+            for move in near_best_moves
+        }
 
         selected_move = scored[0][0]
         picked_random_tie = False
@@ -10567,7 +14639,7 @@ class AIAssistantApp:
             and self.adaptive_controller.steps >= self.adaptive_policy_min_steps
         ):
             scored_breakdowns = {
-                move: self._exploration_move_breakdown(move)
+                move: self._exploration_move_breakdown_cached(move, breakdown_cache)
                 for move, _score in scored
             }
             adaptive_ranked: list[tuple[str, float, int]] = []
@@ -10615,7 +14687,7 @@ class AIAssistantApp:
                 f"stuck_softmax={1 if stuck_softmax_used else 0} "
                 f"terminal_filtered={terminal_filtered} "
                 f"randomize_ties={self.exploration_randomize_ties} picked_random_tie={picked_random_tie} "
-                f"near_best=[{near_best_compact}] {adaptive_policy_note}"
+                f"near_best=[{near_best_compact}] {adaptive_policy_note}{soft_note_suffix}"
             )
         else:
             self._last_planner_choice_debug = (
@@ -10624,7 +14696,7 @@ class AIAssistantApp:
                 f"stuck_softmax={1 if stuck_softmax_used else 0} "
                 f"terminal_filtered={terminal_filtered} "
                 f"randomize_ties={self.exploration_randomize_ties} picked_random_tie={picked_random_tie} "
-                f"near_best=[{near_best_compact}]"
+                f"near_best=[{near_best_compact}]{soft_note_suffix}"
             )
         return selected_move
 
@@ -10648,9 +14720,16 @@ class AIAssistantApp:
                 facing=self.player_facing,
             )
         )
-        if (not target_known_visible) and (not self._maze_episode_fully_mapped()):
-            return ""
-        if (not target_known_visible) and (not self._maze_objective_override_safe()):
+        fully_mapped_now = self._maze_episode_fully_mapped()
+        if int(self.objective_override_phase_level) >= 4 and (not fully_mapped_now) and (not target_known_visible):
+            # Phase-4 policy: do not chase stale exit memory while unresolved uncertainty remains.
+            # This prevents temporary exit sightings from pulling exploration back into loop corridors.
+            ep_summary = self._episodic_memory_summary()
+            unresolved_unknown = int(ep_summary.get("unknown") or 0)
+            unresolved_frontier = int(ep_summary.get("frontier") or 0)
+            if unresolved_unknown > 0 or unresolved_frontier > 0:
+                return ""
+        if (not target_known_visible) and (not fully_mapped_now) and (not self._maze_objective_override_safe()):
             return ""
 
         current_distance = self._distance_between_cells(self.current_player_cell, self.current_target_cell)
@@ -10676,18 +14755,95 @@ class AIAssistantApp:
             if move not in toward_target_order:
                 toward_target_order.append(move)
 
+        shortest_progress_moves: list[str] = []
         for move in toward_target_order:
             nxt = self._neighbor_for_move(self.current_player_cell, move)
             if nxt == self.current_player_cell or self._is_blocked_cell(nxt):
                 continue
             nxt_distance = self._distance_between_cells(nxt, self.current_target_cell)
             if nxt_distance == current_distance - 1:
-                return move
+                shortest_progress_moves.append(move)
+
+        if shortest_progress_moves:
+            chosen_move, _mv_note = self._objective_move_with_mv_tiebreak(shortest_progress_moves[0])
+            return chosen_move or shortest_progress_moves[0]
 
         path = self._shortest_path_moves_between_cells(self.current_player_cell, self.current_target_cell)
         if path:
-            return path[0]
+            chosen_move, _mv_note = self._objective_move_with_mv_tiebreak(path[0])
+            return chosen_move or path[0]
         return ""
+
+    def _objective_move_with_mv_tiebreak(self, preferred_move: str) -> tuple[str, str]:
+        if not preferred_move:
+            return ("", "")
+        if not self._is_valid_traversal_move(preferred_move):
+            return (preferred_move, "")
+
+        current_distance = self._distance_between_cells(self.current_player_cell, self.current_target_cell)
+        if current_distance <= 0 or current_distance >= self.grid_cells * self.grid_cells:
+            return (preferred_move, "")
+
+        # Objective-mode MV influence is restricted to equal-cost progress alternatives
+        # so navigation remains shortest-path safe while still leveraging confident exit cues.
+        progress_candidates: list[str] = []
+        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            if not self._is_valid_traversal_move(move):
+                continue
+            nxt = self._neighbor_for_move(self.current_player_cell, move)
+            nxt_distance = self._distance_between_cells(nxt, self.current_target_cell)
+            if nxt_distance == current_distance - 1:
+                progress_candidates.append(move)
+
+        if preferred_move not in progress_candidates or len(progress_candidates) <= 1:
+            return (preferred_move, "")
+
+        mv_hints = self._machine_vision_kernel_hints()
+        if not bool(mv_hints.get("enabled")):
+            return (preferred_move, "")
+        if not bool(mv_hints.get("exit_usable")):
+            return (preferred_move, "")
+
+        exit_source = str(mv_hints.get("exit_source", "none") or "none")
+        if exit_source not in {"learned_signature", "prior_sample_context", "prior_sample"}:
+            return (preferred_move, "")
+
+        exit_conf = float(mv_hints.get("exit_conf", 0.0) or 0.0)
+        hint_strength = float(mv_hints.get("exit_hint_strength", 0.0) or 0.0)
+        conf_floor = max(float(self.machine_vision_kernel_hint_min_conf), 0.12)
+        if exit_conf < conf_floor or hint_strength < 0.12:
+            return (preferred_move, "")
+
+        mv_exit_cell = tuple(mv_hints.get("exit_pred_cell", (-1, -1)) or (-1, -1))
+        mv_row, mv_col = int(mv_exit_cell[0]), int(mv_exit_cell[1])
+        if not (0 <= mv_row < self.grid_cells and 0 <= mv_col < self.grid_cells):
+            return (preferred_move, "")
+
+        current_mv_dist = abs(int(self.current_player_cell[0]) - mv_row) + abs(int(self.current_player_cell[1]) - mv_col)
+        if current_mv_dist <= 0:
+            return (preferred_move, "")
+
+        ranked: list[tuple[int, int, str]] = []
+        for move in progress_candidates:
+            nxt = self._neighbor_for_move(self.current_player_cell, move)
+            mv_dist_next = abs(int(nxt[0]) - mv_row) + abs(int(nxt[1]) - mv_col)
+            mv_delta = int(current_mv_dist - mv_dist_next)
+            ranked.append((mv_dist_next, -mv_delta, move))
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        best_mv_dist, _neg_mv_delta, best_move = ranked[0]
+        preferred_mv_dist = next((dist for dist, _delta, move in ranked if move == preferred_move), best_mv_dist)
+        if best_move == preferred_move:
+            return (preferred_move, "")
+        if best_mv_dist >= preferred_mv_dist:
+            return (preferred_move, "")
+
+        note = (
+            "[OBJECTIVE-MV-TIEBREAK: "
+            f"{preferred_move}->{best_move} mv_dist={preferred_mv_dist}->{best_mv_dist} "
+            f"conf={round(exit_conf, 3)} src={exit_source}]"
+        )
+        return (best_move, note)
 
     def _objective_move_risk_score(self, move: str) -> float:
         if not move:
@@ -10769,6 +14925,1478 @@ class AIAssistantApp:
             )
             return (best_move, note)
         return (preferred_move, "")
+
+    def _memory_risk_replay_guard(self, selected_move: str, objective_routing_step: bool = False) -> tuple[str, str]:
+        if (not self.memory_risk_replay_guard_enable) or (not selected_move):
+            return (selected_move, "")
+        if not self._is_valid_traversal_move(selected_move):
+            return (selected_move, "")
+
+        candidate_moves = [
+            move for move in ["UP", "DOWN", "LEFT", "RIGHT"] if self._is_valid_traversal_move(move)
+        ]
+        if len(candidate_moves) < 2 or selected_move not in candidate_moves:
+            return (selected_move, "")
+
+        # Outside objective-routing, only trigger this guard for visibly risky branches.
+        if (not objective_routing_step) and (
+            (not self._is_move_visibly_terminal_dead_end(self.current_player_cell, selected_move))
+            and (not self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, selected_move))
+        ):
+            return (selected_move, "")
+
+        profile = self._recent_action_penalty_profile(self.current_player_cell, candidate_moves)
+        selected_profile = profile.get(selected_move, {})
+        selected_count = int(selected_profile.get("count", 0) or 0)
+        selected_decayed = float(selected_profile.get("decayed_penalty", 0.0) or 0.0)
+        selected_cat = int(selected_profile.get("catastrophic_hits", 0) or 0)
+        selected_risk_hits = int(selected_profile.get("risk_hits", 0) or 0)
+        if selected_count < int(self.memory_risk_replay_guard_min_repeat):
+            return (selected_move, "")
+
+        severe_selected = (
+            selected_decayed >= float(self.memory_risk_replay_guard_decay_threshold)
+            or selected_cat > 0
+            or selected_risk_hits >= int(self.memory_risk_replay_guard_min_repeat)
+        )
+        if not severe_selected:
+            return (selected_move, "")
+
+        selected_breakdown = self._exploration_move_breakdown(selected_move)
+        selected_score = int(selected_breakdown.get("score", 0) or 0)
+        current_distance = self._distance_between_cells(self.current_player_cell, self.current_target_cell)
+
+        alternatives: list[tuple[float, int, int, int, int, str]] = []
+        for move in candidate_moves:
+            if move == selected_move:
+                continue
+            breakdown = self._exploration_move_breakdown(move)
+            alt_score = int(breakdown.get("score", 0) or 0)
+            if alt_score > selected_score + int(self.memory_risk_replay_guard_score_margin):
+                continue
+
+            if objective_routing_step and (0 < current_distance < self.grid_cells * self.grid_cells):
+                nxt = self._neighbor_for_move(self.current_player_cell, move)
+                next_distance = self._distance_between_cells(nxt, self.current_target_cell)
+                if next_distance > (current_distance + int(self.memory_risk_replay_guard_max_detour)):
+                    continue
+
+            alt_profile = profile.get(move, {})
+            alt_decayed = float(alt_profile.get("decayed_penalty", 0.0) or 0.0)
+            alt_cat = int(alt_profile.get("catastrophic_hits", 0) or 0)
+            alt_risk_hits = int(alt_profile.get("risk_hits", 0) or 0)
+            alt_risky = 1 if (
+                self._is_move_visibly_terminal_dead_end(self.current_player_cell, move)
+                or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, move)
+            ) else 0
+            alternatives.append((alt_decayed, alt_cat, alt_risk_hits, alt_risky, alt_score, move))
+
+        if not alternatives:
+            return (selected_move, "")
+
+        # Prefer low-decay, non-catastrophic, non-risky alternatives first.
+        alternatives.sort(key=lambda item: (item[1], item[2], item[3], item[0], item[4], item[5]))
+        best_alt_decayed, best_alt_cat, best_alt_risk_hits, best_alt_risky, _best_alt_score, best_alt_move = alternatives[0]
+
+        selected_severity = selected_decayed + (selected_cat * float(self.memory_risk_replay_guard_decay_threshold)) + (selected_risk_hits * 20.0)
+        alt_severity = best_alt_decayed + (best_alt_cat * float(self.memory_risk_replay_guard_decay_threshold)) + (best_alt_risk_hits * 20.0)
+        catastrophic_escape = selected_cat > 0 and best_alt_cat == 0
+        meaningful_reduction = (alt_severity + 15.0) < selected_severity
+        if not (catastrophic_escape or meaningful_reduction):
+            return (selected_move, "")
+
+        note = (
+            "[MEMORY-RISK-REPLAY-GUARD: "
+            f"{selected_move}->{best_alt_move} "
+            f"decay={round(selected_decayed, 1)}->{round(best_alt_decayed, 1)} "
+            f"cat={selected_cat}->{best_alt_cat} "
+            f"risk_hits={selected_risk_hits}->{best_alt_risk_hits} "
+            f"alt_risky={best_alt_risky}]"
+        )
+        return (best_alt_move, note)
+
+    def _append_guard_reason(self, current_reason: str, extra_reason: str) -> str:
+        note = str(extra_reason or "").strip()
+        if not note:
+            return current_reason
+        if current_reason:
+            return f"{current_reason} {note}".strip()
+        return note
+
+    def _adaptive_guard_strength(self) -> float:
+        if not self.adaptive_guard_enable:
+            return 1.0
+        return max(
+            float(self.adaptive_guard_legacy_min_strength),
+            min(1.0, float(self.adaptive_guard_legacy_strength)),
+        )
+
+    def _adaptive_guard_budget_snapshot(self) -> tuple[int, int]:
+        if not self.adaptive_guard_enable:
+            return (0, max(1, int(self.adaptive_guard_budget_base)))
+        used = int(sum(self.adaptive_guard_recent_interventions))
+        scaled_budget = int(round(float(self.adaptive_guard_budget_base) * self._adaptive_guard_strength()))
+        allowed = max(1, min(int(self.adaptive_guard_budget_window), scaled_budget))
+        return (used, allowed)
+
+    def _adaptive_guard_noncritical_override_allowed(
+        self,
+        *,
+        recent_penalty_sum: float,
+        unresolved_signal: bool,
+        stuck_frontier_recovery: bool,
+        micro_frontier_stall_active: bool,
+    ) -> bool:
+        if not self.adaptive_guard_enable:
+            return True
+        if micro_frontier_stall_active:
+            return True
+        used, allowed = self._adaptive_guard_budget_snapshot()
+        if used < allowed:
+            return True
+        if recent_penalty_sum <= -260.0:
+            return True
+        if stuck_frontier_recovery:
+            return True
+        if (
+            unresolved_signal
+            and self._adaptive_guard_strength() >= 0.7
+            and recent_penalty_sum <= -180.0
+        ):
+            return True
+        return False
+
+    def _set_adaptive_guard_escape_lock(self, move: str, repeat_floor: int) -> None:
+        if not self.adaptive_guard_enable or (not move):
+            return
+        hold_steps = int(round(float(self.adaptive_guard_hysteresis_steps) * self._adaptive_guard_strength()))
+        if hold_steps <= 0:
+            return
+        self.adaptive_guard_escape_lock_move = str(move)
+        self.adaptive_guard_escape_lock_steps = max(0, hold_steps)
+        self.adaptive_guard_escape_lock_repeat_floor = max(0, int(repeat_floor))
+
+    def _normalize_long_run_runtime_state(self, *, trigger: str) -> None:
+        if (not self.adaptive_guard_enable) or (not self.long_run_runtime_normalize_enable):
+            return
+
+        blend = max(0.0, min(1.0, float(self.long_run_runtime_guard_blend)))
+        if blend <= 0.0:
+            return
+
+        keep = 1.0 - blend
+        min_strength = float(self.adaptive_guard_legacy_min_strength)
+        baseline_strength = max(
+            min_strength,
+            min(1.0, float(self.adaptive_guard_legacy_strength_init)),
+        )
+        current_strength = self._adaptive_guard_strength()
+        self.adaptive_guard_legacy_strength = max(
+            min_strength,
+            min(1.0, (current_strength * keep) + (baseline_strength * blend)),
+        )
+
+        intervention_anchor = max(0.0, min(1.0, float(self.adaptive_guard_intervention_target)))
+        utility_anchor = max(0.0, min(1.0, float(self.adaptive_guard_utility_target)))
+        self.guard_intervention_ema = (self.guard_intervention_ema * keep) + (intervention_anchor * blend)
+        self.guard_utility_ema = (self.guard_utility_ema * keep) + (utility_anchor * blend)
+        self.guard_penalty_ema = max(0.0, self.guard_penalty_ema * keep)
+        self.adaptive_guard_recent_interventions.clear()
+        self.adaptive_guard_escape_lock_move = ""
+        self.adaptive_guard_escape_lock_steps = 0
+        self.adaptive_guard_escape_lock_repeat_floor = 0
+        if trigger == "run-set-start":
+            self._recent_step_penalties.clear()
+
+    def _update_adaptive_guard_learning(
+        self,
+        *,
+        guard_override: bool,
+        progress_delta: int,
+        reward_signal: float,
+        penalty_signal: float,
+    ) -> None:
+        if not self.adaptive_guard_enable:
+            return
+
+        decay = float(self.adaptive_guard_ema_decay)
+        keep = max(0.5, min(0.999, decay))
+        new_weight = 1.0 - keep
+
+        intervention = 1.0 if guard_override else 0.0
+        self.guard_intervention_ema = (self.guard_intervention_ema * keep) + (intervention * new_weight)
+        self.adaptive_guard_recent_interventions.append(1 if guard_override else 0)
+
+        progress_term = max(-1.0, min(1.0, float(progress_delta)))
+        reward_balance = float(reward_signal) - float(penalty_signal)
+        balance_term = math.tanh(reward_balance / 40.0)
+        utility_sample = max(0.0, min(1.0, 0.5 + (0.25 * progress_term) + (0.25 * balance_term)))
+        utility_anchor = utility_sample if guard_override else 0.5
+        self.guard_utility_ema = (self.guard_utility_ema * keep) + (utility_anchor * new_weight)
+        self.guard_penalty_ema = (self.guard_penalty_ema * keep) + (max(0.0, float(penalty_signal)) * new_weight)
+
+        current_strength = self._adaptive_guard_strength()
+        learn_rate = max(0.0, float(self.adaptive_guard_learn_rate))
+        utility_target = float(self.adaptive_guard_utility_target)
+
+        if guard_override:
+            utility_gap = self.guard_utility_ema - utility_target
+            overuse_gap = max(0.0, self.guard_intervention_ema - float(self.adaptive_guard_intervention_target))
+            adjustment = (-learn_rate * utility_gap) - (learn_rate * 0.5 * overuse_gap)
+        else:
+            adjustment = -learn_rate * 0.15
+
+        if (
+            self.guard_utility_ema < (utility_target - 0.08)
+            and self.guard_penalty_ema > float(self.adaptive_guard_penalty_floor)
+        ):
+            adjustment += learn_rate * 0.4
+
+        next_strength = current_strength + adjustment
+        self.adaptive_guard_legacy_strength = max(
+            float(self.adaptive_guard_legacy_min_strength),
+            min(1.0, float(next_strength)),
+        )
+
+    def _apply_post_selection_guard_arbiter(
+        self,
+        selected_move: str,
+        *,
+        navigation_mode_lock: bool,
+        frontier_lock_active: bool,
+        objective_routing_step: bool,
+        micro_frontier_stall_active: bool,
+        micro_frontier_stall_note: str,
+        micro_frontier_no_progress_steps: int,
+        micro_frontier_repeat_count: int,
+        guard_reason: str,
+        guard_override: bool,
+        fallback_used: bool,
+    ) -> tuple[str, str, bool, bool]:
+        if (not selected_move) or (not self._is_valid_traversal_move(selected_move)):
+            return (selected_move, guard_reason, guard_override, fallback_used)
+
+        tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
+        _ep_summary = self._episodic_memory_summary()
+        unresolved_unknown = int(_ep_summary.get("unknown") or 0)
+        unresolved_frontier = int(_ep_summary.get("frontier") or 0)
+        recent_penalty_window = list(self._recent_step_penalties)[-6:]
+        recent_penalty_sum = float(sum(recent_penalty_window)) if recent_penalty_window else 0.0
+        stuck_frontier_recovery = (
+            self._maze_reexplore_cooldown_remaining > 0
+            and (unresolved_unknown > 0 or unresolved_frontier > 0)
+        )
+        if micro_frontier_stall_active:
+            stuck_frontier_recovery = True
+        unresolved_signal = (unresolved_unknown > 0 or unresolved_frontier > 0)
+        runtime_micro_signature_raw = getattr(self, "_runtime_micro_frontier_signature", None)
+        runtime_micro_signature: tuple[int, int] | None = None
+        if isinstance(runtime_micro_signature_raw, tuple) and len(runtime_micro_signature_raw) == 2:
+            runtime_micro_signature = (
+                max(0, int(runtime_micro_signature_raw[0])),
+                max(0, int(runtime_micro_signature_raw[1])),
+            )
+        disambiguation_signature_raw = getattr(
+            self,
+            "_runtime_micro_frontier_disambiguation_signature",
+            None,
+        )
+        disambiguation_signature: tuple[int, int] | None = None
+        if isinstance(disambiguation_signature_raw, tuple) and len(disambiguation_signature_raw) == 2:
+            disambiguation_signature = (
+                max(0, int(disambiguation_signature_raw[0])),
+                max(0, int(disambiguation_signature_raw[1])),
+            )
+        disambiguation_cooldown_remaining = max(
+            0,
+            int(getattr(self, "_runtime_micro_frontier_disambiguation_cooldown_remaining", 0) or 0),
+        )
+        if disambiguation_cooldown_remaining <= 0:
+            self._runtime_micro_frontier_disambiguation_signature = None
+            disambiguation_signature = None
+        disambiguation_same_signature_cooldown_active = bool(
+            disambiguation_cooldown_remaining > 0
+            and runtime_micro_signature is not None
+            and disambiguation_signature is not None
+            and runtime_micro_signature == disambiguation_signature
+        )
+        adaptive_guard_strength = self._adaptive_guard_strength()
+        noncritical_override_allowed = self._adaptive_guard_noncritical_override_allowed(
+            recent_penalty_sum=recent_penalty_sum,
+            unresolved_signal=unresolved_signal,
+            stuck_frontier_recovery=stuck_frontier_recovery,
+            micro_frontier_stall_active=micro_frontier_stall_active,
+        )
+        if micro_frontier_stall_active and micro_frontier_stall_note:
+            guard_reason = self._append_guard_reason(guard_reason, micro_frontier_stall_note)
+        noncritical_hold_noted = False
+        deathloop_escape_source_move = ""
+        deathloop_escape_applied = False
+        deathloop_escape_protected = unresolved_signal
+        deathloop_escape_selected_pressure = -1
+        long_loop_escape_source_move = ""
+        long_loop_escape_applied = False
+        long_loop_escape_protected = unresolved_signal
+        micro_stall_escape_source_move = ""
+        micro_stall_escape_applied = False
+        micro_stall_escape_protected = unresolved_signal
+
+        def _is_escape_source_replay(move: str) -> bool:
+            if not move:
+                return False
+            return bool(
+                (
+                    long_loop_escape_applied
+                    and long_loop_escape_protected
+                    and long_loop_escape_source_move
+                    and move == long_loop_escape_source_move
+                )
+                or (
+                    micro_stall_escape_applied
+                    and micro_stall_escape_protected
+                    and micro_stall_escape_source_move
+                    and move == micro_stall_escape_source_move
+                )
+            )
+
+        def _move_repeat_pressure(move: str) -> int:
+            if not move or (not self._is_valid_traversal_move(move)):
+                return 0
+            nxt = self._neighbor_for_move(self.current_player_cell, move)
+            forward_count, reverse_count = self._recent_transition_counts(self.current_player_cell, nxt)
+            return forward_count + reverse_count
+
+        def _note_noncritical_hold() -> None:
+            nonlocal guard_reason, noncritical_hold_noted
+            if noncritical_hold_noted:
+                return
+            budget_used, budget_allowed = self._adaptive_guard_budget_snapshot()
+            guard_reason = self._append_guard_reason(
+                guard_reason,
+                (
+                    "[ADAPTIVE-BUDGET-HOLD: deferred noncritical guard override "
+                    f"used={budget_used} allowed={budget_allowed} "
+                    f"strength={round(adaptive_guard_strength, 3)}]"
+                ),
+            )
+            noncritical_hold_noted = True
+
+        effective_frontier_lock_active = bool(frontier_lock_active)
+        frontier_lock_temporarily_suspended = False
+        micro_frontier_emergency = (
+            micro_frontier_stall_active
+            and unresolved_signal
+            and int(micro_frontier_no_progress_steps)
+            >= int(
+                self.micro_frontier_stall_escape_no_progress_min
+                + self.micro_frontier_stall_escape_emergency_no_progress_delta
+            )
+        )
+        if (
+            effective_frontier_lock_active
+            and micro_frontier_emergency
+            and recent_penalty_sum <= -160.0
+        ):
+            # During catastrophic micro-stall churn, temporarily disable
+            # frontier-lock pressure so escape routing can prioritize safety.
+            effective_frontier_lock_active = False
+            frontier_lock_temporarily_suspended = True
+            guard_reason = self._append_guard_reason(
+                guard_reason,
+                (
+                    "[MICRO-FRONTIER-FRONTIER-LOCK-SUSPEND: "
+                    f"no_progress={micro_frontier_no_progress_steps} "
+                    f"unknown={unresolved_unknown} frontier={unresolved_frontier} "
+                    f"penalty6={round(recent_penalty_sum, 1)}]"
+                ),
+            )
+
+        micro_frontier_soft_escape_allowed = (
+            (not disambiguation_same_signature_cooldown_active)
+            or micro_frontier_emergency
+        )
+        micro_frontier_disambiguation_applied = False
+
+        if self.adaptive_guard_escape_lock_steps > 0:
+            lock_move = str(self.adaptive_guard_escape_lock_move or "")
+            lock_floor = max(1, int(self.adaptive_guard_escape_lock_repeat_floor))
+            if lock_move and self._is_valid_traversal_move(lock_move):
+                selected_pressure = _move_repeat_pressure(selected_move)
+                if unresolved_signal and selected_move != lock_move and selected_pressure > lock_floor:
+                    selected_move = lock_move
+                    guard_override = True
+                    fallback_used = True
+                    guard_reason = self._append_guard_reason(
+                        guard_reason,
+                        (
+                            "[ADAPTIVE-HYSTERESIS-HOLD: kept prior escape move "
+                            f"'{lock_move}' repeat={selected_pressure} floor={lock_floor} "
+                            f"steps_left={self.adaptive_guard_escape_lock_steps}]"
+                        ),
+                    )
+            self.adaptive_guard_escape_lock_steps = max(0, self.adaptive_guard_escape_lock_steps - 1)
+            if self.adaptive_guard_escape_lock_steps <= 0:
+                self.adaptive_guard_escape_lock_move = ""
+                self.adaptive_guard_escape_lock_repeat_floor = 0
+        else:
+            self.adaptive_guard_escape_lock_move = ""
+            self.adaptive_guard_escape_lock_repeat_floor = 0
+
+        # Respect navigation lock by default, but allow emergency escape when
+        # objective routing is demonstrably replaying a catastrophic loop.
+        if navigation_mode_lock:
+            selected_next = self._neighbor_for_move(self.current_player_cell, selected_move)
+            nav_forward_count, nav_reverse_count = self._recent_transition_counts(
+                self.current_player_cell,
+                selected_next,
+            )
+            nav_repeat_pressure = nav_forward_count + nav_reverse_count
+            nav_breakdown = self._exploration_move_breakdown(selected_move)
+            nav_cycle_signal = (
+                int(nav_breakdown.get("transition_repeat_penalty", 0) or 0) > 0
+                or int(nav_breakdown.get("cycle_pair_penalty", 0) or 0) > 0
+                or int(nav_breakdown.get("immediate_backtrack_hard_penalty", 0) or 0) > 0
+            )
+            nav_hazard_signal = (
+                self._is_move_visibly_terminal_dead_end(self.current_player_cell, selected_move)
+                or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, selected_move)
+            )
+            catastrophic_signal = recent_penalty_sum <= -320.0
+            nav_emergency_escape = (
+                (nav_repeat_pressure >= 1 or nav_cycle_signal)
+                and nav_hazard_signal
+                and (unresolved_signal or catastrophic_signal)
+            )
+            if not nav_emergency_escape:
+                return (selected_move, guard_reason, guard_override, fallback_used)
+            guard_reason = self._append_guard_reason(
+                guard_reason,
+                (
+                    "Navigation-lock emergency escape armed: "
+                    f"repeat={nav_repeat_pressure} cycle_signal={1 if nav_cycle_signal else 0} "
+                    f"hazard={1 if nav_hazard_signal else 0} "
+                    f"unknown={unresolved_unknown} frontier={unresolved_frontier} "
+                    f"penalty6={round(recent_penalty_sum, 1)}."
+                ),
+            )
+
+        # Escalate micro-frontier stalls into a direct low-repeat escape choice
+        # once no-progress pressure becomes prolonged.
+        if (
+            self.micro_frontier_stall_disambiguation_enable
+            and selected_move
+            and self._is_valid_traversal_move(selected_move)
+            and micro_frontier_stall_active
+            and unresolved_signal
+            and runtime_micro_signature is not None
+            and runtime_micro_signature[0] <= 1
+            and runtime_micro_signature[1] <= 1
+            and int(micro_frontier_no_progress_steps) >= int(self.micro_frontier_stall_disambiguation_no_progress_cap)
+            and int(micro_frontier_repeat_count) >= int(self.micro_frontier_stall_disambiguation_min_repeat)
+            and int(getattr(self, "_runtime_micro_frontier_stall_streak", 0) or 0)
+            >= int(self.micro_frontier_stall_disambiguation_streak_cap)
+            and (not disambiguation_same_signature_cooldown_active)
+        ):
+            selected_breakdown = self._exploration_move_breakdown(selected_move)
+            selected_score = int(selected_breakdown.get("score", 0) or 0)
+            selected_repeat_pressure = _move_repeat_pressure(selected_move)
+            selected_risky = 1 if (
+                self._is_move_visibly_terminal_dead_end(self.current_player_cell, selected_move)
+                or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, selected_move)
+            ) else 0
+            selected_unknown = int(selected_breakdown.get("unknown_neighbors", 0) or 0)
+            selected_edge_frontier = bool(selected_breakdown.get("edge_frontier", False))
+            selected_edge_junction = bool(selected_breakdown.get("edge_junction", False))
+            selected_has_signal = bool(
+                selected_unknown > 0
+                or selected_edge_frontier
+                or selected_edge_junction
+            )
+            alternatives: list[tuple[int, int, int, int, int, str]] = []
+            for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                if move == selected_move or (not self._is_valid_traversal_move(move)):
+                    continue
+                nxt = self._neighbor_for_move(self.current_player_cell, move)
+                alt_breakdown = self._exploration_move_breakdown(move)
+                alt_unknown = int(alt_breakdown.get("unknown_neighbors", 0) or 0)
+                alt_edge_frontier = bool(alt_breakdown.get("edge_frontier", False))
+                alt_edge_junction = bool(alt_breakdown.get("edge_junction", False))
+                alt_has_signal = bool(
+                    alt_unknown > 0
+                    or alt_edge_frontier
+                    or alt_edge_junction
+                )
+                alt_signal_rank = 0 if alt_has_signal else 1
+                alt_repeat_pressure = _move_repeat_pressure(move)
+                alt_taboo = 1 if self._is_transition_taboo(self.current_player_cell, nxt) else 0
+                alt_risky = 1 if (
+                    self._is_move_visibly_terminal_dead_end(self.current_player_cell, move)
+                    or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, move)
+                ) else 0
+                alt_score = int(alt_breakdown.get("score", 0) or 0)
+                alternatives.append(
+                    (
+                        alt_signal_rank,
+                        alt_risky,
+                        alt_repeat_pressure,
+                        alt_taboo,
+                        alt_score,
+                        move,
+                    )
+                )
+
+            if alternatives:
+                alternatives.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                        item[2],
+                        item[3],
+                        item[4],
+                        tie_order.get(item[5], 9),
+                    )
+                )
+                (
+                    replacement_signal_rank,
+                    replacement_risky,
+                    replacement_repeat_pressure,
+                    _replacement_taboo,
+                    replacement_score,
+                    replacement_move,
+                ) = alternatives[0]
+                should_override = (
+                    (replacement_signal_rank == 0 and (not selected_has_signal))
+                    or replacement_risky < selected_risky
+                    or replacement_repeat_pressure < selected_repeat_pressure
+                    or replacement_score <= selected_score
+                )
+                if replacement_move != selected_move and should_override:
+                    previous_move = selected_move
+                    selected_move = replacement_move
+                    guard_override = True
+                    fallback_used = True
+                    micro_frontier_disambiguation_applied = True
+                    self._runtime_micro_frontier_disambiguation_signature = runtime_micro_signature
+                    self._runtime_micro_frontier_disambiguation_cooldown_remaining = int(
+                        self.micro_frontier_stall_disambiguation_cooldown_steps
+                    )
+                    disambiguation_reason = (
+                        "[MICRO-FRONTIER-DISAMBIGUATION: "
+                        f"{previous_move}->{replacement_move} "
+                        f"no_progress={micro_frontier_no_progress_steps} "
+                        f"stall_streak={int(getattr(self, '_runtime_micro_frontier_stall_streak', 0) or 0)} "
+                        f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
+                        f"signal={0 if selected_has_signal else 1}->{replacement_signal_rank} "
+                        f"risk={selected_risky}->{replacement_risky} "
+                        f"score={selected_score}->{replacement_score} "
+                        f"signature={runtime_micro_signature} "
+                        f"cooldown={int(self.micro_frontier_stall_disambiguation_cooldown_steps)}]"
+                    )
+                    guard_reason = self._append_guard_reason(guard_reason, disambiguation_reason)
+
+        if (
+            selected_move
+            and self._is_valid_traversal_move(selected_move)
+            and micro_frontier_stall_active
+            and unresolved_signal
+            and micro_frontier_soft_escape_allowed
+            and (not micro_frontier_disambiguation_applied)
+            and int(micro_frontier_no_progress_steps) >= int(self.micro_frontier_stall_escape_no_progress_min)
+            and (
+                int(micro_frontier_repeat_count) >= int(self.micro_frontier_stall_escape_repeat_min)
+                or _move_repeat_pressure(selected_move) >= 1
+            )
+            and (
+                noncritical_override_allowed
+                or int(micro_frontier_no_progress_steps)
+                >= int(
+                    self.micro_frontier_stall_escape_no_progress_min
+                    + self.micro_frontier_stall_escape_emergency_no_progress_delta
+                )
+            )
+        ):
+            selected_breakdown = self._exploration_move_breakdown(selected_move)
+            selected_score = int(selected_breakdown.get("score", 0) or 0)
+            selected_repeat_pressure = _move_repeat_pressure(selected_move)
+            selected_risky = 1 if (
+                self._is_move_visibly_terminal_dead_end(self.current_player_cell, selected_move)
+                or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, selected_move)
+            ) else 0
+            selected_unknown = int(selected_breakdown.get("unknown_neighbors", 0) or 0)
+            selected_edge_frontier = bool(selected_breakdown.get("edge_frontier", False))
+            selected_edge_junction = bool(selected_breakdown.get("edge_junction", False))
+            selected_novel_rank = 0 if (selected_unknown > 0 or selected_edge_frontier or selected_edge_junction) else 1
+            micro_emergency_mode = bool(micro_frontier_emergency and recent_penalty_sum <= -160.0)
+            alternatives: list[tuple[int, int, int, int, int, str]] = []
+            for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                if move == selected_move or (not self._is_valid_traversal_move(move)):
+                    continue
+                nxt = self._neighbor_for_move(self.current_player_cell, move)
+                alt_repeat_pressure = _move_repeat_pressure(move)
+                alt_taboo = 1 if self._is_transition_taboo(self.current_player_cell, nxt) else 0
+                alt_risky = 1 if (
+                    self._is_move_visibly_terminal_dead_end(self.current_player_cell, move)
+                    or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, move)
+                ) else 0
+                alt_breakdown = self._exploration_move_breakdown(move)
+                alt_unknown = int(alt_breakdown.get("unknown_neighbors", 0) or 0)
+                alt_edge_frontier = bool(alt_breakdown.get("edge_frontier", False))
+                alt_edge_junction = bool(alt_breakdown.get("edge_junction", False))
+                alt_novel_rank = 0 if (alt_unknown > 0 or alt_edge_frontier or alt_edge_junction) else 1
+                alt_score = int(alt_breakdown.get("score", 0) or 0)
+                alternatives.append(
+                    (
+                        alt_repeat_pressure,
+                        alt_taboo,
+                        alt_risky,
+                        alt_novel_rank,
+                        alt_score,
+                        move,
+                    )
+                )
+
+            if alternatives:
+                if micro_emergency_mode:
+                    alternatives.sort(
+                        key=lambda item: (
+                            item[2],
+                            item[0],
+                            item[1],
+                            item[3],
+                            item[4],
+                            tie_order.get(item[5], 9),
+                        )
+                    )
+                else:
+                    alternatives.sort(
+                        key=lambda item: (
+                            item[0],
+                            item[1],
+                            item[2],
+                            item[3],
+                            item[4],
+                            tie_order.get(item[5], 9),
+                        )
+                    )
+                (
+                    replacement_repeat_pressure,
+                    _replacement_taboo,
+                    replacement_risky,
+                    replacement_novel_rank,
+                    replacement_score,
+                    replacement_move,
+                ) = alternatives[0]
+                stall_margin = max(
+                    0,
+                    int(round(float(self.micro_frontier_stall_escape_score_margin) * adaptive_guard_strength)),
+                )
+                should_override = (
+                    replacement_risky < selected_risky
+                    or (
+                        micro_emergency_mode
+                        and replacement_risky <= selected_risky
+                        and replacement_repeat_pressure <= selected_repeat_pressure
+                    )
+                    or
+                    replacement_repeat_pressure < selected_repeat_pressure
+                    or (
+                        replacement_novel_rank < selected_novel_rank
+                        and replacement_repeat_pressure <= selected_repeat_pressure
+                    )
+                    or replacement_score <= selected_score + stall_margin
+                )
+                if (
+                    should_override
+                    and replacement_risky > selected_risky
+                    and replacement_repeat_pressure >= (selected_repeat_pressure - 1)
+                    and replacement_score > selected_score + stall_margin
+                ):
+                    should_override = False
+                    guard_reason = self._append_guard_reason(
+                        guard_reason,
+                        (
+                            "[MICRO-FRONTIER-SCORE-GUARD: blocked higher-risk replacement "
+                            f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
+                            f"score={selected_score}->{replacement_score} margin={stall_margin}]"
+                        ),
+                    )
+                if replacement_move != selected_move and should_override:
+                    previous_move = selected_move
+                    selected_move = replacement_move
+                    guard_override = True
+                    fallback_used = True
+                    micro_stall_escape_source_move = previous_move
+                    micro_stall_escape_applied = True
+                    self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
+                    stall_reason = (
+                        "Micro-frontier stall escape override: "
+                        f"replaced '{previous_move}' with '{replacement_move}' "
+                        f"(repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
+                        f"risk={selected_risky}->{replacement_risky}, "
+                        f"score={selected_score}->{replacement_score}, margin={stall_margin}, "
+                        f"no_progress={micro_frontier_no_progress_steps}, repeats={micro_frontier_repeat_count}, "
+                        f"unknown={unresolved_unknown}, frontier={unresolved_frontier})."
+                    )
+                    if micro_emergency_mode:
+                        stall_reason = f"{stall_reason} [emergency_mode=1]"
+                    guard_reason = self._append_guard_reason(guard_reason, stall_reason)
+
+        # Macro no-progress escape: when unresolved uncertainty is still broad
+        # (outside tiny micro-frontier pockets), force a low-repeat exploratory
+        # branch before no-progress climbs into long-loop territory.
+        if (
+            self.long_loop_escape_enable
+            and selected_move
+            and self._is_valid_traversal_move(selected_move)
+            and (not micro_frontier_stall_active)
+            and unresolved_signal
+            and unresolved_unknown >= int(self.long_loop_escape_min_unknown)
+            and int(micro_frontier_no_progress_steps) >= int(self.long_loop_escape_no_progress_min)
+            and (
+                noncritical_override_allowed
+                or int(micro_frontier_no_progress_steps)
+                >= int(
+                    self.long_loop_escape_no_progress_min
+                    + self.long_loop_escape_emergency_no_progress_delta
+                )
+            )
+        ):
+            selected_breakdown = self._exploration_move_breakdown(selected_move)
+            selected_score = int(selected_breakdown.get("score", 0) or 0)
+            selected_repeat_pressure = _move_repeat_pressure(selected_move)
+            selected_unknown = int(selected_breakdown.get("unknown_neighbors", 0) or 0)
+            selected_edge_frontier = bool(selected_breakdown.get("edge_frontier", False))
+            selected_edge_junction = bool(selected_breakdown.get("edge_junction", False))
+            selected_novel_rank = 0 if (selected_unknown > 0 or selected_edge_frontier or selected_edge_junction) else 1
+            selected_cycle_signal = (
+                int(selected_breakdown.get("transition_repeat_penalty", 0) or 0) > 0
+                or int(selected_breakdown.get("cycle_pair_penalty", 0) or 0) > 0
+                or int(selected_breakdown.get("immediate_backtrack_hard_penalty", 0) or 0) > 0
+            )
+            long_loop_emergency = int(micro_frontier_no_progress_steps) >= int(
+                self.long_loop_escape_no_progress_min + self.long_loop_escape_emergency_no_progress_delta
+            )
+            should_probe_escape = (
+                selected_repeat_pressure >= int(self.long_loop_escape_repeat_min)
+                or selected_cycle_signal
+                or long_loop_emergency
+            )
+            if should_probe_escape:
+                alternatives: list[tuple[int, int, int, int, int, str]] = []
+                for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                    if move == selected_move or (not self._is_valid_traversal_move(move)):
+                        continue
+                    nxt = self._neighbor_for_move(self.current_player_cell, move)
+                    alt_repeat_pressure = _move_repeat_pressure(move)
+                    alt_taboo = 1 if self._is_transition_taboo(self.current_player_cell, nxt) else 0
+                    alt_risky = 1 if (
+                        self._is_move_visibly_terminal_dead_end(self.current_player_cell, move)
+                        or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, move)
+                    ) else 0
+                    alt_breakdown = self._exploration_move_breakdown(move)
+                    alt_unknown = int(alt_breakdown.get("unknown_neighbors", 0) or 0)
+                    alt_edge_frontier = bool(alt_breakdown.get("edge_frontier", False))
+                    alt_edge_junction = bool(alt_breakdown.get("edge_junction", False))
+                    alt_novel_rank = 0 if (alt_unknown > 0 or alt_edge_frontier or alt_edge_junction) else 1
+                    alt_score = int(alt_breakdown.get("score", 0) or 0)
+                    alternatives.append(
+                        (
+                            alt_novel_rank,
+                            alt_repeat_pressure,
+                            alt_taboo,
+                            alt_risky,
+                            alt_score,
+                            move,
+                        )
+                    )
+
+                if alternatives:
+                    alternatives.sort(
+                        key=lambda item: (
+                            item[0],
+                            item[1],
+                            item[2],
+                            item[3],
+                            item[4],
+                            tie_order.get(item[5], 9),
+                        )
+                    )
+                    (
+                        replacement_novel_rank,
+                        replacement_repeat_pressure,
+                        _replacement_taboo,
+                        _replacement_risky,
+                        replacement_score,
+                        replacement_move,
+                    ) = alternatives[0]
+                    long_loop_margin = max(
+                        0,
+                        int(round(float(self.long_loop_escape_score_margin) * adaptive_guard_strength)),
+                    )
+                    should_override = (
+                        replacement_novel_rank < selected_novel_rank
+                        or replacement_repeat_pressure < selected_repeat_pressure
+                        or replacement_score <= selected_score + long_loop_margin
+                    )
+                    if replacement_move != selected_move and should_override:
+                        previous_move = selected_move
+                        selected_move = replacement_move
+                        guard_override = True
+                        fallback_used = True
+                        long_loop_escape_source_move = previous_move
+                        long_loop_escape_applied = True
+                        self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
+                        long_loop_reason = (
+                            "Long-loop no-progress escape override: "
+                            f"replaced '{previous_move}' with '{replacement_move}' "
+                            f"(repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
+                            f"score={selected_score}->{replacement_score}, margin={long_loop_margin}, "
+                            f"no_progress={micro_frontier_no_progress_steps}, "
+                            f"unknown={unresolved_unknown}, frontier={unresolved_frontier})."
+                        )
+                        guard_reason = self._append_guard_reason(guard_reason, long_loop_reason)
+
+        # Anti-oscillation guard: avoid A-B-A-B ping-pong unless
+        # immediate backtrack is the only legal traversal option.
+        selected_next = self._neighbor_for_move(self.current_player_cell, selected_move)
+        anti_osc_soft_budget_exempt = (
+            self._hard_override_phase_softens_anti_oscillation()
+            and self.anti_oscillation_soft_enable
+        )
+        if selected_next == self.prev_prev_player_cell and (
+            noncritical_override_allowed or anti_osc_soft_budget_exempt
+        ):
+            selected_breakdown = self._exploration_move_breakdown(selected_move)
+            selected_score = int(selected_breakdown["score"])
+            alternatives: list[tuple[str, int]] = []
+            frontier_escape_move = ""
+            frontier_escape_score = 0
+            if unresolved_signal:
+                _frontier_move = self._frontier_first_step()
+                if _frontier_move and self._is_valid_traversal_move(_frontier_move):
+                    frontier_escape_move = _frontier_move
+                    frontier_escape_score = int(self._exploration_move_breakdown(_frontier_move)["score"])
+            for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                if not self._is_valid_traversal_move(move):
+                    continue
+                nxt = self._neighbor_for_move(self.current_player_cell, move)
+                if nxt == self.prev_prev_player_cell:
+                    continue
+                breakdown = self._exploration_move_breakdown(move)
+                alternatives.append((move, int(breakdown["score"])))
+
+            if alternatives:
+                alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
+                replacement_move, replacement_score = alternatives[0]
+                max_guard_margin = max(0, int(round(float(self.cycle_guard_score_margin) * adaptive_guard_strength)))
+                anti_osc_override_margin = max_guard_margin
+                anti_osc_frontier_escape = False
+                if frontier_escape_move and any(move == frontier_escape_move for move, _score in alternatives):
+                    frontier_pressure_escape = recent_penalty_sum <= -220.0
+                    frontier_margin = max_guard_margin + (18 if unresolved_signal else 0)
+                    if frontier_pressure_escape or (frontier_escape_score <= selected_score + frontier_margin):
+                        replacement_move = frontier_escape_move
+                        replacement_score = frontier_escape_score
+                        anti_osc_override_margin = frontier_margin
+                        anti_osc_frontier_escape = True
+
+                should_override = (
+                    stuck_frontier_recovery
+                    or (replacement_score <= selected_score + anti_osc_override_margin)
+                )
+                if should_override and _is_escape_source_replay(replacement_move):
+                    should_override = False
+                    guard_reason = self._append_guard_reason(
+                        guard_reason,
+                        (
+                            "[ESCAPE-PRECEDENCE: blocked anti-oscillation source replay "
+                            f"'{replacement_move}' while unresolved frontier remains]"
+                        ),
+                    )
+                soft_phase_active = (
+                    self._hard_override_phase_softens_anti_oscillation()
+                    and self.anti_oscillation_soft_enable
+                    and not stuck_frontier_recovery
+                )
+                soft_penalty = max(
+                    0,
+                    int(round(float(self.anti_oscillation_soft_penalty) * adaptive_guard_strength)),
+                )
+                selected_forward_count, selected_reverse_count = self._recent_transition_counts(
+                    self.current_player_cell,
+                    selected_next,
+                )
+                selected_repeat_pressure = selected_forward_count + selected_reverse_count
+                repeat_soft_boost = max(
+                    0,
+                    int(
+                        round(
+                            float(self.anti_oscillation_soft_repeat_boost)
+                            * adaptive_guard_strength
+                            * min(2.0, float(selected_repeat_pressure))
+                        )
+                    ),
+                )
+                selected_hazard_signal = (
+                    float(selected_breakdown.get("cycle_pair_penalty", 0) or 0) > 0
+                    or float(selected_breakdown.get("transition_repeat_penalty", 0) or 0) > 0
+                    or float(selected_breakdown.get("immediate_backtrack_hard_penalty", 0) or 0) > 0
+                    or float(selected_breakdown.get("visible_terminal_end_penalty", 0) or 0) > 0
+                    or float(selected_breakdown.get("boxed_corridor_penalty", 0) or 0) > 0
+                )
+                hazard_soft_boost = (
+                    max(
+                        0,
+                        int(
+                            round(
+                                float(self.anti_oscillation_soft_hazard_boost)
+                                * adaptive_guard_strength
+                            )
+                        ),
+                    )
+                    if selected_hazard_signal
+                    else 0
+                )
+                total_soft_penalty = soft_penalty + repeat_soft_boost + hazard_soft_boost
+                soft_margin = max(
+                    0,
+                    int(round(float(self.anti_oscillation_soft_margin) * adaptive_guard_strength)),
+                )
+                replacement_frontier_bonus = (
+                    max(
+                        0,
+                        int(
+                            round(
+                                float(self.anti_oscillation_soft_frontier_bonus)
+                                * adaptive_guard_strength
+                            )
+                        ),
+                    )
+                    if anti_osc_frontier_escape
+                    else 0
+                )
+                selected_adjusted_score = selected_score + total_soft_penalty
+                replacement_adjusted_score = replacement_score - replacement_frontier_bonus
+                should_soft_shift = (
+                    replacement_move != selected_move
+                    and replacement_adjusted_score <= selected_adjusted_score + soft_margin
+                )
+                if should_soft_shift and _is_escape_source_replay(replacement_move):
+                    should_soft_shift = False
+                    guard_reason = self._append_guard_reason(
+                        guard_reason,
+                        (
+                            "[ESCAPE-PRECEDENCE: preserved same-step escape move over anti-oscillation source replay "
+                            f"'{replacement_move}']"
+                        ),
+                    )
+
+                if soft_phase_active and should_soft_shift:
+                    selected_move = replacement_move
+                    frontier_note = (
+                        f" [frontier_bonus={replacement_frontier_bonus} unknown={unresolved_unknown} "
+                        f"frontier={unresolved_frontier} penalty6={round(recent_penalty_sum, 1)}]"
+                        if anti_osc_frontier_escape
+                        else ""
+                    )
+                    influence_reason = (
+                        f"Anti-oscillation influence: favored '{replacement_move}' "
+                        f"(adjusted={replacement_adjusted_score} vs backtrack_adjusted={selected_adjusted_score}, "
+                        f"base={replacement_score} vs {selected_score}, "
+                        f"penalty={total_soft_penalty} [base={soft_penalty} repeat={repeat_soft_boost} "
+                        f"hazard={hazard_soft_boost}] margin={soft_margin})."
+                        f"{frontier_note}"
+                    )
+                    guard_reason = self._append_guard_reason(guard_reason, influence_reason)
+                elif (
+                    (not soft_phase_active)
+                    and noncritical_override_allowed
+                    and replacement_move != selected_move
+                    and should_override
+                ):
+                    selected_move = replacement_move
+                    guard_override = True
+                    fallback_used = True
+                    stuck_note = (
+                        f" [stuck_recovery cooldown={self._maze_reexplore_cooldown_remaining} "
+                        f"unknown={unresolved_unknown} frontier={unresolved_frontier}]"
+                        if stuck_frontier_recovery
+                        else ""
+                    )
+                    frontier_note = (
+                        f" [frontier_escape unknown={unresolved_unknown} frontier={unresolved_frontier} "
+                        f"penalty6={round(recent_penalty_sum, 1)}]"
+                        if anti_osc_frontier_escape
+                        else ""
+                    )
+                    oscillation_reason = (
+                        f"Anti-oscillation override: replaced immediate backtrack with '{replacement_move}' "
+                        f"(score={replacement_score} vs {selected_score}, margin={anti_osc_override_margin})."
+                        f"{stuck_note}{frontier_note}"
+                    )
+                    guard_reason = self._append_guard_reason(guard_reason, oscillation_reason)
+                elif selected_next == self.prev_prev_player_cell:
+                    _note_noncritical_hold()
+
+        # Cycle guard: avoid stepping into recently revisited cells
+        # when a reasonably-scored non-recent option exists.
+        if selected_move and self._is_valid_traversal_move(selected_move) and noncritical_override_allowed:
+            selected_next = self._neighbor_for_move(self.current_player_cell, selected_move)
+            selected_visits = self.episode_visited_cells.get(selected_next, 0)
+            recent_window_size = max(8, self.recent_cycle_window)
+            recent_window = set(list(self.maze_recent_cells)[-recent_window_size:])
+            selected_forward_count, selected_reverse_count = self._recent_transition_counts(
+                self.current_player_cell,
+                selected_next,
+            )
+            selected_is_transition_cycle = (selected_forward_count > 0 or selected_reverse_count > 0)
+            if (selected_visits > 0 and selected_next in recent_window) or selected_is_transition_cycle:
+                selected_breakdown = self._exploration_move_breakdown(selected_move)
+                selected_score = int(selected_breakdown["score"])
+                alternatives: list[tuple[str, int]] = []
+                for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                    if move == selected_move or not self._is_valid_traversal_move(move):
+                        continue
+                    nxt = self._neighbor_for_move(self.current_player_cell, move)
+                    if nxt in recent_window:
+                        continue
+                    alt_forward_count, alt_reverse_count = self._recent_transition_counts(
+                        self.current_player_cell,
+                        nxt,
+                    )
+                    if alt_forward_count > 0 or alt_reverse_count > 0:
+                        continue
+                    b = self._exploration_move_breakdown(move)
+                    alternatives.append((move, int(b["score"])))
+
+                if alternatives:
+                    alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
+                    replacement_move, replacement_score = alternatives[0]
+                    # Allow a modest score margin to escape loops without
+                    # forcing obviously bad moves.
+                    if replacement_score <= selected_score + max(
+                        0,
+                        int(round(float(self.cycle_guard_score_margin) * adaptive_guard_strength)),
+                    ):
+                        selected_move = replacement_move
+                        guard_override = True
+                        fallback_used = True
+                        cycle_reason = (
+                            f"Cycle-avoid override: replaced loop-prone move with '{replacement_move}' "
+                            f"(score={replacement_score} vs {selected_score}, "
+                            f"transition_counts={selected_forward_count}/{selected_reverse_count})."
+                        )
+                        guard_reason = self._append_guard_reason(guard_reason, cycle_reason)
+        elif selected_move and self._is_valid_traversal_move(selected_move):
+            _note_noncritical_hold()
+
+        # Deathloop hard escape: when the selected edge keeps replaying while
+        # uncertainty remains, prefer lower-repeat alternatives (frontier-aware).
+        if selected_move and self._is_valid_traversal_move(selected_move):
+            origin = self.current_player_cell
+            selected_next = self._neighbor_for_move(origin, selected_move)
+            selected_forward_count, selected_reverse_count = self._recent_transition_counts(origin, selected_next)
+            selected_repeat_pressure = selected_forward_count + selected_reverse_count
+            selected_breakdown = self._exploration_move_breakdown(selected_move)
+            selected_cycle_signal = (
+                int(selected_breakdown.get("transition_repeat_penalty", 0) or 0) > 0
+                or int(selected_breakdown.get("cycle_pair_penalty", 0) or 0) > 0
+                or int(selected_breakdown.get("immediate_backtrack_hard_penalty", 0) or 0) > 0
+            )
+            entropy_collapse = (
+                len(self.maze_recent_transitions) >= max(4, self.loop_entropy_window - 1)
+                and self._recent_move_direction_entropy() <= self.loop_entropy_threshold
+            )
+            adaptive_repeat_bias = max(0, int(round((1.0 - adaptive_guard_strength) * 2.0)))
+            repeat_threshold = max(
+                1,
+                max(2, int(self.cycle_taboo_threshold)) - (1 if effective_frontier_lock_active else 0),
+            ) + adaptive_repeat_bias
+            deathloop_pressure = (
+                (selected_repeat_pressure >= repeat_threshold or selected_cycle_signal)
+                and (
+                    (not objective_routing_step)
+                    or stuck_frontier_recovery
+                    or (navigation_mode_lock and selected_cycle_signal)
+                    or (effective_frontier_lock_active and selected_cycle_signal)
+                )
+                and (
+                    stuck_frontier_recovery
+                    or navigation_mode_lock
+                    or effective_frontier_lock_active
+                    or unresolved_unknown > 0
+                    or unresolved_frontier > 0
+                    or entropy_collapse
+                )
+            )
+            if deathloop_pressure:
+                selected_score = int(self._exploration_move_breakdown(selected_move)["score"])
+                frontier_escape_move = self._frontier_first_step()
+                alternatives: list[tuple[int, int, int, int, int, int, str]] = []
+                for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                    if move == selected_move or not self._is_valid_traversal_move(move):
+                        continue
+                    if _is_escape_source_replay(move):
+                        continue
+                    nxt = self._neighbor_for_move(origin, move)
+                    alt_forward_count, alt_reverse_count = self._recent_transition_counts(origin, nxt)
+                    alt_repeat_pressure = alt_forward_count + alt_reverse_count
+                    alt_taboo = 1 if self._is_transition_taboo(origin, nxt) else 0
+                    alt_risky = 1 if (
+                        self._is_move_visibly_terminal_dead_end(origin, move)
+                        or self._is_move_visibly_boxed_corridor_without_exit(origin, move)
+                    ) else 0
+                    alt_visits = int(self.episode_visited_cells.get(nxt, 0))
+                    alt_frontier_hint = 0 if (frontier_escape_move and move == frontier_escape_move) else 1
+                    alt_score = int(self._exploration_move_breakdown(move)["score"])
+                    alternatives.append(
+                        (
+                            alt_repeat_pressure,
+                            alt_taboo,
+                            alt_risky,
+                            alt_visits,
+                            alt_frontier_hint,
+                            alt_score,
+                            move,
+                        )
+                    )
+
+                if alternatives:
+                    alternatives.sort(
+                        key=lambda item: (
+                            item[0],
+                            item[1],
+                            item[2],
+                            item[3],
+                            item[4],
+                            item[5],
+                            tie_order.get(item[6], 9),
+                        )
+                    )
+                    (
+                        replacement_repeat_pressure,
+                        _replacement_taboo,
+                        _replacement_risky,
+                        _replacement_visits,
+                        replacement_frontier_hint,
+                        replacement_score,
+                        replacement_move,
+                    ) = alternatives[0]
+                    score_margin = max(0, int(round(float(self.cycle_guard_score_margin) * adaptive_guard_strength)))
+                    if stuck_frontier_recovery:
+                        score_margin += 18
+                    deathloop_recovery_force = (
+                        stuck_frontier_recovery
+                        and selected_repeat_pressure >= max(2, int(self.long_loop_escape_repeat_min))
+                    )
+                    should_override = (
+                        deathloop_recovery_force
+                        or replacement_repeat_pressure < selected_repeat_pressure
+                        or replacement_score <= selected_score + score_margin
+                    )
+                    repeat_gain = max(0, int(selected_repeat_pressure - replacement_repeat_pressure))
+                    score_regression = max(0, int(replacement_score - selected_score))
+                    low_uncertainty_corridor = (
+                        unresolved_unknown <= 1
+                        and unresolved_frontier <= 0
+                        and (not objective_routing_step)
+                    )
+                    if (
+                        should_override
+                        and low_uncertainty_corridor
+                        and selected_repeat_pressure <= 2
+                        and repeat_gain <= 1
+                        and score_regression > max(140, score_margin * 6)
+                    ):
+                        should_override = False
+                        guard_reason = self._append_guard_reason(
+                            guard_reason,
+                            (
+                                "[DEATHLOOP-SCORE-GUARD: blocked high-cost replacement under low uncertainty "
+                                f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
+                                f"score={selected_score}->{replacement_score} delta={score_regression} margin={score_margin}]"
+                            ),
+                        )
+                    if (
+                        should_override
+                        and stuck_frontier_recovery
+                        and replacement_repeat_pressure > selected_repeat_pressure
+                        and replacement_score > selected_score + score_margin
+                    ):
+                        should_override = False
+                        guard_reason = self._append_guard_reason(
+                            guard_reason,
+                            (
+                                "[DEATHLOOP-RECOVERY-GUARD: held lower-repeat candidate over forced replacement "
+                                f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
+                                f"score={selected_score}->{replacement_score} margin={score_margin}]"
+                            ),
+                        )
+                    if replacement_move != selected_move and should_override:
+                        previous_move = selected_move
+                        selected_move = replacement_move
+                        guard_override = True
+                        fallback_used = True
+                        deathloop_escape_source_move = previous_move
+                        deathloop_escape_applied = True
+                        deathloop_escape_selected_pressure = replacement_repeat_pressure
+                        self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
+                        frontier_hint_note = " frontier_hint=1" if replacement_frontier_hint == 0 else ""
+                        hysteresis_note = (
+                            f" hysteresis={self.adaptive_guard_escape_lock_steps}"
+                            if self.adaptive_guard_escape_lock_steps > 0
+                            else ""
+                        )
+                        deathloop_reason = (
+                            "Deathloop escape override: "
+                            f"replaced '{previous_move}' with '{replacement_move}' "
+                            f"(repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
+                            f"score={selected_score}->{replacement_score}, margin={score_margin}, "
+                            f"unknown={unresolved_unknown}, frontier={unresolved_frontier}, "
+                            f"entropy={round(self._recent_move_direction_entropy(), 3)}, "
+                            f"strength={round(adaptive_guard_strength, 3)})."
+                            f"{frontier_hint_note}{hysteresis_note}"
+                        )
+                        guard_reason = self._append_guard_reason(guard_reason, deathloop_reason)
+
+        # Frontier-commit guard: while uncertainty remains, avoid orbiting
+        # fully-known local loops when a nearby exploratory move exists.
+        if selected_move and self._is_valid_traversal_move(selected_move):
+            should_commit_frontier = (
+                unresolved_signal
+                and (not objective_routing_step)
+                and (not navigation_mode_lock)
+            )
+            if should_commit_frontier:
+                selected_breakdown = self._exploration_move_breakdown(selected_move)
+                selected_score = int(selected_breakdown.get("score", 0) or 0)
+                selected_repeat_pressure = _move_repeat_pressure(selected_move)
+                selected_unknown = int(selected_breakdown.get("unknown_neighbors", 0) or 0)
+                selected_edge_frontier = bool(selected_breakdown.get("edge_frontier", False))
+                selected_edge_junction = bool(selected_breakdown.get("edge_junction", False))
+                selected_frontier_distance = int(selected_breakdown.get("frontier_distance", 99) or 99)
+                selected_non_novel = (
+                    selected_unknown <= 0
+                    and (not selected_edge_frontier)
+                    and (not selected_edge_junction)
+                )
+
+                if selected_non_novel:
+                    alternatives: list[tuple[int, int, int, int, int, str]] = []
+                    for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                        if move == selected_move or (not self._is_valid_traversal_move(move)):
+                            continue
+                        bd = self._exploration_move_breakdown(move)
+                        alt_unknown = int(bd.get("unknown_neighbors", 0) or 0)
+                        alt_edge_frontier = bool(bd.get("edge_frontier", False))
+                        alt_edge_junction = bool(bd.get("edge_junction", False))
+                        alt_novel = 1 if (alt_unknown > 0 or alt_edge_frontier or alt_edge_junction) else 0
+                        if alt_novel <= 0:
+                            continue
+                        alt_repeat_pressure = _move_repeat_pressure(move)
+                        alt_frontier_distance = int(bd.get("frontier_distance", 99) or 99)
+                        alt_score = int(bd.get("score", 0) or 0)
+                        alternatives.append(
+                            (
+                                0 if alt_unknown > 0 else 1,
+                                0 if alt_edge_frontier else 1,
+                                alt_repeat_pressure,
+                                alt_frontier_distance,
+                                alt_score,
+                                move,
+                            )
+                        )
+
+                    if alternatives:
+                        alternatives.sort(
+                            key=lambda item: (
+                                item[0],
+                                item[1],
+                                item[2],
+                                item[3],
+                                item[4],
+                                tie_order.get(item[5], 9),
+                            )
+                        )
+                        (
+                            _alt_unknown_rank,
+                            _alt_frontier_rank,
+                            replacement_repeat_pressure,
+                            replacement_frontier_distance,
+                            replacement_score,
+                            replacement_move,
+                        ) = alternatives[0]
+
+                        frontier_commit_margin = max(
+                            0,
+                            int(
+                                round(
+                                    (
+                                        float(self.frontier_override_score_margin)
+                                        + float(self.cycle_guard_score_margin)
+                                    )
+                                    * adaptive_guard_strength
+                                )
+                            ),
+                        )
+                        should_override = (
+                            stuck_frontier_recovery
+                            or replacement_repeat_pressure < selected_repeat_pressure
+                            or replacement_frontier_distance < selected_frontier_distance
+                            or replacement_score <= selected_score + frontier_commit_margin
+                        )
+                        if replacement_move != selected_move and should_override:
+                            previous_move = selected_move
+                            selected_move = replacement_move
+                            guard_override = True
+                            fallback_used = True
+                            self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
+                            frontier_reason = (
+                                "Frontier-commit override: "
+                                f"replaced '{previous_move}' with '{replacement_move}' "
+                                f"(repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
+                                f"frontier_distance={selected_frontier_distance}->{replacement_frontier_distance}, "
+                                f"score={selected_score}->{replacement_score}, margin={frontier_commit_margin}, "
+                                f"unknown={unresolved_unknown}, frontier={unresolved_frontier}, "
+                                f"strength={round(adaptive_guard_strength, 3)})."
+                            )
+                            guard_reason = self._append_guard_reason(guard_reason, frontier_reason)
+
+        # Look-sweep guard: if a move visibly leads into a terminal or
+        # boxed corridor with no visible exit, prefer a safer
+        # alternative within a modest score margin.
+        if selected_move and self._is_valid_traversal_move(selected_move) and noncritical_override_allowed:
+            selected_risky = (
+                self._is_move_visibly_terminal_dead_end(self.current_player_cell, selected_move)
+                or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, selected_move)
+            )
+            if selected_risky:
+                selected_breakdown = self._exploration_move_breakdown(selected_move)
+                selected_score = int(selected_breakdown["score"])
+                alternatives: list[tuple[str, int, int]] = []
+                for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                    if move == selected_move or not self._is_valid_traversal_move(move):
+                        continue
+                    if _is_escape_source_replay(move):
+                        continue
+                    if (
+                        deathloop_escape_applied
+                        and deathloop_escape_protected
+                        and deathloop_escape_source_move
+                        and move == deathloop_escape_source_move
+                    ):
+                        continue
+                    if (
+                        self._is_move_visibly_terminal_dead_end(self.current_player_cell, move)
+                        or self._is_move_visibly_boxed_corridor_without_exit(self.current_player_cell, move)
+                    ):
+                        continue
+                    b = self._exploration_move_breakdown(move)
+                    alternatives.append((move, int(b["score"]), _move_repeat_pressure(move)))
+
+                if alternatives:
+                    alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
+                    selected_repeat_pressure = (
+                        deathloop_escape_selected_pressure
+                        if deathloop_escape_selected_pressure >= 0
+                        else _move_repeat_pressure(selected_move)
+                    )
+                    if deathloop_escape_applied and deathloop_escape_protected:
+                        alternatives = [item for item in alternatives if item[2] < selected_repeat_pressure]
+                        if not alternatives:
+                            guard_reason = self._append_guard_reason(
+                                guard_reason,
+                                (
+                                    "[DEATHLOOP-PRECEDENCE: preserved escape move over terminal/boxed replacement "
+                                    f"(repeat_floor={selected_repeat_pressure})]"
+                                ),
+                            )
+                    if alternatives:
+                        replacement_move, replacement_score, _replacement_repeat_pressure = alternatives[0]
+                        terminal_margin = max(
+                            0,
+                            int(round(float(self.terminal_end_guard_margin) * adaptive_guard_strength)),
+                        )
+                        if replacement_score <= selected_score + terminal_margin:
+                            if _is_escape_source_replay(replacement_move):
+                                guard_reason = self._append_guard_reason(
+                                    guard_reason,
+                                    (
+                                        "[ESCAPE-PRECEDENCE: preserved same-step escape move over terminal/boxed source replay "
+                                        f"'{replacement_move}']"
+                                    ),
+                                )
+                            else:
+                                selected_move = replacement_move
+                                guard_override = True
+                                fallback_used = True
+                                terminal_reason = (
+                                    f"Terminal/boxed-corridor override: replaced risky branch with '{replacement_move}' "
+                                    f"(score={replacement_score} vs {selected_score}, margin={terminal_margin})."
+                                )
+                                guard_reason = self._append_guard_reason(guard_reason, terminal_reason)
+        elif selected_move and self._is_valid_traversal_move(selected_move):
+            _note_noncritical_hold()
+
+        if selected_move and self._is_valid_traversal_move(selected_move) and noncritical_override_allowed:
+            replay_guard_move, replay_guard_note = self._memory_risk_replay_guard(
+                selected_move,
+                objective_routing_step=objective_routing_step,
+            )
+            if (
+                replay_guard_move
+                and deathloop_escape_applied
+                and deathloop_escape_protected
+            ):
+                selected_repeat_pressure = (
+                    deathloop_escape_selected_pressure
+                    if deathloop_escape_selected_pressure >= 0
+                    else _move_repeat_pressure(selected_move)
+                )
+                replay_repeat_pressure = _move_repeat_pressure(replay_guard_move)
+                if replay_repeat_pressure >= selected_repeat_pressure:
+                    replay_guard_move = selected_move
+                    replay_guard_note = self._append_guard_reason(
+                        replay_guard_note,
+                        (
+                            "[DEATHLOOP-PRECEDENCE: blocked replay replacement "
+                            f"repeat={replay_repeat_pressure} floor={selected_repeat_pressure}]"
+                        ),
+                    )
+            if (
+                replay_guard_move
+                and deathloop_escape_applied
+                and deathloop_escape_protected
+                and deathloop_escape_source_move
+                and replay_guard_move == deathloop_escape_source_move
+            ):
+                replay_guard_move = selected_move
+                replay_guard_note = self._append_guard_reason(
+                    replay_guard_note,
+                    (
+                        "[DEATHLOOP-PRECEDENCE: preserved escape move over replay-source "
+                        f"'{deathloop_escape_source_move}' while unresolved frontier remains]"
+                    ),
+                )
+            if replay_guard_move and _is_escape_source_replay(replay_guard_move):
+                blocked_move = replay_guard_move
+                replay_guard_move = selected_move
+                replay_guard_note = self._append_guard_reason(
+                    replay_guard_note,
+                    (
+                        "[ESCAPE-PRECEDENCE: preserved same-step escape move over replay-source "
+                        f"'{blocked_move}']"
+                    ),
+                )
+            if replay_guard_move and replay_guard_move != selected_move:
+                selected_move = replay_guard_move
+                guard_override = True
+                fallback_used = True
+                guard_reason = self._append_guard_reason(guard_reason, replay_guard_note)
+        elif selected_move and self._is_valid_traversal_move(selected_move):
+            _note_noncritical_hold()
+
+        return (selected_move, guard_reason, guard_override, fallback_used)
 
     def _objective_progress_guard(
         self,
@@ -10936,6 +16564,319 @@ class AIAssistantApp:
         self.taboo_transitions.pop(key, None)
         return False
 
+    def _update_spatial_exit_visibility(self, exit_visible_now: bool) -> None:
+        if self._normalized_layout_mode() != "maze":
+            return
+        if (not self.spatial_memory_enable) or (not self.spatial_exit_recall_enable):
+            return
+        if not exit_visible_now:
+            return
+
+        self.spatial_exit_last_seen_step = int(self.memory_step_index)
+        self.spatial_exit_last_seen_cell = self.current_player_cell
+        lr = max(0.02, min(0.9, float(self.spatial_exit_recall_learning_rate)))
+        self.spatial_exit_guidance_ema = max(
+            -1.0,
+            min(1.0, ((1.0 - lr) * float(self.spatial_exit_guidance_ema)) + (lr * 1.0)),
+        )
+
+    def _learn_spatial_transition_memory(
+        self,
+        *,
+        from_cell: tuple[int, int] | None,
+        to_cell: tuple[int, int] | None,
+        outcome_score: float,
+        reason_tags: list[str],
+    ) -> None:
+        if self._normalized_layout_mode() != "maze":
+            return
+        if not self.spatial_memory_enable:
+            return
+        if from_cell is None or to_cell is None or from_cell == to_cell:
+            return
+        if self._is_blocked_cell(to_cell):
+            return
+
+        scale = max(12.0, float(self.spatial_transition_reward_scale))
+        normalized_outcome = max(-1.0, min(1.0, float(outcome_score) / scale))
+        learning_rate = max(0.02, min(0.9, float(self.spatial_transition_learning_rate)))
+        step_idx = int(self.memory_step_index)
+
+        risk_tags = {
+            "dead_end_slap",
+            "dead_end_tip_revisit",
+            "dead_end_entrance_revisit",
+            "visible_terminal",
+            "boxed_corridor",
+            "cycle_pair",
+            "transition_repeat",
+            "immediate_backtrack",
+            "branch_diversity",
+        }
+        tag_set = {str(tag).strip() for tag in (reason_tags or []) if str(tag).strip()}
+        risk_hit = 1.0 if (normalized_outcome <= -0.08 or bool(tag_set & risk_tags)) else 0.0
+
+        target_known = self.maze_known_cells.get(self.current_target_cell, "") == "E"
+        progress_norm = 0.0
+        if target_known:
+            max_distance = self.grid_cells * self.grid_cells
+            from_distance = self._distance_between_cells(from_cell, self.current_target_cell)
+            to_distance = self._distance_between_cells(to_cell, self.current_target_cell)
+            using_shortest_path = from_distance < max_distance and to_distance < max_distance
+            if not using_shortest_path:
+                from_distance = abs(int(from_cell[0]) - int(self.current_target_cell[0])) + abs(
+                    int(from_cell[1]) - int(self.current_target_cell[1])
+                )
+                to_distance = abs(int(to_cell[0]) - int(self.current_target_cell[0])) + abs(
+                    int(to_cell[1]) - int(self.current_target_cell[1])
+                )
+
+            distance_delta = int(from_distance - to_distance)
+            norm_divisor = 3.0 if using_shortest_path else 4.0
+            progress_norm = max(-1.0, min(1.0, float(distance_delta) / norm_divisor))
+
+        transition_key = (from_cell, to_cell)
+        transition_entry = self.spatial_transition_memory.setdefault(
+            transition_key,
+            {
+                "outcome_ema": 0.0,
+                "risk_ema": 0.0,
+                "progress_ema": 0.0,
+                "samples": 0.0,
+                "last_step": float(step_idx),
+            },
+        )
+        transition_entry["outcome_ema"] = ((1.0 - learning_rate) * float(transition_entry.get("outcome_ema", 0.0))) + (
+            learning_rate * normalized_outcome
+        )
+        transition_entry["risk_ema"] = ((1.0 - learning_rate) * float(transition_entry.get("risk_ema", 0.0))) + (
+            learning_rate * risk_hit
+        )
+        transition_entry["progress_ema"] = (
+            ((1.0 - learning_rate) * float(transition_entry.get("progress_ema", 0.0)))
+            + (learning_rate * progress_norm)
+        )
+        transition_entry["samples"] = min(5000.0, float(transition_entry.get("samples", 0.0)) + 1.0)
+        transition_entry["last_step"] = float(step_idx)
+
+        cell_entry = self.spatial_cell_memory.setdefault(
+            to_cell,
+            {
+                "outcome_ema": 0.0,
+                "risk_ema": 0.0,
+                "samples": 0.0,
+                "last_step": float(step_idx),
+            },
+        )
+        cell_entry["outcome_ema"] = ((1.0 - learning_rate) * float(cell_entry.get("outcome_ema", 0.0))) + (
+            learning_rate * normalized_outcome
+        )
+        cell_entry["risk_ema"] = ((1.0 - learning_rate) * float(cell_entry.get("risk_ema", 0.0))) + (
+            learning_rate * risk_hit
+        )
+        cell_entry["samples"] = min(5000.0, float(cell_entry.get("samples", 0.0)) + 1.0)
+        cell_entry["last_step"] = float(step_idx)
+
+        if target_known and self.spatial_exit_recall_enable:
+            exit_lr = max(0.02, min(0.9, float(self.spatial_exit_recall_learning_rate)))
+            guidance_signal = (0.65 * progress_norm) + (0.35 * normalized_outcome)
+            self.spatial_exit_guidance_ema = max(
+                -1.0,
+                min(
+                    1.0,
+                    ((1.0 - exit_lr) * float(self.spatial_exit_guidance_ema)) + (exit_lr * guidance_signal),
+                ),
+            )
+
+    def _spatial_transition_profile(
+        self,
+        from_cell: tuple[int, int],
+        to_cell: tuple[int, int],
+    ) -> tuple[float, float, float, float]:
+        if not self.spatial_memory_enable:
+            return (0.0, 0.0, 0.0, 0.0)
+        entry = self.spatial_transition_memory.get((from_cell, to_cell), {})
+        if not entry:
+            return (0.0, 0.0, 0.0, 0.0)
+
+        samples = max(0.0, float(entry.get("samples", 0.0) or 0.0))
+        saturation = max(2.0, float(self.spatial_transition_sample_saturation))
+        sample_conf = samples / (samples + saturation)
+        last_step = int(entry.get("last_step", self.memory_step_index) or self.memory_step_index)
+        age = max(0, int(self.memory_step_index) - last_step)
+        decay_steps = max(16, int(self.spatial_transition_decay_steps))
+        recency = math.exp(-float(age) / float(decay_steps))
+        confidence = max(0.0, min(1.0, sample_conf * recency))
+        return (
+            float(entry.get("outcome_ema", 0.0) or 0.0),
+            float(entry.get("risk_ema", 0.0) or 0.0),
+            float(entry.get("progress_ema", 0.0) or 0.0),
+            confidence,
+        )
+
+    def _spatial_transition_move_bias(
+        self,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+        unknown_neighbors: int,
+        frontier_distance_effective: int,
+    ) -> tuple[int, int, float, float]:
+        if not self.spatial_memory_enable:
+            return (0, 0, 0.0, 0.0)
+
+        outcome_ema, risk_ema, progress_ema, confidence = self._spatial_transition_profile(origin, candidate)
+        if confidence <= 0.0:
+            return (0, 0, 0.0, 0.0)
+
+        cell_entry = self.spatial_cell_memory.get(candidate, {})
+        cell_outcome = float(cell_entry.get("outcome_ema", 0.0) or 0.0)
+        cell_risk = float(cell_entry.get("risk_ema", 0.0) or 0.0)
+        cell_samples = max(0.0, float(cell_entry.get("samples", 0.0) or 0.0))
+        cell_conf = 0.0
+        if cell_samples > 0.0:
+            cell_conf = cell_samples / (cell_samples + max(2.0, float(self.spatial_transition_sample_saturation)))
+
+        combined_outcome = (0.72 * outcome_ema) + (0.18 * progress_ema) + (0.10 * cell_outcome * cell_conf)
+        combined_risk = max(0.0, (0.75 * risk_ema) + (0.25 * cell_risk * cell_conf))
+        max_bias = max(0, int(self.spatial_transition_max_bias))
+
+        bonus = int(round(max_bias * confidence * max(0.0, combined_outcome)))
+        penalty = int(round(max_bias * confidence * max(0.0, (-combined_outcome) + (0.65 * combined_risk))))
+        bonus = min(max_bias, max(0, bonus))
+        penalty = min(max_bias, max(0, penalty))
+
+        if unknown_neighbors > 0 or frontier_distance_effective <= 1:
+            penalty = int(round(penalty * 0.55))
+
+        return (bonus, penalty, confidence, combined_outcome)
+
+    def _spatial_branch_risk_penalty(
+        self,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+        unknown_neighbors: int,
+        frontier_distance_effective: int,
+    ) -> tuple[int, float]:
+        if not self.spatial_memory_enable:
+            return (0, 0.0)
+        if unknown_neighbors > 0:
+            return (0, 0.0)
+
+        lookahead_depth = max(1, int(self.spatial_branch_lookahead_depth))
+        prev = origin
+        current = candidate
+        aggregate_risk = 0.0
+        aggregate_weight = 0.0
+
+        for depth in range(lookahead_depth):
+            outcome_ema, risk_ema, _progress_ema, confidence = self._spatial_transition_profile(prev, current)
+            if confidence > 0.0:
+                depth_weight = 1.0 / (1.0 + float(depth))
+                local_risk = max(0.0, (-outcome_ema) + (0.7 * risk_ema))
+                aggregate_risk += depth_weight * confidence * local_risk
+                aggregate_weight += depth_weight
+
+            if current not in self.maze_known_cells:
+                break
+            if self._unknown_neighbor_count(current) > 0:
+                break
+
+            next_candidates = [n for n in self._traversable_neighbors(current) if n != prev]
+            if len(next_candidates) != 1:
+                break
+            prev, current = current, next_candidates[0]
+
+        if aggregate_weight <= 0.0:
+            return (0, 0.0)
+
+        risk_norm = max(0.0, min(1.0, aggregate_risk / aggregate_weight))
+        penalty = int(round(risk_norm * float(self.spatial_branch_risk_weight)))
+        penalty = min(max(0, int(self.spatial_branch_risk_max_penalty)), max(0, penalty))
+        if frontier_distance_effective <= 1:
+            penalty = int(round(penalty * 0.6))
+        return (penalty, risk_norm)
+
+    def _spatial_exit_recall_move_bias(
+        self,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+        unknown_neighbors: int,
+    ) -> tuple[int, int, float, float]:
+        if not self.spatial_memory_enable:
+            return (0, 0, 0.0, 0.0)
+        if not self.spatial_exit_recall_enable:
+            return (0, 0, 0.0, 0.0)
+        if self.maze_known_cells.get(self.current_target_cell, "") != "E":
+            return (0, 0, 0.0, 0.0)
+
+        target_row, target_col = self.current_target_cell
+        exit_visible_now = self._is_local_cell_visible(
+            origin[0],
+            origin[1],
+            target_row,
+            target_col,
+            facing=self.player_facing,
+        )
+        if exit_visible_now:
+            return (0, 0, 0.0, 0.0)
+
+        if self.spatial_exit_last_seen_step < 0:
+            return (0, 0, 0.0, 0.0)
+
+        age = max(0, int(self.memory_step_index) - int(self.spatial_exit_last_seen_step))
+        half_life = max(12, int(self.spatial_exit_recall_half_life_steps))
+        recency = math.exp(-float(age) / float(half_life))
+        guidance_quality = max(-1.0, min(1.0, float(self.spatial_exit_guidance_ema)))
+        confidence = recency * (0.35 + (0.65 * max(0.0, guidance_quality)))
+        if confidence <= 0.02:
+            return (0, 0, 0.0, 0.0)
+
+        max_distance = self.grid_cells * self.grid_cells
+        origin_distance = self._distance_between_cells(origin, self.current_target_cell)
+        candidate_distance = self._distance_between_cells(candidate, self.current_target_cell)
+
+        using_shortest_path = origin_distance < max_distance and candidate_distance < max_distance
+        if not using_shortest_path:
+            origin_distance = abs(int(origin[0]) - int(self.current_target_cell[0])) + abs(
+                int(origin[1]) - int(self.current_target_cell[1])
+            )
+            candidate_distance = abs(int(candidate[0]) - int(self.current_target_cell[0])) + abs(
+                int(candidate[1]) - int(self.current_target_cell[1])
+            )
+            confidence *= 0.55
+
+        progress_units = int(origin_distance - candidate_distance)
+        norm_divisor = 3.0 if using_shortest_path else 4.0
+        progress_signal = max(-1.0, min(1.0, float(progress_units) / norm_divisor))
+
+        if progress_units == 0 and self.spatial_exit_last_seen_cell is not None:
+            seen_origin = abs(int(origin[0]) - int(self.spatial_exit_last_seen_cell[0])) + abs(
+                int(origin[1]) - int(self.spatial_exit_last_seen_cell[1])
+            )
+            seen_candidate = abs(int(candidate[0]) - int(self.spatial_exit_last_seen_cell[0])) + abs(
+                int(candidate[1]) - int(self.spatial_exit_last_seen_cell[1])
+            )
+            seen_delta = int(seen_origin - seen_candidate)
+            progress_signal = max(-1.0, min(1.0, float(seen_delta) / 4.0)) * 0.4
+
+        _outcome_ema, _risk_ema, progress_ema, transition_conf = self._spatial_transition_profile(origin, candidate)
+        blended_progress = (0.72 * progress_signal) + (0.28 * progress_ema * transition_conf)
+
+        scale = max(0.0, float(self.spatial_exit_recall_progress_weight))
+        bonus = 0
+        penalty = 0
+        if blended_progress > 0.0:
+            bonus = int(round(blended_progress * confidence * scale))
+            bonus = min(max(0, int(self.spatial_exit_recall_max_bonus)), max(0, bonus))
+        elif blended_progress < 0.0:
+            penalty = int(round(abs(blended_progress) * confidence * (scale * 0.72)))
+            penalty = min(max(0, int(self.spatial_exit_recall_max_penalty)), max(0, penalty))
+
+        if unknown_neighbors > 0:
+            penalty = int(round(penalty * 0.45))
+
+        return (bonus, penalty, confidence, blended_progress)
+
     def _register_transition_trap_event(
         self,
         from_cell: tuple[int, int] | None,
@@ -10947,11 +16888,18 @@ class AIAssistantApp:
             return
         if from_cell is None or to_cell is None or from_cell == to_cell:
             return
-        if outcome_score >= -0.01:
+        if outcome_score > -6.0:
             return
         tag_set = {str(tag).strip() for tag in reason_tags if str(tag).strip()}
-        required_tags = {"cycle_pair", "visible_terminal", "boxed_corridor"}
-        if not required_tags.issubset(tag_set):
+        loop_pressure_tags = {"cycle_pair", "transition_repeat", "immediate_backtrack"}
+        hazard_tags = {
+            "visible_terminal",
+            "boxed_corridor",
+            "dead_end_slap",
+            "dead_end_tip_revisit",
+            "dead_end_entrance_revisit",
+        }
+        if not (bool(tag_set & loop_pressure_tags) and bool(tag_set & hazard_tags)):
             return
 
         transition_key = (from_cell, to_cell)
@@ -11298,8 +17246,21 @@ class AIAssistantApp:
             scale = max(scale, min(1.0, self.local_map_authority_soft_scale * 0.65))
         return (scale, episodic_constraint_active, cross_maze_influence_allowed)
 
-    def _exploration_move_score(self, move: str) -> int:
-        return self._exploration_move_breakdown(move)["score"]
+    def _exploration_move_breakdown_cached(
+        self,
+        move: str,
+        breakdown_cache: dict[str, dict] | None = None,
+    ) -> dict:
+        if breakdown_cache is None:
+            return self._exploration_move_breakdown(move)
+        cached = breakdown_cache.get(move)
+        if cached is None:
+            cached = self._exploration_move_breakdown(move)
+            breakdown_cache[move] = cached
+        return cached
+
+    def _exploration_move_score(self, move: str, breakdown_cache: dict[str, dict] | None = None) -> int:
+        return int(self._exploration_move_breakdown_cached(move, breakdown_cache)["score"])
 
     def _adaptive_features_from_breakdown(self, breakdown: dict[str, object]) -> list[float]:
         """
@@ -11328,11 +17289,23 @@ class AIAssistantApp:
             _clip(_num("transition_pressure_bucket") / 3.0),
             _clip(_num("visible_open_decision")),
             _clip(_num("visible_exit_corridor")),
-            _clip(_num("cause_effect_memory_penalty") / 180.0),
+            _clip(
+                (
+                    _num("cause_effect_memory_penalty")
+                    + _num("hazard_preparedness_penalty")
+                    + _num("spatial_transition_penalty")
+                    + _num("spatial_branch_risk_penalty")
+                    + _num("spatial_exit_recall_penalty")
+                    - (0.8 * _num("spatial_transition_bonus"))
+                    - (0.9 * _num("spatial_exit_recall_bonus"))
+                    + (28.0 * _num("hazard_preparedness_relative_pressure"))
+                )
+                / 280.0
+            ),
             _clip(_num("cause_effect_memory_reward") / 180.0),
             _clip(_num("prediction_junction_bonus_raw") / 36.0),
             _clip(_num("prediction_dead_end_penalty_raw") / 36.0),
-            _clip(_num("mv_exit_progress_norm")),
+            _clip((0.72 * _num("mv_exit_progress_norm")) + (0.28 * _num("spatial_exit_progress_norm"))),
         ]
         return features
 
@@ -11383,11 +17356,134 @@ class AIAssistantApp:
                 )
             )
 
+        self._maybe_send_adaptive_progress_report(action=action, target=target, update=update)
+
         if (self.memory_step_index % self.adaptive_save_interval_steps) == 0:
             try:
                 self.adaptive_controller.save_state()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _maybe_send_adaptive_progress_report(self, action: str, target: float, update: dict[str, object]) -> None:
+        if not self.adaptive_progress_report_enable:
+            return
+        if self.adaptive_controller is None or self.client is None:
+            return
+        if self._adaptive_progress_report_inflight:
+            return
+
+        step = int(self.memory_step_index)
+        interval = max(30, int(self.adaptive_progress_report_interval_steps))
+        if self._last_adaptive_progress_report_step >= 0:
+            if (step - self._last_adaptive_progress_report_step) < interval:
+                return
+
+        endocrine_state = self.endocrine.state() if self.endocrine_enabled else {}
+        endocrine_neural = self.endocrine.neural_state() if self.endocrine_enabled else {}
+        progress_payload = {
+            "step": step,
+            "action": action,
+            "target": round(float(target), 4),
+            "update": {
+                "pred": round(float(update.get("pred", 0.0) or 0.0), 4),
+                "error": round(float(update.get("error", 0.0) or 0.0), 4),
+                "error_ema": round(float(update.get("error_ema", 0.0) or 0.0), 4),
+                "hidden_units": int(update.get("hidden_units", 0) or 0),
+                "grew": bool(update.get("grew", False)),
+                "pruned": bool(update.get("pruned", False)),
+            },
+            "adaptive": {
+                "stats": self.adaptive_controller.stats(),
+                "weights": self.adaptive_controller.weight_snapshot(top_k=6),
+            },
+            "kernel_progress": {
+                "targets_reached": int(self.targets_reached),
+                "episode_steps": int(self.episode_steps),
+                "episode_optimal_steps": int(self.episode_optimal_steps),
+                "goal_hits_remaining": int(self.auto_goal_hits_remaining),
+                "maze_model_assist_calls_used": int(self._maze_model_assist_calls_used),
+            },
+            "hormones": {
+                "state": endocrine_state,
+                "neural": endocrine_neural,
+                "legacy_blend": round(float(self.hormone_legacy_weight_blend), 4),
+            },
+        }
+
+        self._adaptive_progress_report_inflight = True
+        self._last_adaptive_progress_report_step = step
+        self.adaptive_progress_last_error = ""
+
+        def _send_report() -> None:
+            try:
+                response = self.client.responses.create(
+                    model=self.adaptive_progress_report_model,
+                    input=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a compact trainer monitor for a maze-learning kernel. "
+                                "Review progress and return JSON only with schema: "
+                                '{"legacy_blend_target": number, "notes": string}. '
+                                "legacy_blend_target must be between 0 and 1. "
+                                "Set lower values when modern hormone controls should take over more."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(progress_payload, separators=(",", ":")),
+                        },
+                    ],
+                )
+                feedback = redact_secrets((response.output_text or "").strip())
+                if feedback:
+                    summary = " ".join(feedback.split())[: self.adaptive_progress_report_max_notes_chars]
+                    self.adaptive_progress_last_feedback_summary = summary
+                    self.adaptive_progress_last_feedback_step = int(step)
+                    self._append_memory_log(f"adaptive_progress_report step={step} feedback={summary}")
+                else:
+                    self.adaptive_progress_last_feedback_summary = ""
+
+                if self.adaptive_progress_auto_tune and feedback:
+                    try:
+                        tune_payload = self._parse_json_payload(feedback)
+                        blend_target = float(
+                            tune_payload.get("legacy_blend_target", self.hormone_legacy_weight_blend)
+                        )
+                        blend_target = max(0.0, min(1.0, blend_target))
+                        current_blend = float(self.hormone_legacy_weight_blend)
+                        self.hormone_legacy_weight_blend = max(
+                            0.0,
+                            min(1.0, (0.8 * current_blend) + (0.2 * blend_target)),
+                        )
+                        self._append_memory_log(
+                            (
+                                "adaptive_progress_autotune "
+                                f"legacy_blend={round(current_blend, 4)}->"
+                                f"{round(self.hormone_legacy_weight_blend, 4)}"
+                            )
+                        )
+                        self.adaptive_progress_last_autotune_summary = (
+                            f"legacy_blend {round(current_blend, 4)} -> "
+                            f"{round(self.hormone_legacy_weight_blend, 4)}"
+                        )
+                    except Exception:  # noqa: BLE001
+                        self.adaptive_progress_last_autotune_summary = "autotune parse failed"
+                elif self.adaptive_progress_auto_tune:
+                    self.adaptive_progress_last_autotune_summary = ""
+            except Exception as exc:  # noqa: BLE001
+                self.adaptive_progress_last_error = f"{type(exc).__name__}: {exc}"
+                self._append_memory_log(
+                    f"adaptive_progress_report_failed step={step} error={type(exc).__name__}"
+                )
+            finally:
+                self._adaptive_progress_report_inflight = False
+                try:
+                    self.root.after(0, self._refresh_hormone_panel)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        threading.Thread(target=_send_report, daemon=True).start()
 
     def _decision_noise_term(self, move: str) -> int:
         """Small per-decision noise to break deterministic corridor ordering."""
@@ -11456,6 +17552,13 @@ class AIAssistantApp:
                 recency_rank = max(1, len(recent_cells_list) - distance_from_tail + 1)
                 recent_recency_penalty = max(0, 14 - recency_rank)
         open_degree = len(self._traversable_neighbors(candidate))
+        known_degree = 0
+        for _probe_move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            _probe_cell = self._neighbor_for_move(candidate, _probe_move)
+            if _probe_cell == candidate:
+                continue
+            if self.maze_known_cells.get(_probe_cell) in {".", "P", "S", "E"}:
+                known_degree += 1
         unknown_neighbors = self._unknown_neighbor_count(candidate)
         origin_frontier_distance = self._frontier_distance(origin)
         frontier_distance = self._frontier_distance(candidate)
@@ -11487,7 +17590,8 @@ class AIAssistantApp:
 
         mv_hints = self._machine_vision_kernel_hints()
         mv_self_pred_cell = tuple(mv_hints.get("self_pred_cell", (-1, -1)) or (-1, -1))
-        mv_self_error = int(mv_hints.get("self_error", -1) or -1)
+        mv_self_error_raw = mv_hints.get("self_error", -1)
+        mv_self_error = int(mv_self_error_raw if mv_self_error_raw is not None else -1)
         mv_self_quality_scale = float(mv_hints.get("self_quality_scale", 0.0) or 0.0)
         mv_exit_pred_cell = tuple(mv_hints.get("exit_pred_cell", (-1, -1)) or (-1, -1))
         mv_exit_conf = float(mv_hints.get("exit_conf", 0.0) or 0.0)
@@ -11518,6 +17622,18 @@ class AIAssistantApp:
                 mv_exit_alignment_bonus = int(round(mv_exit_progress * (1.0 + mv_bias_units)))
             elif mv_exit_progress < 0:
                 mv_exit_alignment_penalty = int(round(abs(mv_exit_progress) * (0.7 + (0.7 * mv_bias_units))))
+
+        mv_cellmap_bias = self._machine_vision_cellmap_candidate_bias(origin, candidate)
+        mv_cellmap_usable = int(mv_cellmap_bias.get("usable", 0) or 0)
+        mv_cellmap_candidate_label = str(mv_cellmap_bias.get("candidate_label", "unknown") or "unknown")
+        mv_cellmap_candidate_conf = float(mv_cellmap_bias.get("candidate_conf", 0.0) or 0.0)
+        mv_cellmap_open_alignment_bonus = int(mv_cellmap_bias.get("open_alignment_bonus", 0) or 0)
+        mv_cellmap_blocked_risk_penalty = int(mv_cellmap_bias.get("blocked_risk_penalty", 0) or 0)
+        mv_cellmap_neighbor_open_bonus = int(mv_cellmap_bias.get("neighbor_open_bonus", 0) or 0)
+        mv_cellmap_neighbor_blocked_penalty = int(mv_cellmap_bias.get("neighbor_blocked_penalty", 0) or 0)
+        mv_cellmap_neighbor_known = int(mv_cellmap_bias.get("neighbor_known", 0) or 0)
+        mv_cellmap_neighbor_open = int(mv_cellmap_bias.get("neighbor_open", 0) or 0)
+        mv_cellmap_neighbor_blocked = int(mv_cellmap_bias.get("neighbor_blocked", 0) or 0)
 
         # --- Prediction memory bias (unknown cells only) ---
         # When the candidate is unknown but has an active shape prediction,
@@ -11722,6 +17838,12 @@ class AIAssistantApp:
         recent_transition_count, recent_reverse_transition_count = self._recent_transition_counts(origin, candidate)
         transition_repeat_penalty = int(round(recent_transition_count * self.cycle_transition_penalty_weight))
         cycle_pair_penalty = int(round(recent_reverse_transition_count * self.cycle_pair_penalty_weight))
+        terminal_reentry_penalty = 0
+        if (terminal_corridor or boxed_corridor_no_exit) and (recent_transition_count + recent_reverse_transition_count) > 0:
+            repeat_units = min(4, recent_transition_count + recent_reverse_transition_count)
+            terminal_reentry_penalty = int(
+                round(repeat_units * max(12.0, float(self.visible_terminal_end_penalty) * 0.6))
+            )
         stuck_transition_taboo_boost = 0
         if self._maze_reexplore_cooldown_remaining > 0:
             # Stuck-only short taboo pressure: keep normal behavior unchanged outside
@@ -11843,40 +17965,154 @@ class AIAssistantApp:
         if candidate in recent_forced_cells:
             forced_corridor_reentry_penalty = max(0, int(self.forced_corridor_reentry_penalty))
 
+        structural_recall_key = self._candidate_structural_recall_key(
+            candidate=candidate,
+            known_degree=known_degree,
+            unknown_neighbors=unknown_neighbors,
+            frontier_distance=frontier_distance_effective,
+            dead_end_risk_depth=dead_end_risk_depth,
+            transition_pressure_bucket=transition_pressure_bucket,
+        )
+        structural_recall_hits, structural_recall_rate = self._recent_structural_recall_signal(structural_recall_key)
+        structural_recall_penalty = 0
+        if structural_recall_hits > 1 and visits > 0:
+            structural_base_penalty = (structural_recall_hits - 1) * float(self.structural_recall_penalty_weight)
+            if unknown_neighbors == 0 and frontier_distance_effective >= origin_frontier_distance:
+                structural_base_penalty *= float(self.structural_recall_frontier_guard_scale)
+            if bool(edge_scan["frontier_visible"]) or bool(edge_scan["junction_visible"]) or unknown_neighbors > 0:
+                structural_base_penalty *= 0.5
+            structural_recall_penalty = min(160, int(round(max(0.0, structural_base_penalty))))
+
+        hazard_preparedness_penalty = 0
+        hazard_preparedness_relative_pressure = 0.0
+        hazard_preparedness_move_pressure = 0.0
+        hazard_preparedness_baseline_pressure = 0.0
+        hazard_preparedness_confidence = 0.0
+        hazard_preparedness_samples = 0
+        if self.hazard_preparedness_enable:
+            hazard_profile = self._hazard_preparedness_profile(origin)
+            hazard_bucket = hazard_profile.get(move, {})
+            hazard_preparedness_move_pressure = float(hazard_bucket.get("learned_pressure", 0.0) or 0.0)
+            hazard_preparedness_confidence = float(hazard_bucket.get("confidence", 0.0) or 0.0)
+            hazard_preparedness_samples = int(hazard_bucket.get("count", 0) or 0)
+
+            legal_pressures: list[float] = []
+            for alt_move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                alt_cell = self._neighbor_for_move(origin, alt_move)
+                if alt_cell == origin or self._is_blocked_cell(alt_cell):
+                    continue
+                alt_bucket = hazard_profile.get(alt_move, {})
+                legal_pressures.append(float(alt_bucket.get("learned_pressure", 0.0) or 0.0))
+
+            if legal_pressures:
+                hazard_preparedness_baseline_pressure = min(legal_pressures)
+
+            hazard_preparedness_relative_pressure = max(
+                0.0,
+                hazard_preparedness_move_pressure - hazard_preparedness_baseline_pressure,
+            )
+            hazard_context_scale = 0.35 + (0.45 * local_map_authority_scale) + (0.20 * (transition_pressure_bucket / 3.0))
+            if unknown_neighbors > 0 and (bool(edge_scan["frontier_visible"]) or bool(edge_scan["junction_visible"])):
+                # Keep nearby uncertainty-probing active while still applying learned hazard pressure.
+                hazard_context_scale *= 0.6
+
+            raw_hazard_penalty = (
+                hazard_preparedness_relative_pressure
+                * float(self.hazard_preparedness_penalty_scale)
+                * hazard_context_scale
+            )
+            hazard_preparedness_penalty = min(
+                max(0, int(self.hazard_preparedness_max_penalty)),
+                int(round(raw_hazard_penalty)),
+            )
+
         endocrine_stress_penalty = 0
         endocrine_fatigue_penalty = 0
         endocrine_curiosity_bonus = 0
         endocrine_confidence_bonus = 0
         endocrine_momentum_bonus = 0
+        endocrine_mv_trust_bonus = 0
         endocrine_exploration_drive = 0.0
         endocrine_risk_aversion = 0.0
         endocrine_momentum = 0.0
+        endocrine_mv_reliance = 0.0
+        hormone_loop_signal = 0.0
+        hormone_dynamic_repeat_blend = round(float(self.hormone_legacy_weight_blend), 3)
+        hormone_dynamic_conf_momentum_blend = round(float(self.hormone_legacy_weight_blend), 3)
         if self.endocrine_enabled:
             hormone = self.endocrine.state()
             neural = self.endocrine.neural_state()
-            stress = float(hormone.get("stress", 0.0))
-            curiosity = float(hormone.get("curiosity", 0.0))
-            confidence = float(hormone.get("confidence", 0.0))
-            fatigue = float(hormone.get("fatigue", 0.0))
+            H_caution = float(hormone.get("H_caution", 0.0))
+            H_curiosity = float(hormone.get("H_curiosity", 0.0))
+            H_confidence = float(hormone.get("H_confidence", 0.0))
+            H_boredom = float(hormone.get("H_boredom", 0.0))
+            H_persistence = float(hormone.get("H_persistence", 0.0))
+            H_mv_trust = float(hormone.get("H_mv_trust", 0.0))
             endocrine_exploration_drive = float(neural.get("exploration_drive", 0.0))
             endocrine_risk_aversion = float(neural.get("risk_aversion", 0.0))
             endocrine_momentum = float(neural.get("momentum", 0.0))
+            endocrine_mv_reliance = float(neural.get("mv_reliance", 0.0))
+            hormone_loop_signal = self._hormone_loop_adaptation_signal()
+            base_blend = max(0.0, min(1.0, float(self.hormone_legacy_weight_blend)))
+            hormone_dynamic_repeat_blend = round(
+                self._dynamic_legacy_blend_for_channel("boredom", base_blend),
+                3,
+            )
+            hormone_dynamic_conf_momentum_blend = round(
+                self._dynamic_legacy_blend_for_channel("confidence", base_blend),
+                3,
+            )
+
+            caution_weight = self._hormone_weight_for_channel(
+                "caution",
+                self.hormone_caution_danger_weight,
+                self.endocrine_stress_danger_weight,
+            )
+            boredom_weight = self._hormone_weight_for_channel(
+                "boredom",
+                self.hormone_boredom_repeat_weight,
+                self.endocrine_fatigue_repeat_weight,
+            )
+            curiosity_weight = self._hormone_weight_for_channel(
+                "curiosity",
+                self.hormone_curiosity_novelty_weight,
+                self.endocrine_curiosity_novelty_weight,
+            )
+            confidence_weight = self._hormone_weight_for_channel(
+                "confidence",
+                self.hormone_confidence_risk_bonus,
+                self.endocrine_confidence_risk_bonus,
+            )
+            momentum_weight = self._hormone_weight_for_channel(
+                "momentum",
+                self.hormone_momentum_bonus_weight,
+                self.endocrine_momentum_bonus_weight,
+            )
 
             if dead_end_risk_depth > 0 or terminal_corridor or boxed_corridor_no_exit:
                 endocrine_stress_penalty = int(
-                    round(stress * self.endocrine_stress_danger_weight * max(1, dead_end_risk_depth))
+                    round(H_caution * caution_weight * max(1, dead_end_risk_depth))
                 )
             if visits > 0 or recent_penalty > 0:
+                repeat_pressure = max(0.0, H_boredom - (0.35 * H_persistence))
                 endocrine_fatigue_penalty = int(
-                    round(fatigue * self.endocrine_fatigue_repeat_weight * (1 + recent_penalty + backtrack))
+                    round(repeat_pressure * boredom_weight * (1 + recent_penalty + backtrack))
                 )
             if unknown_neighbors > 0 or bool(edge_scan["frontier_visible"]) or bool(edge_scan["junction_visible"]):
                 endocrine_curiosity_bonus = int(
-                    round(curiosity * self.endocrine_curiosity_novelty_weight * max(1, unknown_neighbors))
+                    round(H_curiosity * curiosity_weight * max(1, unknown_neighbors))
                 )
             if dead_end_risk_depth <= 1 and visits == 0:
-                endocrine_confidence_bonus = int(round(confidence * self.endocrine_confidence_risk_bonus))
-            endocrine_momentum_bonus = int(round(max(0.0, endocrine_momentum) * self.endocrine_momentum_bonus_weight))
+                endocrine_confidence_bonus = int(round(H_confidence * confidence_weight))
+            endocrine_momentum_bonus = int(round(max(0.0, endocrine_momentum) * momentum_weight))
+            if mv_exit_usable or mv_cellmap_usable:
+                mv_hint_signal = max(
+                    0.0,
+                    min(1.0, 0.45 + (0.35 * mv_exit_hint_strength) + (0.20 * mv_cellmap_candidate_conf)),
+                )
+                endocrine_mv_trust_bonus = int(
+                    round(max(0.0, H_mv_trust) * self.hormone_mv_trust_bonus_weight * mv_hint_signal)
+                )
 
         bio_nav = self._biological_navigation_signals(
             origin,
@@ -12076,6 +18312,47 @@ class AIAssistantApp:
                 round(cause_effect_memory_penalty * max(1.0, self.trap_context_cause_effect_penalty_scale))
             )
         decision_noise = self._decision_noise_term(move)
+        spatial_transition_bonus = 0
+        spatial_transition_penalty = 0
+        spatial_transition_confidence = 0.0
+        spatial_transition_outcome = 0.0
+        spatial_branch_risk_penalty = 0
+        spatial_branch_risk_norm = 0.0
+        spatial_exit_recall_bonus = 0
+        spatial_exit_recall_penalty = 0
+        spatial_exit_recall_confidence = 0.0
+        spatial_exit_progress_norm = 0.0
+        if self.spatial_memory_enable:
+            (
+                spatial_transition_bonus,
+                spatial_transition_penalty,
+                spatial_transition_confidence,
+                spatial_transition_outcome,
+            ) = self._spatial_transition_move_bias(
+                origin,
+                candidate,
+                unknown_neighbors,
+                frontier_distance_effective,
+            )
+            (
+                spatial_branch_risk_penalty,
+                spatial_branch_risk_norm,
+            ) = self._spatial_branch_risk_penalty(
+                origin,
+                candidate,
+                unknown_neighbors,
+                frontier_distance_effective,
+            )
+            (
+                spatial_exit_recall_bonus,
+                spatial_exit_recall_penalty,
+                spatial_exit_recall_confidence,
+                spatial_exit_progress_norm,
+            ) = self._spatial_exit_recall_move_bias(
+                origin,
+                candidate,
+                unknown_neighbors,
+            )
 
         novelty_multiplier = max(0.0, 1.0 - local_map_authority_scale)
         effective_visible_open_decision = int(round(visible_open_decision * novelty_multiplier))
@@ -12109,6 +18386,7 @@ class AIAssistantApp:
         score += terminal_corridor * visible_terminal_end_penalty
         boxed_corridor_penalty = max(0, int(self.boxed_corridor_no_exit_penalty))
         score += boxed_corridor_no_exit * boxed_corridor_penalty
+        score += terminal_reentry_penalty
         score += branch_diversity_penalty
         score += seen_corridor_continue_penalty
         score += episodic_relevance_penalty
@@ -12122,12 +18400,14 @@ class AIAssistantApp:
         score += transition_pressure_repeat_penalty
         score += long_trap_transition_penalty
         score += long_trap_cell_penalty
+        score += hazard_preparedness_penalty
         score += post_reset_exhaustion_penalty
         score += reset_failure_transition_penalty
         score += reset_failure_cell_penalty
         score += frontier_lock_loop_penalty
         score += solved_region_penalty
         score += forced_corridor_reentry_penalty
+        score += structural_recall_penalty
         score += taboo_transition_penalty
         score += terminal_hard_veto_penalty
         score += branch_tightening_abort_penalty
@@ -12136,7 +18416,12 @@ class AIAssistantApp:
         score += endocrine_stress_penalty
         score += endocrine_fatigue_penalty
         score += cause_effect_memory_penalty
+        score += spatial_transition_penalty
+        score += spatial_branch_risk_penalty
+        score += spatial_exit_recall_penalty
         score += mv_exit_alignment_penalty
+        score += mv_cellmap_blocked_risk_penalty
+        score += mv_cellmap_neighbor_blocked_penalty
         score += move_personality_bias
         score += decision_noise
         # Keep raw exploration reward intentionally weak. Strong preference comes
@@ -12150,7 +18435,11 @@ class AIAssistantApp:
         score -= max(0, open_degree - 2) * 1
         score -= effective_visible_open_decision * 22
         score -= cause_effect_memory_reward
+        score -= spatial_transition_bonus
+        score -= spatial_exit_recall_bonus
         score -= mv_exit_alignment_bonus
+        score -= mv_cellmap_open_alignment_bonus
+        score -= mv_cellmap_neighbor_open_bonus
         score -= branch_tightening_escape_bonus
         score -= effective_bio_opening_bonus
         score -= int(bio_nav["bio_dead_end_escape_bonus"])
@@ -12159,6 +18448,7 @@ class AIAssistantApp:
         score -= effective_endocrine_curiosity_bonus
         score -= endocrine_confidence_bonus
         score -= endocrine_momentum_bonus
+        score -= endocrine_mv_trust_bonus
         score -= reset_success_transition_bonus
         score -= frontier_lock_progress_bonus
         visible_exit_reward = max(0, int(self.visible_exit_corridor_reward))
@@ -12253,6 +18543,67 @@ class AIAssistantApp:
             stuck_extra_noise = decision_noise * 2
             score += stuck_extra_noise
 
+        micro_frontier_escape_score_bonus = 0
+        micro_frontier_loop_score_penalty = 0
+        runtime_micro_frontier_active = bool(getattr(self, "_runtime_micro_frontier_stall_active", False))
+        if self.micro_frontier_stall_enable and runtime_micro_frontier_active:
+            runtime_signature = getattr(self, "_runtime_micro_frontier_signature", None)
+            runtime_signature_unknown = 0
+            if isinstance(runtime_signature, tuple) and len(runtime_signature) == 2:
+                runtime_signature_unknown = max(0, int(runtime_signature[0]))
+            runtime_no_progress_steps = max(
+                0,
+                int(getattr(self, "_runtime_micro_frontier_no_progress_steps", 0) or 0),
+            )
+            runtime_stall_streak = max(
+                0,
+                int(getattr(self, "_runtime_micro_frontier_stall_streak", 0) or 0),
+            )
+            pressure_steps = max(
+                0,
+                runtime_no_progress_steps - int(self.micro_frontier_stall_no_progress_min),
+            )
+            pressure_units = min(7, pressure_steps // 2)
+            streak_units = min(4, runtime_stall_streak)
+            has_escape_signal = (
+                (unknown_neighbors > runtime_signature_unknown)
+                or (unknown_neighbors >= 2)
+                or bool(edge_scan["frontier_visible"])
+                or bool(edge_scan["junction_visible"])
+                or (
+                    frontier_distance_effective < origin_frontier_distance
+                    and frontier_distance_effective >= 0
+                )
+            )
+            if has_escape_signal and (not terminal_corridor) and (not boxed_corridor_no_exit):
+                base_escape_bonus = 10 + (pressure_units * 4) + (streak_units * 3)
+                micro_frontier_escape_score_bonus = min(
+                    max(0, int(self.micro_frontier_stall_score_max_bonus)),
+                    int(
+                        round(
+                            base_escape_bonus
+                            * float(self.micro_frontier_stall_score_escape_bonus_scale)
+                        )
+                    ),
+                )
+                score -= micro_frontier_escape_score_bonus
+            elif (
+                unknown_neighbors == 0
+                and candidate_fully_known_current_maze
+                and frontier_distance_effective >= origin_frontier_distance
+            ):
+                base_loop_penalty = 8 + (pressure_units * 4) + (streak_units * 4)
+                micro_frontier_loop_score_penalty = min(
+                    max(0, int(self.micro_frontier_stall_score_max_penalty)),
+                    int(
+                        round(
+                            base_loop_penalty
+                            * float(self.micro_frontier_stall_score_loop_penalty_scale)
+                        )
+                    ),
+                )
+                score += micro_frontier_loop_score_penalty
+
         adaptive_prediction = 0.0
         adaptive_score_adjustment = 0
         adaptive_features = self._adaptive_features_from_breakdown(
@@ -12269,9 +18620,17 @@ class AIAssistantApp:
                 "visible_exit_corridor": visible_exit_corridor,
                 "cause_effect_memory_penalty": cause_effect_memory_penalty,
                 "cause_effect_memory_reward": cause_effect_memory_reward,
+                "hazard_preparedness_penalty": hazard_preparedness_penalty,
+                "hazard_preparedness_relative_pressure": hazard_preparedness_relative_pressure,
                 "prediction_junction_bonus_raw": raw_prediction_junction_bonus,
                 "prediction_dead_end_penalty_raw": raw_prediction_dead_end_penalty,
                 "mv_exit_progress_norm": mv_exit_progress_norm,
+                "spatial_transition_bonus": spatial_transition_bonus,
+                "spatial_transition_penalty": spatial_transition_penalty,
+                "spatial_branch_risk_penalty": spatial_branch_risk_penalty,
+                "spatial_exit_recall_bonus": spatial_exit_recall_bonus,
+                "spatial_exit_recall_penalty": spatial_exit_recall_penalty,
+                "spatial_exit_progress_norm": spatial_exit_progress_norm,
             }
         )
         if self.adaptive_controller_enable and self.adaptive_controller is not None:
@@ -12319,6 +18678,7 @@ class AIAssistantApp:
             "visible_terminal_end_penalty": visible_terminal_end_penalty,
             "boxed_corridor_no_exit": boxed_corridor_no_exit,
             "boxed_corridor_penalty": boxed_corridor_penalty,
+            "terminal_reentry_penalty": terminal_reentry_penalty,
             "visible_exit_corridor": visible_exit_corridor,
             "visible_exit_reward": visible_exit_reward,
             "branch_diversity_penalty": branch_diversity_penalty,
@@ -12348,6 +18708,12 @@ class AIAssistantApp:
             "long_trap_cell_penalty": long_trap_cell_penalty,
             "long_trap_transition_hits": long_trap_transition_hits,
             "long_trap_cell_hits": long_trap_cell_hits,
+            "hazard_preparedness_penalty": hazard_preparedness_penalty,
+            "hazard_preparedness_relative_pressure": round(hazard_preparedness_relative_pressure, 3),
+            "hazard_preparedness_move_pressure": round(hazard_preparedness_move_pressure, 3),
+            "hazard_preparedness_baseline_pressure": round(hazard_preparedness_baseline_pressure, 3),
+            "hazard_preparedness_confidence": round(hazard_preparedness_confidence, 3),
+            "hazard_preparedness_samples": hazard_preparedness_samples,
             "post_reset_exhaustion_penalty": post_reset_exhaustion_penalty,
             "reset_failure_transition_penalty": reset_failure_transition_penalty,
             "reset_failure_cell_penalty": reset_failure_cell_penalty,
@@ -12359,6 +18725,10 @@ class AIAssistantApp:
             "move_entropy": move_entropy,
             "transition_pressure_bucket": transition_pressure_bucket,
             "forced_corridor_reentry_penalty": forced_corridor_reentry_penalty,
+            "structural_recall_penalty": structural_recall_penalty,
+            "structural_recall_hits": structural_recall_hits,
+            "structural_recall_rate": round(structural_recall_rate, 3),
+            "structural_recall_key": structural_recall_key,
             "taboo_transition_penalty": taboo_transition_penalty,
             "terminal_hard_veto_penalty": terminal_hard_veto_penalty,
             "branch_tightening_score": branch_tightening_score,
@@ -12380,12 +18750,29 @@ class AIAssistantApp:
             "endocrine_curiosity_bonus": effective_endocrine_curiosity_bonus,
             "endocrine_confidence_bonus": endocrine_confidence_bonus,
             "endocrine_momentum_bonus": endocrine_momentum_bonus,
+            "endocrine_mv_trust_bonus": endocrine_mv_trust_bonus,
             "endocrine_exploration_drive": round(endocrine_exploration_drive, 3),
             "endocrine_risk_aversion": round(endocrine_risk_aversion, 3),
             "endocrine_momentum": round(endocrine_momentum, 3),
+            "endocrine_mv_reliance": round(endocrine_mv_reliance, 3),
+            "hormone_legacy_weight_blend": round(self.hormone_legacy_weight_blend, 3),
+            "hormone_dynamic_legacy_enable": 1 if self.hormone_dynamic_legacy_enable else 0,
+            "hormone_loop_signal": round(hormone_loop_signal, 3),
+            "hormone_dynamic_repeat_blend": hormone_dynamic_repeat_blend,
+            "hormone_dynamic_conf_momentum_blend": hormone_dynamic_conf_momentum_blend,
             "cause_effect_memory_penalty": cause_effect_memory_penalty,
             "cause_effect_memory_reward": cause_effect_memory_reward,
             "cause_effect_retrieved_tags": ",".join(retrieved_cause_tags),
+            "spatial_transition_bonus": spatial_transition_bonus,
+            "spatial_transition_penalty": spatial_transition_penalty,
+            "spatial_transition_confidence": round(spatial_transition_confidence, 3),
+            "spatial_transition_outcome": round(spatial_transition_outcome, 3),
+            "spatial_branch_risk_penalty": spatial_branch_risk_penalty,
+            "spatial_branch_risk_norm": round(spatial_branch_risk_norm, 3),
+            "spatial_exit_recall_bonus": spatial_exit_recall_bonus,
+            "spatial_exit_recall_penalty": spatial_exit_recall_penalty,
+            "spatial_exit_recall_confidence": round(spatial_exit_recall_confidence, 3),
+            "spatial_exit_progress_norm": round(spatial_exit_progress_norm, 3),
             "mv_self_pred_cell": mv_self_pred_cell,
             "mv_self_error": mv_self_error,
             "mv_self_quality_scale": round(mv_self_quality_scale, 3),
@@ -12400,12 +18787,23 @@ class AIAssistantApp:
             "mv_exit_alignment_bonus": mv_exit_alignment_bonus,
             "mv_exit_alignment_penalty": mv_exit_alignment_penalty,
             "mv_exit_progress_norm": round(mv_exit_progress_norm, 3),
+            "mv_cellmap_usable": mv_cellmap_usable,
+            "mv_cellmap_candidate_label": mv_cellmap_candidate_label,
+            "mv_cellmap_candidate_conf": mv_cellmap_candidate_conf,
+            "mv_cellmap_open_alignment_bonus": mv_cellmap_open_alignment_bonus,
+            "mv_cellmap_blocked_risk_penalty": mv_cellmap_blocked_risk_penalty,
+            "mv_cellmap_neighbor_open_bonus": mv_cellmap_neighbor_open_bonus,
+            "mv_cellmap_neighbor_blocked_penalty": mv_cellmap_neighbor_blocked_penalty,
+            "mv_cellmap_neighbor_known": mv_cellmap_neighbor_known,
+            "mv_cellmap_neighbor_open": mv_cellmap_neighbor_open,
+            "mv_cellmap_neighbor_blocked": mv_cellmap_neighbor_blocked,
             "adaptive_prediction": round(adaptive_prediction, 4),
             "adaptive_score_adjustment": adaptive_score_adjustment,
             "adaptive_features": adaptive_features,
             "move_personality_bias": move_personality_bias,
             "decision_noise": decision_noise,
             "novelty_reward": novelty_reward,
+            "known_degree": known_degree,
             "unknown_neighbors": unknown_neighbors,
             "open_degree": open_degree,
             "forced_single_exit": 1 if forced_single_exit else 0,
@@ -12423,6 +18821,8 @@ class AIAssistantApp:
             "stuck_uncertainty_probe_bonus": stuck_uncertainty_probe_bonus,
             "stuck_dead_end_penalty_relief": stuck_dead_end_penalty_relief,
             "stuck_extra_noise": stuck_extra_noise,
+            "micro_frontier_escape_score_bonus": micro_frontier_escape_score_bonus,
+            "micro_frontier_loop_score_penalty": micro_frontier_loop_score_penalty,
             "prediction_used": 1 if prediction_used else 0,
         }
 
@@ -12493,9 +18893,10 @@ class AIAssistantApp:
     def _format_exploration_candidates(self) -> str:
         lines: list[str] = []
         tie_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
+        breakdown_cache: dict[str, dict] = {}
         breakdowns: dict[str, dict] = {}
         for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
-            breakdowns[move] = self._exploration_move_breakdown(move)
+            breakdowns[move] = self._exploration_move_breakdown_cached(move, breakdown_cache)
 
         valid_ranked = [
             (move, b)
@@ -12520,10 +18921,17 @@ class AIAssistantApp:
                 f"steps_since_reset={max(0, self.memory_step_index - self._last_step_reset_memory_step)} "
                 f"stm_relax={self._post_reset_stm_relax_remaining} "
                 f"frontier_target={self._persistent_frontier_target} "
+                f"spatial_exit_seen_age="
+                f"{(max(0, self.memory_step_index - self.spatial_exit_last_seen_step) if self.spatial_exit_last_seen_step >= 0 else -1)} "
+                f"spatial_exit_guidance={round(float(self.spatial_exit_guidance_ema), 3)} "
                 f"verification_mode={1 if self._verification_priority_active() else 0} "
                 f"verification_target={self._verification_probe_target} "
                 f"frontier_lock={1 if self._frontier_lock_active() else 0} "
+                f"hard_override_phase={int(self.hard_override_phase_level)} "
                 f"move_entropy={self._recent_move_direction_entropy()} "
+                f"mv_preplan={self._mv_preplan_last_status} "
+                f"mv_enabled={1 if self._machine_vision_enabled() else 0} "
+                f"mv_route_mode={1 if self._mv_route_mode_active() else 0} "
                 f"local_map_authority_mode={self.local_map_authority_mode} "
                 f"blend={'continuous' if self.local_map_authority_mode == 'soft' else 'hard'} "
                 f"soft_scale={round(self.local_map_authority_soft_scale, 3)}"
@@ -12535,14 +18943,22 @@ class AIAssistantApp:
             lines.append(
                 (
                     "endocrine: "
-                    f"stress={hormone.get('stress', 0.0)} "
-                    f"curiosity={hormone.get('curiosity', 0.0)} "
-                    f"confidence={hormone.get('confidence', 0.0)} "
-                    f"fatigue={hormone.get('fatigue', 0.0)} "
-                    f"reward={hormone.get('reward', 0.0)} "
+                    f"H_curiosity={hormone.get('H_curiosity', 0.0)} "
+                    f"H_caution={hormone.get('H_caution', 0.0)} "
+                    f"H_persistence={hormone.get('H_persistence', 0.0)} "
+                    f"H_mv_trust={hormone.get('H_mv_trust', 0.0)} "
+                    f"H_boredom={hormone.get('H_boredom', 0.0)} "
+                    f"H_confidence={hormone.get('H_confidence', 0.0)} "
                     f"exploration_drive={neural.get('exploration_drive', 0.0)} "
                     f"risk_aversion={neural.get('risk_aversion', 0.0)} "
-                    f"momentum={neural.get('momentum', 0.0)}"
+                    f"momentum={neural.get('momentum', 0.0)} "
+                    f"mv_reliance={neural.get('mv_reliance', 0.0)} "
+                    f"legacy_blend={round(self.hormone_legacy_weight_blend, 3)} "
+                    f"legacy_batch_level={int(self.hormone_legacy_batch_level)} "
+                    f"objective_override_phase={int(self.objective_override_phase_level)} "
+                    f"hard_override_phase={int(self.hard_override_phase_level)} "
+                    f"dynamic_legacy={1 if self.hormone_dynamic_legacy_enable else 0} "
+                    f"loop_signal={round(self._hormone_loop_adaptation_signal(), 3)}"
                 )
             )
             if self.endocrine_event_log:
@@ -12677,12 +19093,37 @@ class AIAssistantApp:
                         f"endocrine_curiosity_bonus={b.get('endocrine_curiosity_bonus', 0)} "
                         f"endocrine_confidence_bonus={b.get('endocrine_confidence_bonus', 0)} "
                         f"endocrine_momentum_bonus={b.get('endocrine_momentum_bonus', 0)} "
+                        f"endocrine_mv_trust_bonus={b.get('endocrine_mv_trust_bonus', 0)} "
                         f"endocrine_exploration_drive={b.get('endocrine_exploration_drive', 0.0)} "
                         f"endocrine_risk_aversion={b.get('endocrine_risk_aversion', 0.0)} "
                         f"endocrine_momentum={b.get('endocrine_momentum', 0.0)} "
+                        f"endocrine_mv_reliance={b.get('endocrine_mv_reliance', 0.0)} "
+                        f"hormone_legacy_weight_blend={b.get('hormone_legacy_weight_blend', 0.0)} "
                         f"cause_effect_memory_penalty={b.get('cause_effect_memory_penalty', 0)} "
                         f"cause_effect_memory_reward={b.get('cause_effect_memory_reward', 0)} "
+                        f"hazard_preparedness_penalty={b.get('hazard_preparedness_penalty', 0)} "
+                        f"hazard_preparedness_relative_pressure={b.get('hazard_preparedness_relative_pressure', 0.0)} "
+                        f"hazard_preparedness_confidence={b.get('hazard_preparedness_confidence', 0.0)} "
+                        f"hazard_preparedness_samples={b.get('hazard_preparedness_samples', 0)} "
                         f"cause_effect_retrieved_tags={b.get('cause_effect_retrieved_tags', '') or '(none)'} "
+                        f"spatial_transition_bonus={b.get('spatial_transition_bonus', 0)} "
+                        f"spatial_transition_penalty={b.get('spatial_transition_penalty', 0)} "
+                        f"spatial_transition_conf={b.get('spatial_transition_confidence', 0.0)} "
+                        f"spatial_branch_penalty={b.get('spatial_branch_risk_penalty', 0)} "
+                        f"spatial_branch_norm={b.get('spatial_branch_risk_norm', 0.0)} "
+                        f"spatial_exit_bonus={b.get('spatial_exit_recall_bonus', 0)} "
+                        f"spatial_exit_penalty={b.get('spatial_exit_recall_penalty', 0)} "
+                        f"spatial_exit_conf={b.get('spatial_exit_recall_confidence', 0.0)} "
+                        f"spatial_exit_progress={b.get('spatial_exit_progress_norm', 0.0)} "
+                        f"mv_cellmap_usable={b.get('mv_cellmap_usable', 0)} "
+                        f"mv_cellmap_label={b.get('mv_cellmap_candidate_label', 'unknown')} "
+                        f"mv_cellmap_conf={b.get('mv_cellmap_candidate_conf', 0.0)} "
+                        f"mv_cellmap_open_bonus={b.get('mv_cellmap_open_alignment_bonus', 0)} "
+                        f"mv_cellmap_blocked_penalty={b.get('mv_cellmap_blocked_risk_penalty', 0)} "
+                        f"mv_cellmap_neighbor_open_bonus={b.get('mv_cellmap_neighbor_open_bonus', 0)} "
+                        f"mv_cellmap_neighbor_blocked_penalty={b.get('mv_cellmap_neighbor_blocked_penalty', 0)} "
+                        f"mv_cellmap_neighbor_open={b.get('mv_cellmap_neighbor_open', 0)} "
+                        f"mv_cellmap_neighbor_blocked={b.get('mv_cellmap_neighbor_blocked', 0)} "
                         f"transition_count={b.get('recent_transition_count', 0)} "
                         f"reverse_transition_count={b.get('recent_reverse_transition_count', 0)} "
                         f"move_personality_bias={b.get('move_personality_bias', 0)} "
@@ -12739,6 +19180,34 @@ class AIAssistantApp:
         self._move_player(dx, dy)
         self.root.after(self.move_delay_ms, self._animate_next_agent_move)
 
+    def _on_manual_game_key(self, event: tk.Event, move: str) -> str:
+        vectors = {
+            "UP": (0, -self.player_speed),
+            "DOWN": (0, self.player_speed),
+            "LEFT": (-self.player_speed, 0),
+            "RIGHT": (self.player_speed, 0),
+        }
+        normalized_move = str(move or "").strip().upper()
+        if normalized_move not in vectors:
+            return "break"
+
+        raw_key = str(getattr(event, "keysym", "") or "").strip()
+        if not raw_key:
+            raw_key = normalized_move
+        key_token = raw_key.upper()
+        self._append_memory_log(
+            f"keyboard_input key={key_token} move={normalized_move} cell={self.current_player_cell}"
+        )
+
+        dx, dy = vectors[normalized_move]
+        self._move_player(
+            dx,
+            dy,
+            input_source="keyboard",
+            input_key=key_token,
+        )
+        return "break"
+
     def _init_game(self) -> None:
         self._draw_chessboard()
         self._generate_layout()
@@ -12762,14 +19231,14 @@ class AIAssistantApp:
         self._refresh_game_state()
 
         self.game_canvas.bind("<Button-1>", lambda _event: self.game_canvas.focus_set())
-        self.game_canvas.bind("<Up>", lambda _event: self._move_player(0, -self.player_speed))
-        self.game_canvas.bind("<Down>", lambda _event: self._move_player(0, self.player_speed))
-        self.game_canvas.bind("<Left>", lambda _event: self._move_player(-self.player_speed, 0))
-        self.game_canvas.bind("<Right>", lambda _event: self._move_player(self.player_speed, 0))
-        self.game_canvas.bind("<w>", lambda _event: self._move_player(0, -self.player_speed))
-        self.game_canvas.bind("<s>", lambda _event: self._move_player(0, self.player_speed))
-        self.game_canvas.bind("<a>", lambda _event: self._move_player(-self.player_speed, 0))
-        self.game_canvas.bind("<d>", lambda _event: self._move_player(self.player_speed, 0))
+        self.game_canvas.bind("<Up>", lambda event: self._on_manual_game_key(event, "UP"))
+        self.game_canvas.bind("<Down>", lambda event: self._on_manual_game_key(event, "DOWN"))
+        self.game_canvas.bind("<Left>", lambda event: self._on_manual_game_key(event, "LEFT"))
+        self.game_canvas.bind("<Right>", lambda event: self._on_manual_game_key(event, "RIGHT"))
+        self.game_canvas.bind("<w>", lambda event: self._on_manual_game_key(event, "UP"))
+        self.game_canvas.bind("<s>", lambda event: self._on_manual_game_key(event, "DOWN"))
+        self.game_canvas.bind("<a>", lambda event: self._on_manual_game_key(event, "LEFT"))
+        self.game_canvas.bind("<d>", lambda event: self._on_manual_game_key(event, "RIGHT"))
         self.game_canvas.focus_set()
 
     def _cell_center(self, cell: tuple[int, int]) -> tuple[float, float]:
@@ -12802,6 +19271,10 @@ class AIAssistantApp:
         self.game_canvas.delete("board")
         self.game_canvas.delete("fov")
         self.game_canvas.delete("sweep")
+        self.game_canvas.delete("vision_grid_pred")
+        self.game_canvas.delete("vision_route")
+        self.game_canvas.delete("vision_pred")
+        self.game_canvas.delete("vision_exit_pred")
         light = "#f0f4ff"
         dark = "#dbe4ff"
         for row in range(self.grid_cells):
@@ -12857,10 +19330,230 @@ class AIAssistantApp:
             return ["UP"]
         return directions
 
+    def _all_look_directions(self) -> list[str]:
+        return ["UP", "RIGHT", "DOWN", "LEFT"]
+
+    def _reverse_direction(self, direction: str) -> str:
+        mapping = {
+            "UP": "DOWN",
+            "DOWN": "UP",
+            "LEFT": "RIGHT",
+            "RIGHT": "LEFT",
+        }
+        return str(mapping.get((direction or "").strip().upper(), ""))
+
+    def _mv_preplan_select_look_directions(
+        self,
+        hints: dict[str, object] | None = None,
+        *,
+        acquisition_phase: bool = False,
+    ) -> list[str]:
+        available = self._available_look_directions()
+        if len(available) <= 1:
+            return available
+
+        hint_payload = hints if isinstance(hints, dict) else {}
+        facing = (self.player_facing or "").strip().upper()
+        reverse_facing = self._reverse_direction(facing)
+
+        unknown_now = 0
+        frontier_now = 0
+        try:
+            episodic_summary = self._episodic_memory_summary()
+            unknown_now = int(episodic_summary.get("unknown", 0) or 0)
+            frontier_now = int(episodic_summary.get("frontier", 0) or 0)
+        except Exception:  # noqa: BLE001
+            unknown_now = 0
+            frontier_now = 0
+
+        no_progress_steps = int(getattr(self, "_maze_recent_no_progress_steps", 0) or 0)
+        move_entropy = float(self._recent_move_direction_entropy()) if self.maze_recent_transitions else 2.0
+
+        budget = 1
+        if unknown_now > 0 or frontier_now > 0:
+            budget = 2
+        if unknown_now >= 10 or frontier_now >= 3:
+            budget = 3
+        if no_progress_steps >= max(2, self.maze_stuck_no_progress_threshold - 1):
+            budget = max(budget, 3)
+        if move_entropy <= (self.loop_entropy_threshold + 0.08):
+            budget = max(budget, 3)
+        if acquisition_phase and (unknown_now >= 20 or frontier_now >= 5):
+            budget = 4
+
+        exit_usable = bool(hint_payload.get("exit_usable", False))
+        exit_conf = float(hint_payload.get("exit_conf", 0.0) or 0.0)
+        exit_pred = tuple(hint_payload.get("exit_pred_cell", (-1, -1)) or (-1, -1))
+        exit_valid = (
+            isinstance(exit_pred, tuple)
+            and len(exit_pred) == 2
+            and 0 <= int(exit_pred[0]) < self.grid_cells
+            and 0 <= int(exit_pred[1]) < self.grid_cells
+        )
+        if exit_usable and exit_valid and exit_conf >= float(self.mv_preplan_exit_min_conf):
+            budget = max(budget, 2)
+
+        budget = max(1, min(len(available), int(budget)))
+
+        origin = self.current_player_cell
+        direction_order = {"UP": 0, "RIGHT": 1, "DOWN": 2, "LEFT": 3}
+        scored: list[tuple[float, str]] = []
+        for move in available:
+            nxt = self._neighbor_for_move(origin, move)
+            unknown_neighbors = self._unknown_neighbor_count(nxt)
+            frontier_distance = min(6, self._frontier_distance(nxt, max_depth=5))
+            visit_count = int(self.episode_visited_cells.get(nxt, 0) or 0)
+
+            # Prioritize directions expected to reveal new frontier evidence,
+            # while suppressing repeated no-progress reversals.
+            score = (unknown_neighbors * 2.4) + (max(0, 5 - frontier_distance) * 0.75)
+            score -= min(6, visit_count) * 0.40
+
+            if move == facing:
+                score += 0.25
+            if reverse_facing and move == reverse_facing:
+                score -= 0.45
+                if no_progress_steps >= max(2, self.maze_stuck_no_progress_threshold - 1):
+                    score -= 0.45
+
+            if exit_usable and exit_valid and exit_conf >= float(self.mv_preplan_exit_min_conf):
+                curr_dist = abs(int(origin[0]) - int(exit_pred[0])) + abs(int(origin[1]) - int(exit_pred[1]))
+                nxt_dist = abs(int(nxt[0]) - int(exit_pred[0])) + abs(int(nxt[1]) - int(exit_pred[1]))
+                score += (curr_dist - nxt_dist) * 0.50
+
+            mv_bias = self._machine_vision_cellmap_candidate_bias(origin, nxt)
+            if int(mv_bias.get("usable", 0) or 0) == 1:
+                score += float(mv_bias.get("open_alignment_bonus", 0) or 0) * 0.03
+                score -= float(mv_bias.get("blocked_risk_penalty", 0) or 0) * 0.05
+                score += float(mv_bias.get("neighbor_open_bonus", 0) or 0) * 0.02
+                score -= float(mv_bias.get("neighbor_blocked_penalty", 0) or 0) * 0.03
+
+            score -= float(direction_order.get(move, 9)) * 0.0001
+            scored.append((score, move))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = [move for _score, move in scored[:budget]]
+        return selected if selected else available[:1]
+
+    def _mv_preplan_ready_for_sweep(self, hints: dict[str, object]) -> tuple[bool, str]:
+        if self._normalized_layout_mode() != "maze":
+            return (True, "mode=non-maze")
+        if not self._machine_vision_enabled():
+            return (True, "bypass:mv-disabled")
+        if not self.mv_preplan_sweep_enable:
+            return (True, "disabled")
+        if not self.machine_vision_player_localization_enable:
+            return (True, "bypass:self_localization_disabled")
+        if self.mv_preplan_require_exit and (not self.machine_vision_exit_localization_enable):
+            return (True, "bypass:exit_localization_disabled")
+        if not bool(hints.get("enabled", False)):
+            return (True, "bypass:mv_hints_disabled")
+
+        trusted_sources = {"learned_signature", "prior_sample_context", "prior_sample"}
+        self_source = str(hints.get("self_source", "none") or "none")
+        self_conf = float(hints.get("self_conf", 0.0) or 0.0)
+        self_error_raw = hints.get("self_error", -1)
+        self_error = int(self_error_raw if self_error_raw is not None else -1)
+        self_error_ready = (self_error < 0) or (self_error <= int(self.mv_preplan_max_self_error))
+        self_ready = bool(
+            bool(hints.get("self_fresh", False))
+            and self_source in trusted_sources
+            and self_conf >= float(self.mv_preplan_self_min_conf)
+            and self_error_ready
+        )
+
+        exit_ready = True
+        exit_source = str(hints.get("exit_source", "none") or "none")
+        exit_conf = float(hints.get("exit_conf", 0.0) or 0.0)
+        if self.mv_preplan_require_exit:
+            exit_ready = bool(
+                bool(hints.get("exit_usable", False))
+                and bool(hints.get("exit_fresh", False))
+                and exit_source in trusted_sources
+                and exit_conf >= float(self.mv_preplan_exit_min_conf)
+            )
+
+        status = (
+            f"self_ready={1 if self_ready else 0} "
+            f"exit_ready={1 if exit_ready else 0} "
+            f"self_conf={round(self_conf, 3)} "
+            f"exit_conf={round(exit_conf, 3)} "
+            f"self_err={self_error} "
+            f"self_src={self_source} self_fresh={1 if bool(hints.get('self_fresh', False)) else 0} "
+            f"exit_src={exit_source} exit_fresh={1 if bool(hints.get('exit_fresh', False)) else 0} "
+            f"exit_usable={1 if bool(hints.get('exit_usable', False)) else 0}"
+        )
+        if self_ready and exit_ready:
+            return (True, f"ready {status}")
+        return (False, f"wait {status}")
+
+    def _mv_preplan_acquire_until_ready(self) -> tuple[bool, str]:
+        if self._normalized_layout_mode() != "maze":
+            return (True, "mode=non-maze")
+        if not self._machine_vision_enabled():
+            return (True, "bypass:mv-disabled")
+        if not self.mv_preplan_sweep_enable:
+            return (True, "disabled")
+
+        trusted_sources = {"learned_signature", "prior_sample_context", "prior_sample"}
+
+        def _exit_locked(local_hints: dict[str, object]) -> bool:
+            if not self.mv_preplan_require_exit:
+                return True
+            exit_source = str(local_hints.get("exit_source", "none") or "none")
+            exit_conf = float(local_hints.get("exit_conf", 0.0) or 0.0)
+            return bool(
+                bool(local_hints.get("exit_usable", False))
+                and bool(local_hints.get("exit_fresh", False))
+                and exit_source in trusted_sources
+                and exit_conf >= float(self.mv_preplan_exit_min_conf)
+            )
+
+        max_sweeps = max(1, int(self.mv_preplan_acquire_max_sweeps))
+        sweep_count = 0
+        last_look_dirs = ""
+        hints = self._machine_vision_kernel_hints()
+        ready, note = self._mv_preplan_ready_for_sweep(hints)
+
+        # Do not begin look sweeps until MV has a confident/fresh exit lock.
+        if not _exit_locked(hints):
+            player_row, player_col = int(self.current_player_cell[0]), int(self.current_player_cell[1])
+            # Refresh MV side-channel predictions without any directional look sweep.
+            self._update_machine_vision_localization(player_row, player_col)
+            self._update_machine_vision_exit_localization(player_row, player_col)
+            hints = self._machine_vision_kernel_hints()
+            ready, note = self._mv_preplan_ready_for_sweep(hints)
+            if _exit_locked(hints):
+                self._mv_preplan_no_sweep_wait_streak = 0
+                if ready:
+                    suffix = f" look={last_look_dirs}" if last_look_dirs else ""
+                    return (True, f"{note} sweeps={sweep_count}/{max_sweeps}{suffix}")
+            else:
+                self._mv_preplan_no_sweep_wait_streak += 1
+                if self._mv_preplan_no_sweep_wait_streak < 2:
+                    suffix = f" look={last_look_dirs}" if last_look_dirs else ""
+                    return (False, f"{note} sweeps={sweep_count}/{max_sweeps}{suffix}")
+                # Anti-deadlock safeguard: if no-lock wait repeats, force at least
+                # one sweep acquisition pass instead of idling at sweeps=0 forever.
+                self._mv_preplan_no_sweep_wait_streak = 0
+
+        while (not ready) and sweep_count < max_sweeps:
+            # Decoupled acquisition phase: gather MV evidence before any move executes.
+            look_directions = self._mv_preplan_select_look_directions(hints, acquisition_phase=True)
+            if not look_directions:
+                look_directions = self._available_look_directions()
+            last_look_dirs = ",".join(look_directions)
+            self._preview_look_directions_blocking(look_directions)
+            sweep_count += 1
+            hints = self._machine_vision_kernel_hints()
+            ready, note = self._mv_preplan_ready_for_sweep(hints)
+        if ready:
+            self._mv_preplan_no_sweep_wait_streak = 0
+        suffix = f" look={last_look_dirs}" if last_look_dirs else ""
+        return (ready, f"{note} sweeps={sweep_count}/{max_sweeps}{suffix}")
+
     def _preview_look_directions_blocking(self, directions: list[str]) -> None:
         if self._normalized_layout_mode() != "maze":
-            return
-        if self.look_preview_delay_ms <= 0:
             return
         if not directions:
             return
@@ -12869,7 +19562,7 @@ class AIAssistantApp:
         self._clear_working_memory_look_sweep(keep_recent=False)
         self.working_memory_look_sweep_step = self.memory_step_index
         done = threading.Event()
-        delay_ms = max(20, self.look_preview_delay_ms)
+        delay_ms = max(0, int(self.look_preview_delay_ms))
 
         def run_preview(index: int) -> None:
             if index >= len(directions):
@@ -12888,17 +19581,23 @@ class AIAssistantApp:
                 radius=1,
                 facing=self.player_facing,
             )
+            look_spatial_index = self._spatial_master_index(current_cell=(look_row, look_col))
             self.working_memory_active = {
                 "signature": look_signature,
                 "ascii": look_ascii,
                 "player_cell": str((look_row, look_col)),
+                "spatial_context_key": str(look_spatial_index.get("context_key", "") or ""),
+                "spatial_zone": str(look_spatial_index.get("zone", "z?") or "z?"),
+                "sequence_motif": str(look_spatial_index.get("sequence_motif", "none") or "none"),
+                "affect_valence_bucket": int(look_spatial_index.get("affect_valence_bucket", 1) or 1),
+                "affect_arousal_bucket": int(look_spatial_index.get("affect_arousal_bucket", 1) or 1),
             }
             self._capture_working_memory_look_snapshot(self.player_facing)
             self._refresh_game_state()
             self.root.after(delay_ms, lambda: run_preview(index + 1))
 
         self.root.after(0, lambda: run_preview(0))
-        timeout_s = max(1.0, (len(directions) * delay_ms) / 1000.0 + 0.5)
+        timeout_s = max(1.0, (len(directions) * max(20, delay_ms)) / 1000.0 + 0.5)
         done.wait(timeout=timeout_s)
 
     def _draw_fov_overlay(self, player_row: int, player_col: int) -> None:
@@ -13005,9 +19704,169 @@ class AIAssistantApp:
         if hasattr(self, "player"):
             self.game_canvas.tag_raise(self.player)
 
+    def _draw_machine_vision_cellmap_overlay(self) -> None:
+        self.game_canvas.delete("vision_grid_pred")
+        if self._normalized_layout_mode() != "maze":
+            return
+        if not self._machine_vision_enabled():
+            return
+        if not self.machine_vision_cellmap_init_enable:
+            return
+        if not self.machine_vision_cellmap_overlay_enable:
+            return
+        if not self.machine_vision_cellmap_predictions:
+            return
+
+        inset = max(1, int(self.cell_size * 0.14))
+        for row in range(self.grid_cells):
+            for col in range(self.grid_cells):
+                record = self.machine_vision_cellmap_predictions.get((row, col))
+                if not isinstance(record, dict):
+                    continue
+
+                label = str(record.get("predicted_label", "open") or "open")
+                confidence = float(record.get("confidence", 0.0) or 0.0)
+                confidence_bucket = 0
+                if confidence >= 0.9:
+                    confidence_bucket = 2
+                elif confidence >= 0.75:
+                    confidence_bucket = 1
+
+                if label == "blocked":
+                    outline_palette = ["#b98787", "#a45f5f", "#8b3f3f"]
+                    text_color = "#4d1f1f"
+                    text_prefix = "B"
+                else:
+                    outline_palette = ["#6d92b0", "#4f7ca0", "#2f638a"]
+                    text_color = "#17354d"
+                    text_prefix = "O"
+
+                outline = outline_palette[confidence_bucket]
+                x1 = col * self.cell_size + inset
+                y1 = row * self.cell_size + inset
+                x2 = (col + 1) * self.cell_size - inset
+                y2 = (row + 1) * self.cell_size - inset
+
+                self.game_canvas.create_rectangle(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    fill="",
+                    outline=outline,
+                    width=2,
+                    tags="vision_grid_pred",
+                )
+
+                if self.machine_vision_cellmap_overlay_show_text:
+                    label_text = f"{text_prefix}{int(round(confidence * 100))}"
+                    self.game_canvas.create_text(
+                        (x1 + x2) / 2,
+                        (y1 + y2) / 2,
+                        text=label_text,
+                        fill=text_color,
+                        font=("Helvetica", 6, "bold"),
+                        tags="vision_grid_pred",
+                    )
+
+        self.game_canvas.tag_raise("vision_grid_pred")
+        if hasattr(self, "player"):
+            self.game_canvas.tag_raise(self.player)
+        if hasattr(self, "target"):
+            self.game_canvas.tag_raise(self.target)
+        if hasattr(self, "start_marker"):
+            self.game_canvas.tag_raise(self.start_marker)
+        if hasattr(self, "start_label"):
+            self.game_canvas.tag_raise(self.start_label)
+        if hasattr(self, "end_label"):
+            self.game_canvas.tag_raise(self.end_label)
+
+    def _draw_machine_vision_route_overlay(self) -> None:
+        self.game_canvas.delete("vision_route")
+        if self._normalized_layout_mode() != "maze":
+            return
+        if not self._mv_route_mode_active():
+            return
+
+        path_cells, route_note = self._mv_route_planning_overlay_path()
+        if not path_cells:
+            return
+
+        points = [self._cell_center(cell) for cell in path_cells]
+        if len(points) >= 2:
+            for idx in range(1, len(points)):
+                x1, y1 = points[idx - 1]
+                x2, y2 = points[idx]
+                self.game_canvas.create_line(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    fill="#1aa1b5",
+                    width=4,
+                    capstyle=tk.ROUND,
+                    joinstyle=tk.ROUND,
+                    tags="vision_route",
+                )
+
+        marker_radius = max(2, int(self.cell_size * 0.12))
+        for idx, (cx, cy) in enumerate(points):
+            if idx == 0:
+                fill = "#1aa1b5"
+                outline = "#0d5f6b"
+            elif idx == len(points) - 1:
+                fill = "#23a55a"
+                outline = "#165f35"
+            else:
+                fill = "#7ad8e5"
+                outline = "#1a9caf"
+            self.game_canvas.create_oval(
+                cx - marker_radius,
+                cy - marker_radius,
+                cx + marker_radius,
+                cy + marker_radius,
+                fill=fill,
+                outline=outline,
+                width=1,
+                tags="vision_route",
+            )
+
+        self.game_canvas.create_text(
+            6,
+            6,
+            anchor=tk.NW,
+            text=f"MV ROUTE len={max(0, len(path_cells) - 1)}",
+            fill="#0e5f6c",
+            font=("Helvetica", 8, "bold"),
+            tags="vision_route",
+        )
+        self.game_canvas.create_text(
+            6,
+            18,
+            anchor=tk.NW,
+            text=str(route_note),
+            fill="#13717f",
+            font=("Helvetica", 7),
+            tags="vision_route",
+        )
+
+        self.game_canvas.tag_raise("vision_route")
+        if hasattr(self, "player"):
+            self.game_canvas.tag_raise(self.player)
+        if hasattr(self, "target"):
+            self.game_canvas.tag_raise(self.target)
+        if hasattr(self, "start_marker"):
+            self.game_canvas.tag_raise(self.start_marker)
+        if hasattr(self, "start_label"):
+            self.game_canvas.tag_raise(self.start_label)
+        if hasattr(self, "end_label"):
+            self.game_canvas.tag_raise(self.end_label)
+
     def _draw_machine_vision_prediction_overlay(self, player_row: int, player_col: int) -> None:
         self.game_canvas.delete("vision_pred")
         if self._normalized_layout_mode() != "maze":
+            return
+        if not self._machine_vision_enabled():
             return
         if not self.machine_vision_player_localization_enable:
             return
@@ -13072,6 +19931,8 @@ class AIAssistantApp:
         _ = (player_row, player_col)
         self.game_canvas.delete("vision_exit_pred")
         if self._normalized_layout_mode() != "maze":
+            return
+        if not self._machine_vision_enabled():
             return
         if not self.machine_vision_exit_localization_enable:
             return
@@ -13873,6 +20734,23 @@ class AIAssistantApp:
             f"{self._normalized_maze_difficulty()}, algo={self.current_maze_algorithm})"
         )
 
+    def _randomize_maze_start_number(self) -> None:
+        if self._normalized_layout_mode() != "maze":
+            self.status_var.set("Random Start is available in maze mode only")
+            return
+
+        digit_count = random.randint(2, 6)
+        lower_bound = 10 ** (digit_count - 1)
+        upper_bound = (10 ** digit_count) - 1
+        random_start = random.randint(lower_bound, upper_bound)
+        self.maze_map_start_var.set(str(random_start))
+        self._set_maze_start_number()
+        self.status_var.set(
+            "Random Start applied "
+            f"({digit_count} digits, map_id={self._current_maze_map_id()}, "
+            f"{self._normalized_maze_difficulty()}, algo={self.current_maze_algorithm})"
+        )
+
     def _on_layout_settings_changed(self, _value: str | None = None) -> None:
         self.pending_agent_moves = []
         self.agent_move_animation_active = False
@@ -13886,11 +20764,62 @@ class AIAssistantApp:
         self._save_window_geometry()
         if mode == "maze":
             self._sync_maze_start_number_to_current()
+            route_suffix = " [MV route mode ON]" if self._mv_route_mode_active() else ""
+            mv_suffix = " [MV OFF]" if not self._machine_vision_enabled() else ""
             self.status_var.set(
-                f"Mode set to maze ({difficulty}, {self.grid_cells}x{self.grid_cells}, algo={self.current_maze_algorithm})"
+                f"Mode set to maze ({difficulty}, {self.grid_cells}x{self.grid_cells}, algo={self.current_maze_algorithm}){route_suffix}{mv_suffix}"
             )
         else:
-            self.status_var.set(f"Mode set to grid ({self.grid_cells}x{self.grid_cells})")
+            grid_note = " [MV route mode ON for maze]" if self.mv_route_planning_mode_enable else ""
+            mv_note = " [MV OFF]" if not self._machine_vision_enabled() else ""
+            self.status_var.set(f"Mode set to grid ({self.grid_cells}x{self.grid_cells}){grid_note}{mv_note}")
+
+    def _sync_machine_vision_toggle_controls(self) -> None:
+        if not self._machine_vision_enabled():
+            self.mv_route_planning_mode_enable = False
+            if self.mv_route_planning_mode_var.get():
+                self.mv_route_planning_mode_var.set(False)
+        if hasattr(self, "mv_route_mode_checkbutton"):
+            self.mv_route_mode_checkbutton.config(state=(tk.NORMAL if self._machine_vision_enabled() else tk.DISABLED))
+        if not self._machine_vision_enabled():
+            self._mv_preplan_last_status = "disabled:mv-master-off"
+        elif self._mv_preplan_last_status == "disabled:mv-master-off":
+            self._mv_preplan_last_status = "idle"
+
+    def _on_machine_vision_master_toggled(self) -> None:
+        enabled = bool(self.machine_vision_master_enable_var.get())
+        self.machine_vision_master_enable = enabled
+        self._sync_machine_vision_toggle_controls()
+        self._save_window_geometry()
+        self._refresh_game_state()
+        if self._normalized_layout_mode() == "maze":
+            if enabled:
+                self.status_var.set("Machine vision enabled")
+            else:
+                self.status_var.set("Machine vision disabled (all MV routing/hints/overlays off; route mode cleared)")
+        else:
+            if enabled:
+                self.status_var.set("Machine vision enabled (applies when mode is maze)")
+            else:
+                self.status_var.set("Machine vision disabled")
+
+    def _on_mv_route_mode_toggled(self) -> None:
+        enabled = bool(self.mv_route_planning_mode_var.get())
+        self.mv_route_planning_mode_enable = enabled
+        self._sync_machine_vision_toggle_controls()
+        self._save_window_geometry()
+        if self._normalized_layout_mode() == "maze":
+            if enabled and (not self._machine_vision_enabled()):
+                self.status_var.set("MV route planning mode queued (enable MV to activate)")
+            elif enabled:
+                self.status_var.set("MV route planning mode enabled (beam-equivalent objective routing disabled)")
+            else:
+                self.status_var.set("MV route planning mode disabled (beam-equivalent objective routing enabled)")
+        else:
+            if enabled:
+                self.status_var.set("MV route planning mode enabled (applies when mode is maze)")
+            else:
+                self.status_var.set("MV route planning mode disabled")
 
     def _spawn_target(self) -> None:
         self._clear_sticky_objective_path()
@@ -13969,6 +20898,11 @@ class AIAssistantApp:
         self.episode_dead_end_entrances = set()
         self.episode_dead_end_tip_cells = set()
         self.episode_maze_attempt_count = 1
+        self.step_limit_reset_count = 0
+        self.same_maze_retry_count = 0
+        self._same_maze_retry_last_step = -1
+        self._same_maze_retry_frontier_target = None
+        self._maze_timeout_reset_pulse = False
         if self._normalized_layout_mode() == "maze":
             self._reset_organism_control_state()
         if self._normalized_layout_mode() == "maze":
@@ -13979,6 +20913,7 @@ class AIAssistantApp:
         self.taboo_transitions.clear()
         self.trap_transition_memory.clear()
         self.trap_cell_memory.clear()
+        self._clear_spatial_memory_runtime()
         self.episode_visited_cells = {(player_row, player_col): 1}
         self.prev_player_cell = (player_row, player_col)
         self.prev_prev_player_cell = (player_row, player_col)
@@ -13991,12 +20926,20 @@ class AIAssistantApp:
             x + self.target_radius,
             y + self.target_radius,
         )
-        self._store_structural_memory_snapshot()
+        self._ensure_machine_vision_cellmap_for_current_maze()
+        self._store_structural_memory_snapshot(force=True)
         self._update_start_end_markers()
         # Immediately refresh state so models always receive latest coordinates after every target move.
         self._refresh_game_state()
 
-    def _move_player(self, dx: int, dy: int) -> None:
+    def _move_player(
+        self,
+        dx: int,
+        dy: int,
+        *,
+        input_source: str = "system",
+        input_key: str = "",
+    ) -> None:
         x1, y1, x2, y2 = self.game_canvas.coords(self.player)
         old_cell = self.current_player_cell
         move_dir = ""
@@ -14016,13 +20959,22 @@ class AIAssistantApp:
         new_cell = self._cell_from_center(new_center_x, new_center_y)
 
         if self._is_blocked_cell(new_cell):
+            blocked_tags = ["blocked_cell"]
+            if input_source == "keyboard":
+                blocked_tags.append("manual_keyboard")
             self._record_action_outcome_memory(
                 action_taken=f"MOVE_{move_dir or 'UNKNOWN'}",
                 outcome_value=-8.0,
                 reward_signal=0.0,
                 penalty_signal=8.0,
-                reason_tags=["blocked_cell"],
-                details={"reason": "blocked_cell", "from_cell": old_cell, "to_cell": new_cell},
+                reason_tags=blocked_tags,
+                details={
+                    "reason": "blocked_cell",
+                    "from_cell": old_cell,
+                    "to_cell": new_cell,
+                    "input_source": input_source,
+                    "input_key": input_key,
+                },
                 player_cell=old_cell,
             )
             self._refresh_game_state()
@@ -14031,6 +20983,7 @@ class AIAssistantApp:
         if new_x1 != x1 or new_y1 != y1:
             self.episode_steps += 1
             self.memory_step_index += 1
+            self._maybe_run_sleep_cycle()
             if dy < 0:
                 self._set_player_facing_from_move("UP")
             elif dy > 0:
@@ -14139,6 +21092,7 @@ class AIAssistantApp:
                     self.taboo_transitions.clear()
                     self.trap_transition_memory.clear()
                     self.trap_cell_memory.clear()
+                    self._clear_spatial_memory_runtime()
                 self.episode_steps = 0
                 self.episode_revisit_steps = 0
                 self.episode_backtracks = 0
@@ -14233,20 +21187,36 @@ class AIAssistantApp:
             completed, remaining = self._goal_session_progress()
             self.auto_goal_hits_remaining = remaining
 
+            sleep_cycle_suffix = ""
+            if (
+                self._normalized_layout_mode() == "maze"
+                and self.sleep_cycle_enable
+                and self.sleep_cycle_auto_after_maze_completion
+            ):
+                sleep_summary = self._run_sleep_cycle(trigger="post-maze-completion", auto_mode=True)
+                sleep_cycle_suffix = (
+                    " | sleep cycle: "
+                    f"usage_reinforce_stm={sleep_summary.get('usage_reinforced_stm', 0)} "
+                    f"usage_pruned_stm={sleep_summary.get('usage_pruned_stm', 0)} "
+                    f"stm_pruned={sleep_summary.get('stm_pruned', 0)}"
+                )
+
             if self.goal_session_active and remaining > 0:
                 self.status_var.set(
                     "Auto-run: "
                     f"{remaining} target hits remaining "
                     f"(completed {completed}/{self.goal_session_target_hits}, "
                     f"last maze attempts={self.last_maze_solve_attempts})"
+                    f"{sleep_cycle_suffix}"
                 )
             elif self.goal_session_active and remaining == 0:
                 self.status_var.set(
                     f"Auto-run complete (last maze attempts={self.last_maze_solve_attempts})"
+                    f"{sleep_cycle_suffix}"
                 )
             else:
                 self.status_var.set(
-                    f"Maze solved in {self.last_maze_solve_attempts} attempt(s)"
+                    f"Maze solved in {self.last_maze_solve_attempts} attempt(s){sleep_cycle_suffix}"
                 )
             return True
         return False
@@ -14393,6 +21363,10 @@ class AIAssistantApp:
             agent_output = "Stepwise mode active: single-move proposals + logic move evaluation per step."
             if game_navigation_request:
                 step_session = self._run_stepwise_goal_session(prompt, plan, assistant_instructions)
+                self._record_last_navigation_session(
+                    requested_count,
+                    int(step_session.get("completed", 0) or 0),
+                )
 
             game_state = self._get_game_state_snapshot()
             completed, remaining = self._goal_session_progress()

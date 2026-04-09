@@ -6,3 +6,6 @@
 maze_memory.sqlite3
 __pycache__/
 *.pyc
+/Log Dump/
+/Log Dump OLD/
+/Snapshots/

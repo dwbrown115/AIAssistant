@@ -84,13 +84,49 @@ MAZE_MAP_DOUBT_STALL_THRESHOLD=2
 MAZE_MAP_DOUBT_COOLDOWN_STEPS=8
 # Optional: stuck-loop detector + temporary re-exploration mode when movement repeats without progress.
 MAZE_STUCK_REEXPLORE_ENABLE=1
-MAZE_STUCK_REPEAT_THRESHOLD=3
-MAZE_STUCK_NO_PROGRESS_THRESHOLD=4
-MAZE_STUCK_WINDOW=18
-MAZE_STUCK_REEXPLORE_COOLDOWN_STEPS=10
+MAZE_STUCK_REPEAT_THRESHOLD=4
+MAZE_STUCK_NO_PROGRESS_THRESHOLD=6
+MAZE_STUCK_WINDOW=14
+MAZE_STUCK_REEXPLORE_COOLDOWN_STEPS=4
 # Optional: stuck-mode prediction gate + scaling for low-confidence branch re-checks.
 MAZE_STUCK_PREDICTION_CONF_FLOOR=0.08
 MAZE_STUCK_PREDICTION_BIAS_SCALE=0.35
+# Optional: unresolved micro-frontier stall detector (tiny frontier pocket + no-progress streak)
+# that relaxes guard hold behavior to break local loop replay.
+MICRO_FRONTIER_STALL_ENABLE=1
+MICRO_FRONTIER_STALL_WINDOW_STEPS=4
+MICRO_FRONTIER_STALL_UNKNOWN_MAX=2
+MICRO_FRONTIER_STALL_FRONTIER_MAX=3
+# Optional: include tiny unresolved closure pockets (unknown>0, frontier=0)
+# in micro-stall detection so near-resolved deadlock loops still trigger guards.
+MICRO_FRONTIER_STALL_INCLUDE_CLOSURE_POCKETS=1
+MICRO_FRONTIER_STALL_NO_PROGRESS_MIN=8
+MICRO_FRONTIER_STALL_REPEAT_MIN=1
+MICRO_FRONTIER_STALL_ESCAPE_NO_PROGRESS_MIN=18
+MICRO_FRONTIER_STALL_ESCAPE_REPEAT_MIN=2
+MICRO_FRONTIER_STALL_ESCAPE_SCORE_MARGIN=24
+MICRO_FRONTIER_STALL_ESCAPE_EMERGENCY_NO_PROGRESS_DELTA=8
+# Optional: hard cap for prolonged tiny-pocket replay (for example unknown=1/frontier<=1);
+# triggers one forced disambiguation detour, then rearms after cooldown.
+MICRO_FRONTIER_STALL_DISAMBIGUATION_ENABLE=1
+MICRO_FRONTIER_STALL_DISAMBIGUATION_NO_PROGRESS_CAP=32
+MICRO_FRONTIER_STALL_DISAMBIGUATION_STREAK_CAP=10
+MICRO_FRONTIER_STALL_DISAMBIGUATION_MIN_REPEAT=2
+MICRO_FRONTIER_STALL_DISAMBIGUATION_COOLDOWN_STEPS=18
+# Optional: score shaping while micro-frontier stall is active.
+# Escape bonus favors moves that expose uncertainty/frontier signal;
+# loop penalty suppresses fully-known non-progress replays in the same pocket.
+MICRO_FRONTIER_STALL_SCORE_ESCAPE_BONUS_SCALE=1.0
+MICRO_FRONTIER_STALL_SCORE_LOOP_PENALTY_SCALE=1.0
+MICRO_FRONTIER_STALL_SCORE_MAX_BONUS=54
+MICRO_FRONTIER_STALL_SCORE_MAX_PENALTY=46
+# Optional: macro no-progress escape guard for unresolved non-micro loop states.
+LONG_LOOP_ESCAPE_ENABLE=1
+LONG_LOOP_ESCAPE_NO_PROGRESS_MIN=48
+LONG_LOOP_ESCAPE_REPEAT_MIN=1
+LONG_LOOP_ESCAPE_SCORE_MARGIN=36
+LONG_LOOP_ESCAPE_MIN_UNKNOWN=3
+LONG_LOOP_ESCAPE_EMERGENCY_NO_PROGRESS_DELTA=16
 # Optional: extra transition taboo pressure during stuck cooldown only.
 MAZE_STUCK_TRANSITION_REPEAT_BOOST=24.0
 MAZE_STUCK_TRANSITION_REVERSE_BOOST=34.0
@@ -184,11 +220,85 @@ BIO_NAV_DEAD_END_PREDICTIVE_PENALTY=16
 BIO_NAV_LOOP_RISK_PENALTY=12
 # Endocrine system (slow global modulators)
 ENDOCRINE_ENABLE=1
+# New hormone decays
+H_CURIOSITY_DECAY=0.97
+H_CAUTION_DECAY=0.93
+H_PERSISTENCE_DECAY=0.965
+H_MV_TRUST_DECAY=0.96
+H_BOREDOM_DECAY=0.985
+H_CONFIDENCE_DECAY=0.96
+# Optional: anti-saturation damping near hormone bounds (prevents long-run lock-in at 0/1 edges).
+HORMONE_SATURATION_HIGH_START=0.86
+HORMONE_SATURATION_LOW_END=0.14
+HORMONE_SATURATION_MIN_SCALE=0.30
+# Optional: mild recovery pulse when caution+boredom are both persistently high.
+HORMONE_DISTRESS_RECOVERY_ENABLE=1
+HORMONE_DISTRESS_RECOVERY_THRESHOLD=0.86
+HORMONE_DISTRESS_RECOVERY_STEP=0.016
+# Optional: trigger stronger recovery when exploration_drive is deeply negative.
+HORMONE_DISTRESS_EXPLORATION_DRIVE_THRESHOLD=-0.82
+HORMONE_DISTRESS_DRIVE_RECOVERY_SCALE=1.55
+# Optional: scales endocrine penalty updates during repeated terminal/boxed ping-pong churn.
+HORMONE_TRAP_CHURN_PENALTY_SCALE=0.35
+# Optional: reduce endocrine penalty shock from terminal/dead-end punishments.
+HORMONE_DEAD_END_PENALTY_SCALE=0.30
+HORMONE_TERMINAL_BOXED_PENALTY_SCALE=0.45
+HORMONE_REPEAT_LOOP_PENALTY_SCALE=0.55
+HORMONE_OUTCOME_PENALTY_CLIP=260
+# Optional: keep persistence from over-locking during deep distress loops.
+HORMONE_DISTRESS_PERSISTENCE_CAP=0.42
+HORMONE_DISTRESS_PERSISTENCE_RELIEF_STEP=0.024
+# New hormone scoring weights
+HORMONE_CAUTION_DANGER_WEIGHT=18.0
+HORMONE_CURIOSITY_NOVELTY_WEIGHT=14.0
+HORMONE_BOREDOM_REPEAT_WEIGHT=10.0
+HORMONE_CONFIDENCE_RISK_BONUS=8.0
+HORMONE_MOMENTUM_BONUS_WEIGHT=6.0
+HORMONE_MV_TRUST_BONUS_WEIGHT=9.0
+# Bridge from legacy endocrine levers to hormone-native tuning (0.0=new only, 1.0=legacy only)
+HORMONE_LEGACY_WEIGHT_BLEND=0.35
+# Optional staged legacy shutoff (least impact -> highest impact):
+# 0=all legacy blend groups allowed
+# 1=disable legacy confidence+momentum group
+# 2=also disable legacy boredom/repeat-pressure group
+# 3=also disable legacy curiosity/exploration group
+# 4=also disable legacy caution/risk group (full hormone-native weights)
+# Objective-override weakening follows the same batch ramp:
+# batch 1->3 progressively suppress unresolved exit-lock overrides.
+# batch 4 fully suppresses unresolved objective overrides until uncertainty clears.
+HORMONE_LEGACY_BATCH_LEVEL=3
+# Optional: objective override weakening phase (0..4), decoupled from legacy hormone batch.
+OBJECTIVE_OVERRIDE_PHASE_LEVEL=4
+# Optional: staged attenuation for hardcoded planner override channels (0..4).
+# 0=legacy behavior; 1=disable frontier-lock forced routing;
+# 2=also disable persistent-frontier forced routing;
+# 3=also disable verification-priority forced routing;
+# 4=also disable plan-hold override (accept valid model candidate).
+HARD_OVERRIDE_PHASE_LEVEL=1
+# Optional: consolidated override phase (0..4). When set, this single value
+# drives both OBJECTIVE_OVERRIDE_PHASE_LEVEL and HARD_OVERRIDE_PHASE_LEVEL.
+CONSOLIDATED_OVERRIDE_PHASE_LEVEL=2
+# Optional: Phase-2 soft migration switch. When enabled, frontier-lock,
+# persistent-frontier, verification-priority, and plan-hold channels
+# contribute weighted score influence instead of hard forced-routing returns.
+PHASE2_SOFT_OVERRIDE_ENABLE=1
+PHASE2_FRONTIER_LOCK_INFLUENCE=22
+PHASE2_PERSISTENT_FRONTIER_INFLUENCE=16
+PHASE2_VERIFICATION_INFLUENCE=14
+PHASE2_PLAN_HOLD_INFLUENCE=12
+# Optional: hormone-driven automatic suppression of legacy batch-1/2 channels
+# (confidence+momentum and boredom/repeat-pressure) under loop-pressure states.
+HORMONE_DYNAMIC_LEGACY_ENABLE=1
+HORMONE_DYNAMIC_LEGACY_LOOP_CENTER=0.10
+HORMONE_DYNAMIC_LEGACY_LOOP_GAIN=2.8
+HORMONE_DYNAMIC_LEGACY_BATCH12_SUPPRESSION_MAX=1.0
+# Deprecated legacy endocrine decays (kept for transition)
 HORMONE_STRESS_DECAY=0.90
 HORMONE_CURIOSITY_DECAY=0.97
 HORMONE_CONFIDENCE_DECAY=0.96
 HORMONE_FATIGUE_DECAY=0.98
 HORMONE_REWARD_DECAY=0.95
+# Deprecated legacy endocrine scoring knobs (still blended while migrating)
 ENDOCRINE_STRESS_DANGER_WEIGHT=18.0
 ENDOCRINE_CURIOSITY_NOVELTY_WEIGHT=14.0
 ENDOCRINE_FATIGUE_REPEAT_WEIGHT=10.0
@@ -233,6 +343,12 @@ TERMINAL_END_GUARD_MARGIN=8
 TERMINAL_END_HARD_AVOID=1
 # Optional: additive penalty for visibly boxed corridors (walls on both sides) with no visible exit.
 BOXED_CORRIDOR_NO_EXIT_PENALTY=36
+# Optional: replay-memory guard to avoid repeatedly choosing recently catastrophic boxed/terminal moves.
+MEMORY_RISK_REPLAY_GUARD_ENABLE=1
+MEMORY_RISK_REPLAY_GUARD_MIN_REPEAT=2
+MEMORY_RISK_REPLAY_GUARD_DECAY_THRESHOLD=120.0
+MEMORY_RISK_REPLAY_GUARD_SCORE_MARGIN=90
+MEMORY_RISK_REPLAY_GUARD_MAX_DETOUR=1
 # Optional: reward (score reduction) when the exit is visibly detected along the looked corridor.
 VISIBLE_EXIT_CORRIDOR_REWARD=42
 # Optional: enable pseudo-3D first-person visualizer panel (`1`=on, `0`=off).
@@ -265,6 +381,51 @@ STM_ACCESS_UNUSED_PRUNE_MIN_AGE_STEPS=24
 STM_ACCESS_UNUSED_PRUNE_MAX_ROWS=1
 # Optional: periodically re-sample familiar signatures into STM to avoid over-pruning loops.
 STM_FAMILIAR_RESAMPLE_INTERVAL=12
+# Optional: retained memory-event history capacity in RAM (higher preserves longer run traces).
+MEMORY_EVENT_LOG_MAXLEN=6000
+# Optional: minimum movement-step gap between structural-memory snapshot writes.
+STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS=6
+# Optional: max rows retained in `maze_structural_memory` (0 disables cap).
+STRUCTURAL_MEMORY_MAX_ROWS=12000
+# Optional: minimum movement-step gap for automatic Memory Viewer refreshes.
+MEMORY_VIEWER_REFRESH_INTERVAL_STEPS=8
+# Optional: sleep-cycle maintenance for long runs (prune/compress + usage reinforcement).
+SLEEP_CYCLE_ENABLE=1
+# Optional: run automatic sleep cycle every N movement steps (0 disables periodic auto cycle).
+SLEEP_CYCLE_AUTO_INTERVAL_STEPS=0
+# Optional: run an automatic sleep cycle each time a maze is completed.
+SLEEP_CYCLE_AUTO_AFTER_MAZE_COMPLETION=1
+# Optional: run an automatic sleep cycle after a requested run set completes successfully.
+SLEEP_CYCLE_AUTO_AFTER_RUN_SET=1
+# Optional: run an automatic sleep cycle immediately after each Log Dump write.
+SLEEP_CYCLE_AUTO_AFTER_LOG_DUMP=1
+# Optional: hormone-state pruning during sleep cycle (extra decay + pull toward homeostasis).
+SLEEP_CYCLE_HORMONE_PRUNE_ENABLE=1
+SLEEP_CYCLE_HORMONE_DECAY_PASSES=2
+SLEEP_CYCLE_HORMONE_PULL_STRENGTH=0.08
+SLEEP_CYCLE_HORMONE_EXTREME_THRESHOLD=0.95
+# Optional: usage-based reinforcement boost applied during sleep cycle.
+SLEEP_CYCLE_USAGE_BOOST=0.04
+SLEEP_CYCLE_USAGE_RECENT_WINDOW_STEPS=96
+# Optional: keep tail lengths for volatile in-RAM event logs after sleep cycle compaction.
+SLEEP_CYCLE_MEMORY_EVENT_KEEP=1400
+SLEEP_CYCLE_ENDOCRINE_EVENT_KEEP=240
+# Optional: cap high-churn DB tables to recent rows during sleep cycle (0 disables table pruning).
+SLEEP_CYCLE_ACTION_OUTCOME_KEEP_ROWS=120000
+SLEEP_CYCLE_PREDICTION_KEEP_ROWS=160000
+# Optional: run SQLite VACUUM after sleep-cycle pruning (off by default to avoid UI pauses).
+SLEEP_CYCLE_VACUUM_ON_MANUAL=0
+SLEEP_CYCLE_VACUUM_ON_AUTO=0
+# Optional: export limits for Log Dump exports (0 = no truncation/full batch export).
+MEMORY_EXPORT_SECTION_LIMIT=300
+MEMORY_EXPORT_LOG_LIMIT=2000
+MEMORY_EXPORT_DEBUG_LIMIT=3000
+MEMORY_EXPORT_ASCII_MAX_LINES=220
+# Optional: when enabled, strips LOOK SWEEP sections from exported ASCII blocks.
+MEMORY_EXPORT_STRIP_LOOK_SECTIONS=1
+# Optional: when enabled, ASCII snapshots are cropped to visible/observed areas
+# and hidden cells are omitted from dense '?' output.
+MAZE_ASCII_VISIBLE_ONLY=0
 # Optional: number of decision steps to keep recent look-sweep snapshots in working memory context.
 WORKING_MEMORY_LOOK_RETENTION_STEPS=10
 # Optional: cap for retained look-sweep entries in short-term working memory context.
@@ -316,6 +477,16 @@ VISION_PROGRESS_CREDIT_MIN_CLEAR_RUN=1
 LONG_TRAP_MEMORY_PENALTY_WEIGHT=18.0
 LONG_TRAP_MEMORY_MAX_PENALTY=180
 LONG_TRAP_MEMORY_MAX_HITS=8
+# Optional: learned hazard preparedness from recent same-origin action outcomes.
+HAZARD_PREPAREDNESS_ENABLE=1
+HAZARD_PREPAREDNESS_WINDOW=28
+HAZARD_PREPAREDNESS_MIN_SAMPLES=2
+HAZARD_PREPAREDNESS_RANK_DECAY=0.7
+HAZARD_PREPAREDNESS_PENALTY_SCALE=0.16
+HAZARD_PREPAREDNESS_MAX_PENALTY=120
+HAZARD_PREPAREDNESS_REWARD_RELIEF_SCALE=0.85
+HAZARD_PREPAREDNESS_RISK_HIT_WEIGHT=16.0
+HAZARD_PREPAREDNESS_SAFE_HIT_WEIGHT=12.0
 # Optional: feature vector size used for cause-effect similarity retrieval.
 CAUSE_EFFECT_VECTOR_DIM=24
 # Optional: top-k similar cause-effect memories retrieved per move scoring.
@@ -346,12 +517,27 @@ MACHINE_VISION_UNSEEN_TEMPERATURE=1.35
 MACHINE_VISION_UNSEEN_RANDOM_EXPLORE_CHANCE=0.2
 # Optional: feed MV self/exit coordinate hints into kernel scoring as soft, confidence-gated bias.
 MACHINE_VISION_KERNEL_HINT_ENABLE=1
-MACHINE_VISION_KERNEL_HINT_MIN_CONF=0.08
-MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT=3.0
+MACHINE_VISION_KERNEL_HINT_MIN_CONF=0.05
+MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT=10.0
+# Optional: treat high-confidence fresh MV exit localization as beam-sight-equivalent objective evidence.
+MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF=0.9
+MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR=1
+# Optional: master runtime switch for all machine-vision subsystems (localization, hints, preplan, overlays, MV routing).
+MACHINE_VISION_ENABLE=1
+# Optional: when enabled, disable MV beam-equivalent objective mode and force
+# kernel route-planning from maze start -> exit using MV cellmap predictions.
+MV_ROUTE_PLANNING_MODE_ENABLE=0
+# Optional: before each maze decision, wait for fresh MV localization and run a 4-direction look sweep.
+MV_PREPLAN_SWEEP_ENABLE=1
+MV_PREPLAN_REQUIRE_EXIT=1
+MV_PREPLAN_SELF_MIN_CONF=0.9
+MV_PREPLAN_EXIT_MIN_CONF=0.9
+MV_PREPLAN_MAX_SELF_ERROR=1
+MV_PREPLAN_ACQUIRE_MAX_SWEEPS=6
 # Optional: adaptive neural controller (online learner with growth/prune and persistent weights).
 ADAPTIVE_CONTROLLER_ENABLE=1
 # Optional: temporarily isolate adaptive learning from MV hint bias during early training.
-ADAPTIVE_DISABLE_MV_HINTS=1
+ADAPTIVE_DISABLE_MV_HINTS=0
 ADAPTIVE_SCORE_BLEND=28.0
 ADAPTIVE_MAX_SCORE_ADJUST=120
 ADAPTIVE_OUTCOME_SCALE=120.0
@@ -374,6 +560,12 @@ ADAPTIVE_REPLAY_ENABLE=1
 ADAPTIVE_REPLAY_BUFFER_SIZE=6000
 ADAPTIVE_REPLAY_BATCH=6
 ADAPTIVE_REPLAY_UPDATES=2
+# Optional: periodic GPT telemetry for adaptive weights + kernel progress.
+ADAPTIVE_PROGRESS_REPORT_ENABLE=1
+ADAPTIVE_PROGRESS_REPORT_MODEL=gpt-4.1-mini
+ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS=180
+ADAPTIVE_PROGRESS_AUTO_TUNE=1
+ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS=260
 # Optional: blend weight for cross-maze priors when predicting unseen cells (0..1).
 PREDICTION_PRIOR_BLEND=0.35
 # Optional: score reward when an unseen-structure prediction is correct.
@@ -441,6 +633,7 @@ Game controls:
 - Use Arrow keys or `W/A/S/D` to move the square.
 - Use `Mode` to switch between `grid` and `maze` training games.
 - In maze mode, use `Difficulty` (`easy`/`medium`/`hard`) for predictable algorithmic layouts.
+- Use `MV Enable` to turn machine vision on/off at runtime (disables MV localization/hints/preplan/overlays/routing when off, and clears MV Route Mode).
 - Mode and Difficulty switching is app-based and persisted between launches.
 - In maze mode, model perception is directional-FOV based (biological-style): wider forward view, no vision behind, and blocker-aware occlusion.
 - A dedicated pseudo-3D visualizer now renders a first-person corridor preview beside the grid using the same facing + visibility rules.
@@ -485,9 +678,16 @@ Game controls:
 - In maze mode, if `MAZE_STEP_LIMIT_RESET_ENABLE=1` and step count reaches the map limit (`shortest path + safety margin`), the player is returned to start.
 - Use `New Layout` to regenerate the current mode layout; in maze mode, `map_id` stays absolute (it does not reset to `0`).
 - Use `Next Maze` (maze mode) to advance to the next deterministic maze in seed order.
-- Use `Start #` + `Set Start` (maze mode) to jump directly to a specific absolute deterministic `map_id`.
+- Use `Random #` (maze mode) to generate and immediately apply a random 2-6 digit `Start #` value (direct jump to that absolute deterministic `map_id`).
 - Use `Refresh Memory` in the Maze Memory Viewer to manually reload recent memory rows.
-- Use `Copy Memory + Logs` in the Maze Memory Viewer to copy the full memory export (working/STM/semantic/structural + memory logs + current pipeline debug) to clipboard.
+- Use `Log Dump` in the Maze Memory Viewer to write a full memory export file (working/STM/semantic/structural + memory logs + current pipeline debug) into `Log Dump/`.
+- Use `Export Snapshot` in the Maze Memory Viewer to save a portable snapshot zip containing persistent memory (`maze_memory.sqlite3`) and adaptive neural pathways (`adaptive_brain.json`) when available.
+- Use `Import Snapshot` to restore memory/neural state from snapshot files (`.zip` or legacy `.json`); you can also select an extracted `snapshot_manifest.json` directly, and the app will load sibling `maze_memory.sqlite3` / `adaptive_brain.json` files when present. Older snapshots are imported in compatibility mode and migrated to the current DB schema automatically.
+- Use `Sleep Cycle` in the Maze Memory Viewer to run maintenance (usage-based reinforcement + pruning/compaction of volatile logs and high-churn run tables).
+- Archive previous batches in `Log Dump OLD/`; keep active run outputs in `Log Dump/`.
+- Log dump filenames are auto-generated as `{maze_count}_{maze|mazes}_{difficulty}_{timestamp}.txt`.
+- Run a quick preflight gate on any dump with `python preflight_dump_gate.py "Log Dump/<file>.txt"` (`--strict` fails on warnings; `--profile relaxed` uses looser loop-pressure thresholds).
+- Preflight output now includes `behavior_screen` metrics to track learned-vs-hardcoded balance (`learned_only_rate`, `hardcoded_only_rate`, `mixed_rate`) plus `unresolved_objective_override_rate` so unresolved objective-lock overconfidence is surfaced as a warning. Phase 1 telemetry adds `phase1_telemetry_coverage`, `phase1_intervention_utility_win3`, and `phase1_penalty_delta_win3` so intervention utility can be monitored over short windows without changing planner policy.
 - Use `Reset Memory` in the Maze Memory Viewer to completely clear persistent memory layers and volatile memory/logs.
 - Use `Reset Score` to clear targets reached and reward totals.
 
@@ -510,7 +710,8 @@ Then open `http://127.0.0.1:5050`.
 - Maze-mode exit placement is deterministic per map identity (seed + difficulty + algorithm), so the same deterministic `map_id` resolves to the same exit cell across runs.
 - Layout recalls now support biological-style reconsolidation: each recall has a small configurable mutation chance (`LAYOUT_RECALL_MUTATION_CHANCE`), and the recalled block is written back as the latest memory version.
 - Reconsolidation mutation is now soft: it decays one recalled cell's recency metadata (`LAYOUT_RECALL_MUTATION_DECAY_STEPS`) instead of removing known open/wall occupancy from the recalled map.
-- Machine-vision localization training is available as side-channels (`MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE`, `MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE`): it predicts player and exit cell coordinates from local perception, the maze memory pipeline logs/grades exact-hit and Manhattan error accuracy, and the board renders yellow-green overlays for both (`MV` for player prediction, `MV-E` for exit prediction). Optional kernel-hint knobs (`MACHINE_VISION_KERNEL_HINT_ENABLE`, `MACHINE_VISION_KERNEL_HINT_MIN_CONF`, `MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT`) now let those MV coordinates act as a soft, source/confidence-gated exploration bias alongside normal sensory vision.
+- Machine-vision localization training is available as side-channels (`MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE`, `MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE`): it predicts player and exit cell coordinates from local perception, the maze memory pipeline logs/grades exact-hit and Manhattan error accuracy, and the board renders yellow-green overlays for both (`MV` for player prediction, `MV-E` for exit prediction). Optional kernel-hint knobs (`MACHINE_VISION_KERNEL_HINT_ENABLE`, `MACHINE_VISION_KERNEL_HINT_MIN_CONF`, `MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT`) let MV coordinates act as a soft, source/confidence-gated exploration bias, beam-equivalence knobs (`MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF`, `MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR`) let fresh high-confidence MV exit localization trigger objective routing similarly to visible beam/FOV exit evidence, MV preplan knobs (`MV_PREPLAN_SWEEP_ENABLE`, `MV_PREPLAN_REQUIRE_EXIT`, `MV_PREPLAN_SELF_MIN_CONF`, `MV_PREPLAN_EXIT_MIN_CONF`, `MV_PREPLAN_MAX_SELF_ERROR`, `MV_PREPLAN_ACQUIRE_MAX_SWEEPS`) enforce an active wait-for-MV loop that repeatedly runs 4-direction look sweeps before each maze planning step, and `MACHINE_VISION_ENABLE=0` acts as a master kill-switch for all MV runtime behavior.
+- MV route-planning mode toggle (`MV_ROUTE_PLANNING_MODE_ENABLE=1`) disables MV beam-equivalent objective mode and instead has the kernel plan a start-to-exit route directly from MV cellmap predictions (with rejoin behavior if the current cell is off the planned start-route).
 - Adaptive neural controller (`ADAPTIVE_CONTROLLER_ENABLE`) adds an online-learning score term over maze decisions, stores persistent weights in `adaptive_brain.json`, can grow/prune hidden units (`ADAPTIVE_HIDDEN_MIN`..`ADAPTIVE_HIDDEN_MAX`, growth/prune knobs), supports policy arbitration modes (`ADAPTIVE_POLICY_MODE=hybrid|adaptive_first`) with warmup/margin gates, uses replay-style updates (`ADAPTIVE_REPLAY_*`), and can temporarily isolate from MV hint bias with `ADAPTIVE_DISABLE_MV_HINTS=1` while bootstrapping transferable behavior.
 - STM now supports access-time stale pruning with a small probability (`STM_ACCESS_UNUSED_PRUNE_CHANCE`) so low-use entries can be gradually culled while memory is being accessed.
 - Cause-effect memory is also stored in `maze_memory.sqlite3` and shown in the Memory Viewer as `Cause-Effect Memory` entries.
@@ -530,14 +731,20 @@ Then open `http://127.0.0.1:5050`.
 - Structural loop-break env vars: `ESCAPE_BIAS_BONUS`, `FORCED_CORRIDOR_REENTRY_PENALTY`, `TRAP_CAUSE_EFFECT_PENALTY_SCALE`, `CYCLE_TABOO_THRESHOLD`, `CYCLE_TABOO_DURATION_STEPS`, `TERMINAL_CORRIDOR_HARD_VETO_PENALTY`, `HIGH_RISK_FRONTIER_OVERRIDE_BONUS` (shift from additive-only penalties toward taboo/veto and escape-favoring behavior in repeated trap contexts).
 - Branch-abandon mode env vars: `BRANCH_TIGHTENING_ABORT_THRESHOLD`, `BRANCH_TIGHTENING_ABORT_PENALTY`, `BRANCH_TIGHTENING_ESCAPE_BONUS`, `BRANCH_RECENT_FRONTIER_WINDOW`, `BRANCH_RECENT_FRONTIER_MAX_DISTANCE` (trigger a mode switch when a corridor is tightening and a recent nearby frontier memory exists, then penalize continued commitment and reward escape branches).
 - Biological interpretation env vars: `BIO_NAV_ENABLE`, `BIO_NAV_OPENING_WEIGHT`, `BIO_NAV_DEAD_END_ESCAPE_WEIGHT`, `BIO_NAV_NOVELTY_SCALE`, `BIO_NAV_CORRIDOR_FLOW_WEIGHT`, `BIO_NAV_DEAD_END_PREDICTIVE_PENALTY`, `BIO_NAV_LOOP_RISK_PENALTY` (translate raw local geometry into structural signals: opening evidence, corridor flow, predictive dead-end suppression, and loop-risk modulation).
-- Endocrine modulation env vars: `ENDOCRINE_ENABLE`, `HORMONE_STRESS_DECAY`, `HORMONE_CURIOSITY_DECAY`, `HORMONE_CONFIDENCE_DECAY`, `HORMONE_FATIGUE_DECAY`, `HORMONE_REWARD_DECAY`, `ENDOCRINE_STRESS_DANGER_WEIGHT`, `ENDOCRINE_CURIOSITY_NOVELTY_WEIGHT`, `ENDOCRINE_FATIGUE_REPEAT_WEIGHT`, `ENDOCRINE_CONFIDENCE_RISK_BONUS`, `ENDOCRINE_MOMENTUM_BONUS_WEIGHT` (stateful hormone/neural-state regulation that modulates loop aversion, novelty drive, risk tolerance, and momentum).
+- Endocrine modulation env vars now use biologically-inspired hormone primitives (`H_curiosity`, `H_caution`, `H_persistence`, `H_mv_trust`, `H_boredom`, `H_confidence`) configured via `H_*_DECAY`, `HORMONE_*` weights, `HORMONE_LEGACY_WEIGHT_BLEND`, and staged shutoff `HORMONE_LEGACY_BATCH_LEVEL` (batch order: confidence+momentum -> boredom/repeat pressure -> curiosity/exploration -> caution/risk); legacy `ENDOCRINE_*` / `HORMONE_STRESS|FATIGUE|REWARD_*` knobs remain available as deprecated bridge inputs during migration.
+- Hardcoded override attenuation env var: `HARD_OVERRIDE_PHASE_LEVEL` (0..4 staged suppression of forced planner override channels: frontier-lock -> persistent-frontier -> verification-priority -> plan-hold override), designed for progressive reduction of hardcoded routing influence during loop tuning.
+- Dynamic legacy attenuation env vars: `HORMONE_DYNAMIC_LEGACY_ENABLE`, `HORMONE_DYNAMIC_LEGACY_LOOP_CENTER`, `HORMONE_DYNAMIC_LEGACY_LOOP_GAIN`, `HORMONE_DYNAMIC_LEGACY_BATCH12_SUPPRESSION_MAX` (when enabled, loop-pressure hormone state automatically suppresses legacy blend for the batch-1/2 channels, so repeat-loop reduction does not require fixed batch toggles).
+- Adaptive telemetry env vars: `ADAPTIVE_PROGRESS_REPORT_ENABLE`, `ADAPTIVE_PROGRESS_REPORT_MODEL`, `ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS`, `ADAPTIVE_PROGRESS_AUTO_TUNE`, `ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS` (occasionally sends adaptive weight snapshots + kernel progress to a GPT reviewer and can softly auto-tune legacy blend drift over time).
 - Organism control env vars: `ORGANISM_CONTROL_ENABLE`, `ORGANISM_RECENT_WINDOW` (routes live maze move arbitration through `step_agent(...)` and `CandidateProjection` with policy switching, explicit `ESCAPE_LOOP` inhibition under loop pressure, and a catastrophic trap veto that removes cycle+terminal+boxed corridor moves from selection when alternatives exist).
 - Modular maze-agent env vars: `MAZE_AGENT_ENABLE`, `MAZE_AGENT_CYCLE_TABOO_DURATION`, `MAZE_AGENT_CORRIDOR_ESCAPE_THRESHOLD`, `MAZE_AGENT_ESCAPE_TIMEOUT`, `MAZE_AGENT_ESCAPE_EXIT_PRESSURE`, `MAZE_AGENT_CORRIDOR_OVERUSE_THRESHOLD`, `MAZE_AGENT_NOVELTY_WEIGHT`, `MAZE_AGENT_FRONTIER_WEIGHT`, `MAZE_AGENT_JUNCTION_BONUS`, `MAZE_AGENT_CORRIDOR_OVERUSE_PENALTY`, `MAZE_AGENT_DEAD_END_PENALTY`, `MAZE_AGENT_MOTIF_WEIGHT`, `MAZE_AGENT_LOOP_RISK_WEIGHT`, `MAZE_AGENT_CORRIDOR_FORWARD_BIAS`, `MAZE_AGENT_SIDE_OPEN_BIAS` (enables transition-level cycle vetoes plus corridor/side-wall structural biasing in the modular controller stack).
 - Exploration debug now includes `endocrine_event_last` (latest hormone delta event) so tuning can distinguish signature-driven drift vs outcome-driven shifts.
+- Memory export bundles (`Log Dump`) now include a `[HORMONE PANEL]` section with hormone state, derived controls, legacy batch status, and adaptive report/autotune summaries.
+- Sleep-cycle maintenance env vars: `SLEEP_CYCLE_ENABLE`, `SLEEP_CYCLE_AUTO_INTERVAL_STEPS`, `SLEEP_CYCLE_AUTO_AFTER_MAZE_COMPLETION`, `SLEEP_CYCLE_AUTO_AFTER_RUN_SET`, `SLEEP_CYCLE_AUTO_AFTER_LOG_DUMP`, `SLEEP_CYCLE_HORMONE_PRUNE_ENABLE`, `SLEEP_CYCLE_HORMONE_DECAY_PASSES`, `SLEEP_CYCLE_HORMONE_PULL_STRENGTH`, `SLEEP_CYCLE_HORMONE_EXTREME_THRESHOLD`, `SLEEP_CYCLE_USAGE_BOOST`, `SLEEP_CYCLE_USAGE_RECENT_WINDOW_STEPS`, `SLEEP_CYCLE_MEMORY_EVENT_KEEP`, `SLEEP_CYCLE_ENDOCRINE_EVENT_KEEP`, `SLEEP_CYCLE_ACTION_OUTCOME_KEEP_ROWS`, `SLEEP_CYCLE_PREDICTION_KEEP_ROWS`, `SLEEP_CYCLE_VACUUM_ON_MANUAL`, `SLEEP_CYCLE_VACUUM_ON_AUTO` (adds a manual `Sleep Cycle` UI action and optional auto-maintenance passes to compact volatile logs, reinforce recently used memory traces, prune high-churn run tables during long sessions, and de-saturate hormone state between maze episodes).
 - Dead-end slap env vars: `DEAD_END_END_SLAP_PENALTY`, `DEAD_END_TIP_REVISIT_SLAP_PENALTY` (apply strong penalties when exploration commits into dead-end tip/pre-tip corridors, and even stronger penalties for revisits in the same maze episode).
 - Terminal-end suppression env vars: `VISIBLE_TERMINAL_END_PENALTY`, `TERMINAL_END_GUARD_MARGIN` (deprioritize branches with a visibly blocked terminal cap unless alternatives are clearly worse).
 - Hard terminal avoidance env var: `TERMINAL_END_HARD_AVOID` (`1`=filter out visibly terminal dead-end branches whenever a non-terminal legal move exists; `0`=score-only behavior).
 - Boxed-corridor suppression env vars: `BOXED_CORRIDOR_NO_EXIT_PENALTY`, `VISIBLE_EXIT_CORRIDOR_REWARD` (avoid corridors boxed by walls when no exit is visible; strongly prioritize corridors where a visible `E` is seen).
+- Replay-memory guard env vars: `MEMORY_RISK_REPLAY_GUARD_ENABLE`, `MEMORY_RISK_REPLAY_GUARD_MIN_REPEAT`, `MEMORY_RISK_REPLAY_GUARD_DECAY_THRESHOLD`, `MEMORY_RISK_REPLAY_GUARD_SCORE_MARGIN`, `MEMORY_RISK_REPLAY_GUARD_MAX_DETOUR` (detects repeated high-penalty move replay at the same origin and swaps to safer alternatives when risk-history reduction is meaningful).
 - Frontier override env var: `FRONTIER_OVERRIDE_SCORE_MARGIN` (prevents frontier-first routing from overriding clearly better local anti-loop scores).
 - Working-memory look-retention env vars: `WORKING_MEMORY_LOOK_RETENTION_STEPS`, `WORKING_MEMORY_LOOK_RETENTION_LIMIT` (keep recent look sweeps in active context for short-term object permanence).
 - Reset-aware exploration env vars: `RESET_TRACE_WINDOW`, `POST_RESET_EXHAUSTION_PENALTY`, `RESET_FAILURE_TRANSITION_PENALTY`, `RESET_FAILURE_CELL_PENALTY`, `RESET_SUCCESS_TRANSITION_BONUS`, `POST_RESET_STM_RELAX_STEPS` (after step-limit resets, retain a failure trace window, temporarily suppress revisiting exhausted regions/transitions that repeatedly led to timeout loops, and allow successful post-reset transitions to receive a small recovery bonus; STM novelty gate is briefly relaxed so more post-reset context can be retained).
@@ -547,7 +754,9 @@ Then open `http://127.0.0.1:5050`.
 - Verification-priority env vars: `VERIFICATION_PRIORITY_ENABLE`, `VERIFICATION_PRIORITY_UNKNOWN_THRESHOLD`, `VERIFICATION_PRIORITY_FRONTIER_THRESHOLD`, `VERIFICATION_PRIORITY_MIN_SIGNAL`, `VERIFICATION_PRIORITY_SCORE_MARGIN`, `VERIFICATION_PRIORITY_CONTINUITY_BONUS`, `VERIFICATION_PRIORITY_PREDICTION_SCALE`, `LAST_UNCERTAINTY_COMMIT_ENABLE`, `LAST_UNCERTAINTY_UNKNOWN_THRESHOLD`, `LAST_UNCERTAINTY_FRONTIER_THRESHOLD`, `LAST_UNCERTAINTY_SCORE_MARGIN` (when unresolved uncertainty remains, planner prioritizes direct hallway/branch verification; and when only a tiny unresolved set remains, it commits to the best unresolved branch instead of re-looping solved corridors).
 - Corridor vision-equivalence env vars: `VISION_PROGRESS_CREDIT_ENABLE`, `VISION_PROGRESS_CREDIT_SCALE`, `VISION_PROGRESS_CREDIT_MIN_CLEAR_RUN` (visible corridor depth contributes traversal-equivalent progress via effective frontier distance, so seeing a corridor end is weighted similarly to physically walking those cells).
 - Long trap-memory env vars: `LONG_TRAP_MEMORY_PENALTY_WEIGHT`, `LONG_TRAP_MEMORY_MAX_PENALTY`, `LONG_TRAP_MEMORY_MAX_HITS` (catastrophic trap transitions/cells are remembered longer within the maze episode so repeated loop edges accrue stronger suppression over time).
+- Hazard preparedness env vars: `HAZARD_PREPAREDNESS_ENABLE`, `HAZARD_PREPAREDNESS_WINDOW`, `HAZARD_PREPAREDNESS_MIN_SAMPLES`, `HAZARD_PREPAREDNESS_RANK_DECAY`, `HAZARD_PREPAREDNESS_PENALTY_SCALE`, `HAZARD_PREPAREDNESS_MAX_PENALTY`, `HAZARD_PREPAREDNESS_REWARD_RELIEF_SCALE`, `HAZARD_PREPAREDNESS_RISK_HIT_WEIGHT`, `HAZARD_PREPAREDNESS_SAFE_HIT_WEIGHT` (builds a learned same-origin risk profile from recent action outcomes and applies a soft relative hazard penalty, so branch selection drifts away from repeatedly catastrophic moves without hardcoded move forcing).
 - Exploration debug now includes `active_retries`, `frontier_lock`, and `move_entropy`, plus per-move `frontier_lock_progress_bonus`, `frontier_lock_loop_penalty`, and `solved_region_penalty`, so late-maze loop behavior can be validated directly from the debug dump.
+- Exploration debug now also reports `hazard_preparedness_penalty`, `hazard_preparedness_relative_pressure`, `hazard_preparedness_confidence`, and `hazard_preparedness_samples` per move for direct learned-vs-hardcoded validation.
 - Local map authority env vars: `LOCAL_MAP_AUTHORITY_MODE`, `LOCAL_MAP_AUTHORITY_SOFT_SCALE`, `STRICT_AUTHORITY_RISK_MEMORY_MIN_SCALE` (`strict`=local episodic truth fully overrides cross-maze reward carryover on fully known cells except a configurable minimum carryover for high-risk contexts; `soft`=apply partial override using the soft scale).
 - Local navigation env vars: `LOCAL_NAVIGATION_KERNEL`, `LOCAL_NAVIGATION_API_FALLBACK` (`LOCAL_NAVIGATION_KERNEL=1` makes navigation local-first, and `LOCAL_NAVIGATION_API_FALLBACK=1` lets OpenAI step in if the local kernel stalls or cannot finish cleanly).
 - Low-reliance routing env vars: `ENABLE_LOGIC_REPETITION_RESOLVER`, `ENABLE_LOGIC_FINALIZER_FOR_NAVIGATION`, `MAZE_STEP_MODEL_HINTS`, `MAZE_TARGETED_MODEL_ASSIST_ENABLE`, `MAZE_MODEL_ASSIST_RELIANCE`, `MAZE_MODEL_ASSIST_MAX_CALLS_PER_EPISODE`, `MAZE_MODEL_ASSIST_COOLDOWN_STEPS` (keep normal navigation local-first, optionally allow full per-step hints, or add targeted OpenAI arbitration only during contradiction/stuck/map-doubt states; `MAZE_MODEL_ASSIST_RELIANCE` scales how eagerly those targeted calls trigger and how much override margin they get).

@@ -219,6 +219,52 @@ class AdaptiveNeuralController:
             "growth_threshold": self.growth_error_threshold,
         }
 
+    def weight_snapshot(self, top_k: int = 6) -> dict[str, Any]:
+        if not self.w1 or not self.w2:
+            return {
+                "hidden_units": 0,
+                "mean_abs_w1": 0.0,
+                "mean_abs_w2": 0.0,
+                "max_abs_w2": 0.0,
+                "top_input_importance": [],
+                "output_head_sample": [],
+            }
+
+        hidden_units = len(self.w1)
+        abs_w1_sum = 0.0
+        abs_w1_count = 0
+        abs_w2_values = [abs(float(v)) for v in self.w2]
+
+        weighted_input_importance = [0.0 for _ in range(self.input_dim)]
+        for i, row in enumerate(self.w1):
+            out_mag = abs_w2_values[i] if i < len(abs_w2_values) else 0.0
+            for j, value in enumerate(row):
+                mag = abs(float(value))
+                abs_w1_sum += mag
+                abs_w1_count += 1
+                if j < len(weighted_input_importance):
+                    weighted_input_importance[j] += mag * (1.0 + out_mag)
+
+        ranked_inputs = sorted(
+            [(idx, score) for idx, score in enumerate(weighted_input_importance)],
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        top_input_rows = [
+            {"index": int(idx), "importance": round(float(score), 6)}
+            for idx, score in ranked_inputs[: max(1, int(top_k))]
+        ]
+
+        output_head_sample = [round(float(v), 6) for v in self.w2[: max(1, min(10, int(top_k) + 2))]]
+        return {
+            "hidden_units": hidden_units,
+            "mean_abs_w1": round(abs_w1_sum / max(1, abs_w1_count), 6),
+            "mean_abs_w2": round(sum(abs_w2_values) / max(1, len(abs_w2_values)), 6),
+            "max_abs_w2": round(max(abs_w2_values), 6),
+            "top_input_importance": top_input_rows,
+            "output_head_sample": output_head_sample,
+        }
+
     def save_state(self) -> None:
         payload = {
             "version": 1,

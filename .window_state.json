@@ -1,1 +1,1 @@
-{"geometry": "1800x1098+0+39", "layout_mode": "maze", "maze_difficulty": "easy", "pane_sash_x": 708}
+{"geometry": "1800x1098+1+39", "layout_mode": "maze", "maze_difficulty": "medium", "mv_route_planning_mode_enable": false, "machine_vision_master_enable": false, "pane_sash_x": 595}
