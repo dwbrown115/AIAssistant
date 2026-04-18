@@ -41,6 +41,11 @@ PROFILE_THRESHOLDS: dict[str, dict[str, float]] = {
         "max_hardcoded_only_rate": 0.35,
         "max_unresolved_objective_override_rate": 0.03,
         "min_phase1_telemetry_coverage": 0.85,
+        "min_projection_telemetry_coverage_when_enabled": 0.80,
+        "min_projection_scored_coverage_when_active": 0.02,
+        "min_projection_beneficial_rate": 0.25,
+        "max_projection_non_beneficial_rate_when_active": 0.85,
+        "max_projection_clip_rate": 0.35,
     },
     "relaxed": {
         "max_guard_override_rate": 0.65,
@@ -52,6 +57,11 @@ PROFILE_THRESHOLDS: dict[str, dict[str, float]] = {
         "max_hardcoded_only_rate": 0.50,
         "max_unresolved_objective_override_rate": 0.06,
         "min_phase1_telemetry_coverage": 0.65,
+        "min_projection_telemetry_coverage_when_enabled": 0.45,
+        "min_projection_scored_coverage_when_active": 0.01,
+        "min_projection_beneficial_rate": 0.12,
+        "max_projection_non_beneficial_rate_when_active": 0.95,
+        "max_projection_clip_rate": 0.60,
     },
 }
 
@@ -107,6 +117,10 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
     marker_counts: dict[str, int] = {}
     for key, marker in OVERRIDE_MARKERS.items():
         marker_counts[key] = sum(1 for line in planner_lines if marker in line)
+    marker_indices_map: dict[str, list[int]] = {
+        key: [idx for idx, line in enumerate(planner_lines) if marker in line]
+        for key, marker in OVERRIDE_MARKERS.items()
+    }
 
     telemetry_channel_re = re.compile(r"telemetry_channel=([a-z_]+)")
     telemetry_intervention_re = re.compile(r"telemetry_intervention=(\d+)")
@@ -114,6 +128,13 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
     telemetry_penalty_re = re.compile(r"telemetry_penalty_signal=(-?\d+(?:\.\d+)?)")
     telemetry_reward_re = re.compile(r"telemetry_reward_signal=(-?\d+(?:\.\d+)?)")
     telemetry_score_re = re.compile(r"telemetry_decision_score=(-?\d+(?:\.\d+)?)")
+    projection_delta_re = re.compile(r"projection_score_delta=(-?\d+)")
+    projection_scaled_re = re.compile(r"projection_score_delta_scaled=(-?\d+(?:\.\d+)?)")
+    projection_clipped_re = re.compile(r"projection_score_delta_clipped=(\d+)")
+    projection_forward_re = re.compile(r"projection_forward_bonus=(-?\d+)")
+    projection_back_penalty_re = re.compile(r"projection_backward_penalty=(-?\d+)")
+    projection_back_escape_re = re.compile(r"projection_backward_escape_bonus=(-?\d+)")
+    projection_scale_re = re.compile(r"projection_score_(?:influence_)?scale=(-?\d+(?:\.\d+)?)")
 
     telemetry_present_flags: list[bool] = []
     telemetry_channels: list[str] = []
@@ -123,6 +144,15 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
     telemetry_reward_values: list[float] = []
     telemetry_score_values: list[float] = []
     telemetry_rows = 0
+    projection_present_flags: list[bool] = []
+    projection_delta_values: list[float] = []
+    projection_scaled_values: list[float] = []
+    projection_clipped_values: list[int] = []
+    projection_forward_values: list[float] = []
+    projection_back_penalty_values: list[float] = []
+    projection_back_escape_values: list[float] = []
+    projection_scale_values: list[float] = []
+    projection_rows = 0
     for line in planner_lines:
         channel_match = telemetry_channel_re.search(line)
         has_telemetry = channel_match is not None
@@ -147,6 +177,36 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
 
         score_match = telemetry_score_re.search(line)
         telemetry_score_values.append(float(score_match.group(1)) if score_match else 0.0)
+
+        projection_delta_match = projection_delta_re.search(line)
+        has_projection = projection_delta_match is not None
+        projection_present_flags.append(has_projection)
+        if has_projection:
+            projection_rows += 1
+        projection_delta_value = float(projection_delta_match.group(1)) if projection_delta_match else 0.0
+        projection_delta_values.append(projection_delta_value)
+
+        projection_scaled_match = projection_scaled_re.search(line)
+        projection_scaled_values.append(float(projection_scaled_match.group(1)) if projection_scaled_match else 0.0)
+
+        projection_clipped_match = projection_clipped_re.search(line)
+        projection_clipped_values.append(int(projection_clipped_match.group(1)) if projection_clipped_match else 0)
+
+        projection_forward_match = projection_forward_re.search(line)
+        projection_forward_values.append(float(projection_forward_match.group(1)) if projection_forward_match else 0.0)
+
+        projection_back_penalty_match = projection_back_penalty_re.search(line)
+        projection_back_penalty_values.append(
+            float(projection_back_penalty_match.group(1)) if projection_back_penalty_match else 0.0
+        )
+
+        projection_back_escape_match = projection_back_escape_re.search(line)
+        projection_back_escape_values.append(
+            float(projection_back_escape_match.group(1)) if projection_back_escape_match else 0.0
+        )
+
+        projection_scale_match = projection_scale_re.search(line)
+        projection_scale_values.append(float(projection_scale_match.group(1)) if projection_scale_match else 0.0)
 
     intervention_markers = list(OVERRIDE_MARKERS.values())
     routing_markers = [
@@ -238,6 +298,7 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
     telemetry_coverage = _rate(telemetry_rows, planner_steps)
 
     telemetry_indices = [idx for idx, present in enumerate(telemetry_present_flags) if present]
+    projection_indices = [idx for idx, present in enumerate(projection_present_flags) if present]
     telemetry_intervention_indices = [idx for idx in telemetry_indices if telemetry_interventions[idx] > 0]
     telemetry_non_intervention_indices = [idx for idx in telemetry_indices if telemetry_interventions[idx] <= 0]
     phase1_window = 3
@@ -271,6 +332,107 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
     phase1_penalty_delta_win = (
         phase1_non_intervention_penalty_win_avg - phase1_intervention_penalty_win_avg
     )
+
+    projection_coverage = _rate(projection_rows, planner_steps)
+    projection_beneficial_rows = [idx for idx in projection_indices if projection_delta_values[idx] < 0.0]
+    projection_adverse_rows = [idx for idx in projection_indices if projection_delta_values[idx] > 0.0]
+    projection_neutral_rows = [idx for idx in projection_indices if projection_delta_values[idx] == 0.0]
+    projection_clipped_rows = [idx for idx in projection_indices if projection_clipped_values[idx] > 0]
+    projection_beneficial_rate = _rate(len(projection_beneficial_rows), len(projection_indices))
+    projection_adverse_rate = _rate(len(projection_adverse_rows), len(projection_indices))
+    projection_non_beneficial_rate = 1.0 - projection_beneficial_rate if projection_indices else 1.0
+    projection_clip_rate = _rate(len(projection_clipped_rows), len(projection_indices))
+    projection_delta_avg = _mean(projection_delta_values, projection_indices)
+    projection_delta_scaled_avg = _mean(projection_scaled_values, projection_indices)
+    projection_forward_avg = _mean(projection_forward_values, projection_indices)
+    projection_back_penalty_avg = _mean(projection_back_penalty_values, projection_indices)
+    projection_back_escape_avg = _mean(projection_back_escape_values, projection_indices)
+    projection_influence_scale_avg = _mean(projection_scale_values, projection_indices)
+    projection_effectiveness_score = projection_beneficial_rate - projection_adverse_rate
+    projection_abs_delta_avg = (
+        float(sum(abs(projection_delta_values[idx]) for idx in projection_indices)) / float(len(projection_indices))
+        if projection_indices
+        else 0.0
+    )
+    total_tag_lines = len(re.findall(r"tags=[^\n]*", text))
+    projection_guidance_tag_rows = len(
+        re.findall(r"tags=[^\n]*\bprojection_guidance_reward\b", text)
+    )
+    projection_guidance_tag_rate = _rate(projection_guidance_tag_rows, total_tag_lines)
+    projection_usage_detected = bool(projection_indices) or (projection_guidance_tag_rows > 0)
+    projection_enabled = (
+        "projection_module=1" in text
+        or "MAZE_PROJECTION_MODULE_ENABLE=1" in text
+        or "projection_score_delta=" in text
+        or (projection_guidance_tag_rows > 0)
+    )
+
+    marker_diagnostics: dict[str, dict[str, int | float]] = {}
+    active_marker_keys: list[str] = []
+    for marker_key, marker_indices in marker_indices_map.items():
+        marker_count = len(marker_indices)
+        marker_index_set = set(marker_indices)
+        marker_telemetry_indices = [idx for idx in marker_indices if idx in telemetry_indices]
+        non_marker_telemetry_indices = [idx for idx in telemetry_indices if idx not in marker_index_set]
+        marker_intervention_indices = [
+            idx for idx in marker_telemetry_indices if telemetry_interventions[idx] > 0
+        ]
+
+        marker_progress_avg = _mean(telemetry_progress_values, marker_telemetry_indices)
+        marker_penalty_avg = _mean(telemetry_penalty_values, marker_telemetry_indices)
+        marker_progress_win_avg = _window_mean(
+            telemetry_progress_values,
+            marker_telemetry_indices,
+            phase1_window,
+        )
+        marker_penalty_win_avg = _window_mean(
+            telemetry_penalty_values,
+            marker_telemetry_indices,
+            phase1_window,
+        )
+        non_marker_progress_win_avg = _window_mean(
+            telemetry_progress_values,
+            non_marker_telemetry_indices,
+            phase1_window,
+        )
+        non_marker_penalty_win_avg = _window_mean(
+            telemetry_penalty_values,
+            non_marker_telemetry_indices,
+            phase1_window,
+        )
+
+        utility_vs_non_marker_win = marker_progress_win_avg - non_marker_progress_win_avg
+        penalty_delta_vs_non_marker_win = non_marker_penalty_win_avg - marker_penalty_win_avg
+
+        marker_diagnostics[marker_key] = {
+            "rows": marker_count,
+            "row_rate": round(_rate(marker_count, planner_steps), 4),
+            "telemetry_rows": len(marker_telemetry_indices),
+            "telemetry_coverage": round(_rate(len(marker_telemetry_indices), marker_count), 4),
+            "intervention_rows": len(marker_intervention_indices),
+            "intervention_overlap_rate": round(
+                _rate(len(marker_intervention_indices), len(marker_telemetry_indices)),
+                4,
+            ),
+            "progress_avg": round(marker_progress_avg, 4),
+            "penalty_avg": round(marker_penalty_avg, 4),
+            "progress_win3_avg": round(marker_progress_win_avg, 4),
+            "penalty_win3_avg": round(marker_penalty_win_avg, 4),
+            "utility_vs_non_marker_win3": round(utility_vs_non_marker_win, 4),
+            "penalty_delta_vs_non_marker_win3": round(penalty_delta_vs_non_marker_win, 4),
+        }
+        if marker_count > 0:
+            active_marker_keys.append(marker_key)
+
+    active_marker_keys_sorted = sorted(
+        active_marker_keys,
+        key=lambda key: (
+            float(marker_diagnostics[key]["utility_vs_non_marker_win3"]),
+            float(marker_diagnostics[key]["penalty_delta_vs_non_marker_win3"]),
+        ),
+    )
+    top_harmful_markers = active_marker_keys_sorted[:3]
+    top_helpful_markers = list(reversed(active_marker_keys_sorted[-3:]))
 
     pipeline_metrics: dict[str, object] = {}
     for key in [
@@ -392,6 +554,62 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
             f"{telemetry_coverage:.3f} is below threshold {min_phase1_telemetry_coverage:.3f}"
         )
 
+    min_projection_telemetry_coverage = float(thresholds.get("min_projection_telemetry_coverage_when_enabled", 0.0))
+    if (
+        projection_enabled
+        and projection_usage_detected
+        and projection_coverage < min_projection_telemetry_coverage
+    ):
+        warnings.append(
+            "projection telemetry coverage "
+            f"{projection_coverage:.3f} is below threshold {min_projection_telemetry_coverage:.3f}"
+        )
+
+    min_projection_scored_coverage = float(thresholds.get("min_projection_scored_coverage_when_active", 0.0))
+    if (
+        projection_enabled
+        and projection_usage_detected
+        and projection_coverage < min_projection_scored_coverage
+    ):
+        warnings.append(
+            "projection scored-coverage "
+            f"{projection_coverage:.3f} is below threshold {min_projection_scored_coverage:.3f}"
+        )
+
+    min_projection_beneficial_rate = float(thresholds.get("min_projection_beneficial_rate", 0.0))
+    if projection_enabled and projection_usage_detected:
+        if projection_indices:
+            if projection_beneficial_rate < min_projection_beneficial_rate:
+                warnings.append(
+                    "projection beneficial-rate "
+                    f"{projection_beneficial_rate:.3f} is below threshold {min_projection_beneficial_rate:.3f}"
+                )
+        else:
+            warnings.append(
+                "projection active but produced zero scored rows; "
+                "non-beneficial-rate treated as 1.000"
+            )
+
+    max_projection_non_beneficial_rate = float(
+        thresholds.get("max_projection_non_beneficial_rate_when_active", 1.0)
+    )
+    if (
+        projection_enabled
+        and projection_usage_detected
+        and projection_non_beneficial_rate > max_projection_non_beneficial_rate
+    ):
+        warnings.append(
+            "projection non-beneficial-rate "
+            f"{projection_non_beneficial_rate:.3f} exceeds threshold {max_projection_non_beneficial_rate:.3f}"
+        )
+
+    max_projection_clip_rate = float(thresholds.get("max_projection_clip_rate", 1.0))
+    if projection_indices and projection_clip_rate > max_projection_clip_rate:
+        warnings.append(
+            "projection clip-rate "
+            f"{projection_clip_rate:.3f} exceeds threshold {max_projection_clip_rate:.3f}"
+        )
+
     status = "pass"
     if failures:
         status = "fail"
@@ -438,6 +656,36 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
                 "phase1_intervention_utility_win3": round(phase1_intervention_utility_win, 4),
                 "phase1_penalty_delta_win3": round(phase1_penalty_delta_win, 4),
                 "phase1_window": phase1_window,
+            },
+            "projection_screen": {
+                "projection_enabled": int(bool(projection_enabled)),
+                "projection_usage_detected": int(bool(projection_usage_detected)),
+                "projection_rows": projection_rows,
+                "projection_coverage": round(projection_coverage, 4),
+                "projection_guidance_tag_rows": projection_guidance_tag_rows,
+                "tag_lines": total_tag_lines,
+                "projection_guidance_tag_rate": round(projection_guidance_tag_rate, 4),
+                "projection_beneficial_rows": len(projection_beneficial_rows),
+                "projection_adverse_rows": len(projection_adverse_rows),
+                "projection_neutral_rows": len(projection_neutral_rows),
+                "projection_beneficial_rate": round(projection_beneficial_rate, 4),
+                "projection_adverse_rate": round(projection_adverse_rate, 4),
+                "projection_non_beneficial_rate": round(projection_non_beneficial_rate, 4),
+                "projection_clipped_rows": len(projection_clipped_rows),
+                "projection_clip_rate": round(projection_clip_rate, 4),
+                "projection_score_delta_avg": round(projection_delta_avg, 4),
+                "projection_score_delta_abs_avg": round(projection_abs_delta_avg, 4),
+                "projection_score_delta_scaled_avg": round(projection_delta_scaled_avg, 4),
+                "projection_effectiveness_score": round(projection_effectiveness_score, 4),
+                "projection_forward_bonus_avg": round(projection_forward_avg, 4),
+                "projection_backward_penalty_avg": round(projection_back_penalty_avg, 4),
+                "projection_backward_escape_bonus_avg": round(projection_back_escape_avg, 4),
+                "projection_influence_scale_avg": round(projection_influence_scale_avg, 4),
+            },
+            "intervention_diagnostics": {
+                "markers": marker_diagnostics,
+                "top_harmful_markers": top_harmful_markers,
+                "top_helpful_markers": top_helpful_markers,
             },
             "override_markers": marker_counts,
             "pipeline": pipeline_metrics,
@@ -516,6 +764,49 @@ def main() -> int:
                     f"phase1_intervention_utility_win3={behavior_screen.get('phase1_intervention_utility_win3', 0.0)} "
                     f"phase1_penalty_delta_win3={behavior_screen.get('phase1_penalty_delta_win3', 0.0)}"
                 )
+            projection_screen = metrics.get("projection_screen", {})
+            if isinstance(projection_screen, dict) and projection_screen:
+                print(
+                    "projection_screen="
+                    f"enabled={projection_screen.get('projection_enabled', 0)} "
+                    f"usage_detected={projection_screen.get('projection_usage_detected', 0)} "
+                    f"coverage={projection_screen.get('projection_coverage', 0.0)} "
+                    f"tag_rate={projection_screen.get('projection_guidance_tag_rate', 0.0)} "
+                    f"beneficial_rate={projection_screen.get('projection_beneficial_rate', 0.0)} "
+                    f"non_beneficial_rate={projection_screen.get('projection_non_beneficial_rate', 0.0)} "
+                    f"clip_rate={projection_screen.get('projection_clip_rate', 0.0)} "
+                    f"delta_avg={projection_screen.get('projection_score_delta_avg', 0.0)} "
+                    f"delta_scaled_avg={projection_screen.get('projection_score_delta_scaled_avg', 0.0)} "
+                    f"effectiveness_score={projection_screen.get('projection_effectiveness_score', 0.0)}"
+                )
+            intervention_diag = metrics.get("intervention_diagnostics", {})
+            if isinstance(intervention_diag, dict):
+                markers = intervention_diag.get("markers", {})
+                harmful = intervention_diag.get("top_harmful_markers", [])
+                helpful = intervention_diag.get("top_helpful_markers", [])
+                if isinstance(markers, dict) and markers and isinstance(harmful, list) and isinstance(helpful, list):
+                    harmful_parts: list[str] = []
+                    for key in harmful[:2]:
+                        payload = markers.get(key)
+                        if not isinstance(payload, dict):
+                            continue
+                        harmful_parts.append(
+                            f"{key}:rows={payload.get('rows', 0)} util={payload.get('utility_vs_non_marker_win3', 0.0)} pen_delta={payload.get('penalty_delta_vs_non_marker_win3', 0.0)}"
+                        )
+                    helpful_parts: list[str] = []
+                    for key in helpful[:2]:
+                        payload = markers.get(key)
+                        if not isinstance(payload, dict):
+                            continue
+                        helpful_parts.append(
+                            f"{key}:rows={payload.get('rows', 0)} util={payload.get('utility_vs_non_marker_win3', 0.0)} pen_delta={payload.get('penalty_delta_vs_non_marker_win3', 0.0)}"
+                        )
+                    if harmful_parts or helpful_parts:
+                        print(
+                            "intervention_diagnostics="
+                            f"harmful=[{' | '.join(harmful_parts)}] "
+                            f"helpful=[{' | '.join(helpful_parts)}]"
+                        )
             pipeline = metrics.get("pipeline", {})
             if isinstance(pipeline, dict):
                 print(

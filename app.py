@@ -7,6 +7,7 @@ import random
 import re
 import sqlite3
 import gc
+import time
 import tempfile
 import base64
 import shutil
@@ -18,6 +19,20 @@ from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
 from adaptive_controller import AdaptiveNeuralController
+from governance_orchestrator import GovernanceOrchestrator
+from kernel_contracts import (
+    ActionOutcomeEvent,
+    DevelopmentStage,
+    ErrorHandlingHint,
+    GlobalErrorCategory,
+    GlobalErrorEvent,
+    ModuleCapabilityDescriptor,
+    ReasoningBudgetContract,
+    ReasoningProfile,
+)
+from learned_autonomy_controller import LearnedAutonomyController
+from legacy_hormone_compat import LegacyHormoneCompatMixin
+from parallel_reasoning_engine import ParallelReasoningEngine
 from organism_control import (
     CandidateProjection,
     ControlState as OrganismControlState,
@@ -29,6 +44,7 @@ from organism_control import (
     is_catastrophic_trap as organism_is_catastrophic_trap,
     step_agent as organism_step_agent,
 )
+from maze.projection_module import ProjectionConfig, ProjectionModule
 from maze.runner import CandidateInput, MazeAgent, StepOutput as MazeStepOutput
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -468,7 +484,7 @@ class EndocrineSystem:
         }
 
 
-class AIAssistantApp:
+class AIAssistantApp(LegacyHormoneCompatMixin):
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("AI Assistant")
@@ -498,6 +514,55 @@ class AIAssistantApp:
         self.maze_model_assist_reliance = min(
             1.0,
             max(0.0, float(os.getenv("MAZE_MODEL_ASSIST_RELIANCE", "0.22"))),
+        )
+        self.maze_batch_micro_progression_enable = os.getenv("MAZE_BATCH_MICRO_PROGRESSION_ENABLE", "1") == "1"
+        self.maze_batch_micro_progression_min_run = max(
+            2,
+            int(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_MIN_RUN", "8")),
+        )
+        self.maze_batch_micro_progression_start_ratio = max(
+            0.0,
+            min(0.95, float(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_START_RATIO", "0.2"))),
+        )
+        self.maze_batch_micro_progression_curve = max(
+            0.5,
+            min(4.0, float(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_CURVE", "1.15"))),
+        )
+        self.maze_batch_micro_progression_max_hard_phase_bonus = max(
+            0,
+            min(2, int(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_MAX_HARD_PHASE_BONUS", "1"))),
+        )
+        self.maze_batch_micro_progression_max_objective_phase_bonus = max(
+            0,
+            min(2, int(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_MAX_OBJECTIVE_PHASE_BONUS", "1"))),
+        )
+        self.maze_batch_micro_progression_phase2_reduction = max(
+            0.0,
+            min(1.0, float(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_PHASE2_REDUCTION", "0.35"))),
+        )
+        self.maze_batch_micro_progression_assist_reliance_floor = min(
+            1.0,
+            max(0.0, float(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_ASSIST_RELIANCE_FLOOR", "0.08"))),
+        )
+        self.maze_batch_micro_progression_guard_strength_reduction = max(
+            0.0,
+            min(0.8, float(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_GUARD_STRENGTH_REDUCTION", "0.22"))),
+        )
+        self.maze_batch_micro_progression_stuck_trigger_no_progress_bonus = max(
+            0,
+            min(20, int(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_NO_PROGRESS_BONUS", "3"))),
+        )
+        self.maze_batch_micro_progression_stuck_trigger_repeat_bonus = max(
+            0,
+            min(6, int(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_REPEAT_BONUS", "1"))),
+        )
+        self.maze_batch_micro_progression_objective_unresolved_bonus = max(
+            0,
+            min(4, int(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_OBJECTIVE_UNRESOLVED_BONUS", "1"))),
+        )
+        self.maze_batch_micro_progression_cycle_avoid_margin_reduction = max(
+            0.0,
+            min(0.9, float(os.getenv("MAZE_BATCH_MICRO_PROGRESSION_CYCLE_AVOID_MARGIN_REDUCTION", "0.5"))),
         )
         self.maze_model_assist_max_calls_per_episode = max(
             0,
@@ -573,20 +638,150 @@ class AIAssistantApp:
 
         self.status_var = tk.StringVar(value="Ready")
         self.score_var = tk.StringVar(value="Targets reached: 0")
+        self.micro_progress_header_var = tk.StringVar(value="Batch --/-- | Micro --/--")
         self.targets_reached = 0
         self.total_reward = 0.0
         self.episode_steps = 0
         self.episode_optimal_steps = 0
         self.episode_step_limit = 0
+        self.episode_started_monotonic = time.perf_counter()
         self.episode_start_player_cell = (0, 0)
         self.current_target_cell = (0, 0)
         self.current_player_cell = (0, 0)
+        self.maze_fast_solve_treat_enable = os.getenv("MAZE_FAST_SOLVE_TREAT_ENABLE", "1") == "1"
+        self.maze_fast_solve_treat_max_bonus = max(
+            0.0,
+            float(os.getenv("MAZE_FAST_SOLVE_TREAT_MAX_BONUS", "24.0")),
+        )
+        self.maze_fast_solve_treat_target_multiplier = max(
+            0.25,
+            float(os.getenv("MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER", "1.85")),
+        )
+        self.maze_fast_solve_treat_min_target_seconds = max(
+            1.0,
+            float(os.getenv("MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS", "8.0")),
+        )
+        self.last_maze_solve_seconds = 0.0
+        self.last_maze_fast_treat_bonus = 0.0
+        self.last_maze_fast_treat_target_seconds = 0.0
         self._sticky_objective_target: tuple[int, int] | None = None
         self._sticky_objective_path: list[str] = []
         self.auto_goal_hits_remaining = 0
         self.goal_session_active = False
         self.goal_session_start_hits = 0
         self.goal_session_target_hits = 0
+        self.micro_progress_series_base = max(
+            0.0,
+            min(99.9, float(os.getenv("MAZE_MICRO_PROGRESSION_SERIES_BASE", "5.5"))),
+        )
+        self.micro_progress_series_step = max(
+            0.01,
+            min(5.0, float(os.getenv("MAZE_MICRO_PROGRESSION_SERIES_STEP", "0.1"))),
+        )
+        self.batch_progress_total = max(
+            1,
+            int(os.getenv("MAZE_BATCH_PROGRESS_TOTAL", "8")),
+        )
+        self.micro_progress_total = max(
+            2,
+            int(os.getenv("MAZE_MICRO_PROGRESS_TOTAL", "10")),
+        )
+        _micro_threshold_tokens = [
+            token.strip()
+            for token in os.getenv("MAZE_MICRO_PROGRESSION_THRESHOLDS", "0.2,0.4,0.6,0.8").split(",")
+            if token.strip()
+        ]
+        _micro_threshold_values: list[float] = []
+        for token in _micro_threshold_tokens:
+            try:
+                _micro_threshold_values.append(max(0.0, min(1.0, float(token))))
+            except Exception:  # noqa: BLE001
+                continue
+        self.micro_progress_series_thresholds = sorted(set(_micro_threshold_values))
+        if not self.micro_progress_series_thresholds:
+            self.micro_progress_series_thresholds = [0.2, 0.4, 0.6, 0.8]
+        self.maze_micro_progression_persist_enable = (
+            os.getenv("MAZE_MICRO_PROGRESSION_PERSIST_ENABLE", "1") == "1"
+        )
+        self.maze_micro_progression_persist_min_completion_ratio = max(
+            0.0,
+            min(1.0, float(os.getenv("MAZE_MICRO_PROGRESSION_PERSIST_MIN_COMPLETION_RATIO", "0.9"))),
+        )
+        self.maze_micro_progression_persist_require_success = (
+            os.getenv("MAZE_MICRO_PROGRESSION_PERSIST_REQUIRE_SUCCESS", "1") == "1"
+        )
+        self.maze_micro_progression_persist_min_run = max(
+            2,
+            int(os.getenv("MAZE_MICRO_PROGRESSION_PERSIST_MIN_RUN", str(self.maze_batch_micro_progression_min_run))),
+        )
+        self.maze_micro_progression_persist_min_completed_goals = max(
+            0,
+            int(
+                os.getenv(
+                    "MAZE_MICRO_PROGRESSION_PERSIST_MIN_COMPLETED_GOALS",
+                    str(self.maze_micro_progression_persist_min_run),
+                )
+            ),
+        )
+        self.maze_micro_progression_batch_quality_ema_decay = max(
+            0.0,
+            min(0.995, float(os.getenv("MAZE_MICRO_PROGRESSION_BATCH_QUALITY_EMA_DECAY", "0.75"))),
+        )
+        self.maze_micro_progression_persist_min_batch_quality_ema = max(
+            0.0,
+            min(1.0, float(os.getenv("MAZE_MICRO_PROGRESSION_PERSIST_MIN_BATCH_QUALITY_EMA", "0.88"))),
+        )
+        self.maze_micro_progression_regression_enable = (
+            os.getenv("MAZE_MICRO_PROGRESSION_REGRESSION_ENABLE", "1") == "1"
+        )
+        self.maze_micro_progression_regression_fail_streak = max(
+            1,
+            int(os.getenv("MAZE_MICRO_PROGRESSION_REGRESSION_FAIL_STREAK", "2")),
+        )
+        self.maze_micro_progression_regression_min_run = max(
+            2,
+            int(
+                os.getenv(
+                    "MAZE_MICRO_PROGRESSION_REGRESSION_MIN_RUN",
+                    str(self.maze_micro_progression_persist_min_run),
+                )
+            ),
+        )
+        self.maze_micro_progression_regression_max_completion_ratio = max(
+            0.0,
+            min(1.0, float(os.getenv("MAZE_MICRO_PROGRESSION_REGRESSION_MAX_COMPLETION_RATIO", "0.65"))),
+        )
+        self.maze_micro_progression_regression_max_batch_quality_ema = max(
+            0.0,
+            min(1.0, float(os.getenv("MAZE_MICRO_PROGRESSION_REGRESSION_MAX_BATCH_QUALITY_EMA", "0.78"))),
+        )
+        self.maze_micro_progression_regression_min_completed_goals = max(
+            0,
+            int(
+                os.getenv(
+                    "MAZE_MICRO_PROGRESSION_REGRESSION_MIN_COMPLETED_GOALS",
+                    "0",
+                )
+            ),
+        )
+        self.maze_micro_progression_regression_step_count = max(
+            1,
+            int(os.getenv("MAZE_MICRO_PROGRESSION_REGRESSION_STEP_COUNT", "1")),
+        )
+        self.maze_micro_progression_regression_require_failure = (
+            os.getenv("MAZE_MICRO_PROGRESSION_REGRESSION_REQUIRE_FAILURE", "1") == "1"
+        )
+        self.micro_progress_persisted_series_value = float(self.micro_progress_series_base)
+        self.micro_progress_batch_quality_ema = 1.0
+        self.micro_progress_regression_fail_streak = 0
+        self.runtime_batch_requested_count = 0
+        self.runtime_batch_completed_count = 0
+        self.runtime_micro_progress_stage_index = 0
+        self.runtime_micro_progress_series_anchor = float(self.micro_progress_persisted_series_value)
+        self.runtime_micro_progress_series_value = float(self.micro_progress_persisted_series_value)
+        self._last_micro_progress_stage_announce = -1
+        self._power_save_active = False
+        self._power_save_nice_delta = 0
         self.last_manhattan_distance = 0
         self.episode_revisit_steps = 0
         self.episode_backtracks = 0
@@ -612,7 +807,7 @@ class AIAssistantApp:
         self.maze_seed_base = int(os.getenv("MAZE_SEED", "1337"))
         self.target_distance_min_ratio = float(os.getenv("TARGET_DISTANCE_MIN_RATIO", "0.75"))
         self.target_distance_max_ratio = float(os.getenv("TARGET_DISTANCE_MAX_RATIO", "1.0"))
-        self.maze_fov_depth = int(os.getenv("MAZE_FOV_DEPTH", "4"))
+        self.maze_fov_depth = int(os.getenv("MAZE_FOV_DEPTH", "5"))
         self.maze_fov_peripheral = int(os.getenv("MAZE_FOV_PERIPHERAL", "1"))
         self.maze_fov_cone_degrees = float(os.getenv("MAZE_FOV_CONE_DEGREES", "95"))
         self.maze_fov_full_threshold = float(os.getenv("MAZE_FOV_FULL_THRESHOLD", "0.22"))
@@ -620,8 +815,24 @@ class AIAssistantApp:
         self.maze_fov_distance_falloff = float(os.getenv("MAZE_FOV_DISTANCE_FALLOFF", "0.22"))
         self.maze_fov_corner_graze_factor = float(os.getenv("MAZE_FOV_CORNER_GRAZE_FACTOR", "0.62"))
         self.maze_fov_wedge_distance_scale = float(os.getenv("MAZE_FOV_WEDGE_DISTANCE_SCALE", "0.2"))
+        self.maze_fov_lateral_extra_degrees = float(os.getenv("MAZE_FOV_LATERAL_EXTRA_DEGREES", "18"))
+        self.maze_fov_lateral_near_depth = float(os.getenv("MAZE_FOV_LATERAL_NEAR_DEPTH", "4.0"))
+        self.maze_fov_lateral_floor_margin = float(os.getenv("MAZE_FOV_LATERAL_FLOOR_MARGIN", "0.04"))
+        self.maze_fov_lateral_band_cells = float(os.getenv("MAZE_FOV_LATERAL_BAND_CELLS", "2.5"))
+        self.maze_fov_lateral_extra_degrees = max(0.0, min(40.0, self.maze_fov_lateral_extra_degrees))
+        self.maze_fov_lateral_near_depth = max(1.0, self.maze_fov_lateral_near_depth)
+        self.maze_fov_lateral_floor_margin = max(0.0, min(0.2, self.maze_fov_lateral_floor_margin))
+        self.maze_fov_lateral_band_cells = max(1.0, self.maze_fov_lateral_band_cells)
         if self.maze_fov_half_threshold > self.maze_fov_full_threshold:
             self.maze_fov_half_threshold = self.maze_fov_full_threshold
+        self.objective_override_safe_max_unknown = max(
+            0,
+            int(os.getenv("OBJECTIVE_OVERRIDE_SAFE_MAX_UNKNOWN", "1")),
+        )
+        self.objective_override_safe_max_frontier = max(
+            0,
+            int(os.getenv("OBJECTIVE_OVERRIDE_SAFE_MAX_FRONTIER", "1")),
+        )
         self.layout_generation_index = 0
         self.layout_event_index = 0
         self.maze_map_start_var = tk.StringVar(value="0")
@@ -630,6 +841,8 @@ class AIAssistantApp:
         self.player_facing = "UP"
         self.current_maze_episode_id = 0
         self.maze_known_cells: dict[tuple[int, int], str] = {}
+        self.verified_empty_opening_edges: set[tuple[int, int, str]] = set()
+        self.loop_risk_opening_edges: set[tuple[int, int, str]] = set()
         self.prediction_contradiction_debt: dict[tuple[int, int], float] = {}
         self.prediction_context_contradiction_debt: dict[str, float] = {}
         self.mental_sweep_cells: dict[tuple[int, int], str] = {}
@@ -649,6 +862,11 @@ class AIAssistantApp:
         )
         self._last_memory_viewer_refresh_step = -10_000
         self._last_saved_layout_cell_signature = ""
+        self.layout_cell_snapshot_interval_steps = max(
+            1,
+            int(os.getenv("LAYOUT_CELL_SNAPSHOT_INTERVAL_STEPS", "12")),
+        )
+        self._last_layout_cell_snapshot_step = -10_000
         self.layout_recall_last_map_id = -1
         self.layout_recall_last_restored = 0
         self.layout_recall_last_total = 0
@@ -786,6 +1004,73 @@ class AIAssistantApp:
         self.prediction_lookahead_weight = max(
             0.0,
             float(os.getenv("PREDICTION_LOOKAHEAD_WEIGHT", "1.0")),
+        )
+        self.maze_projection_module_enable = os.getenv("MAZE_PROJECTION_MODULE_ENABLE", "1") == "1"
+        self.maze_projection_forward_depth = max(
+            1,
+            min(8, int(os.getenv("MAZE_PROJECTION_FORWARD_DEPTH", "3"))),
+        )
+        self.maze_projection_forward_weight = max(
+            0.0,
+            float(os.getenv("MAZE_PROJECTION_FORWARD_WEIGHT", "1.0")),
+        )
+        self.maze_projection_backtrace_window = max(
+            4,
+            min(64, int(os.getenv("MAZE_PROJECTION_BACKTRACE_WINDOW", "14"))),
+        )
+        self.maze_projection_backtrace_penalty_weight = max(
+            0.0,
+            float(os.getenv("MAZE_PROJECTION_BACKTRACE_PENALTY_WEIGHT", "1.0")),
+        )
+        self.maze_projection_backtrace_escape_weight = max(
+            0.0,
+            float(os.getenv("MAZE_PROJECTION_BACKTRACE_ESCAPE_WEIGHT", "1.0")),
+        )
+        self.maze_projection_score_influence_cap = max(
+            0,
+            int(os.getenv("MAZE_PROJECTION_SCORE_INFLUENCE_CAP", "24")),
+        )
+        self.maze_projection_score_influence_scale = max(
+            0.0,
+            float(os.getenv("MAZE_PROJECTION_SCORE_INFLUENCE_SCALE", "1.25")),
+        )
+        self.projection_trust_adapt_enable = os.getenv("PROJECTION_TRUST_ADAPT_ENABLE", "1") == "1"
+        self.projection_trust_ema_decay = min(
+            0.999,
+            max(0.5, float(os.getenv("PROJECTION_TRUST_EMA_DECAY", "0.97"))),
+        )
+        self.projection_trust_min_scale = min(
+            1.0,
+            max(0.05, float(os.getenv("PROJECTION_TRUST_MIN_SCALE", "0.25"))),
+        )
+        self.projection_trust_max_scale = min(
+            1.5,
+            max(self.projection_trust_min_scale, float(os.getenv("PROJECTION_TRUST_MAX_SCALE", "1.0"))),
+        )
+        self.projection_trust_warmup_steps = max(
+            0,
+            int(os.getenv("PROJECTION_TRUST_WARMUP_STEPS", "64")),
+        )
+        self.projection_trust_score_ema = 0.0
+        self.projection_trust_observations = 0
+        self.kernel_projection_reward_enable = os.getenv("KERNEL_PROJECTION_REWARD_ENABLE", "1") == "1"
+        self.kernel_projection_reward_scale = max(
+            0.0,
+            float(os.getenv("KERNEL_PROJECTION_REWARD_SCALE", "0.08")),
+        )
+        self.kernel_projection_reward_max = max(
+            0.0,
+            float(os.getenv("KERNEL_PROJECTION_REWARD_MAX", "3.0")),
+        )
+        self.projection_module = ProjectionModule(
+            ProjectionConfig(
+                enabled=self.maze_projection_module_enable,
+                forward_depth=self.maze_projection_forward_depth,
+                forward_weight=self.maze_projection_forward_weight,
+                backtrace_window=self.maze_projection_backtrace_window,
+                backtrace_penalty_weight=self.maze_projection_backtrace_penalty_weight,
+                backtrace_escape_weight=self.maze_projection_backtrace_escape_weight,
+            )
         )
         self.prediction_memory_active: dict[tuple[int, int], dict[str, object]] = {}
         self.prediction_junction_bias_weight = max(
@@ -1047,6 +1332,149 @@ class AIAssistantApp:
             0,
             int(os.getenv("PHASE2_PLAN_HOLD_INFLUENCE", "12")),
         )
+        self.learned_autonomy_subphase_enable = os.getenv("LEARNED_AUTONOMY_SUBPHASE_ENABLE", "1") == "1"
+        self.learned_autonomy_warmup_steps = max(24, int(os.getenv("LEARNED_AUTONOMY_WARMUP_STEPS", "120")))
+        self.learned_autonomy_ema_decay = max(
+            0.5,
+            min(0.999, float(os.getenv("LEARNED_AUTONOMY_EMA_DECAY", "0.97"))),
+        )
+        self.learned_autonomy_phase1_score = max(
+            0.0,
+            min(1.0, float(os.getenv("LEARNED_AUTONOMY_PHASE1_SCORE", "0.62"))),
+        )
+        self.learned_autonomy_phase2_score = max(
+            self.learned_autonomy_phase1_score,
+            min(1.0, float(os.getenv("LEARNED_AUTONOMY_PHASE2_SCORE", "0.78"))),
+        )
+        self.learned_autonomy_unresolved_target = max(
+            0.0,
+            min(1.0, float(os.getenv("LEARNED_AUTONOMY_UNRESOLVED_TARGET", "0.10"))),
+        )
+        self.learned_autonomy_controller = LearnedAutonomyController(
+            enabled=self.learned_autonomy_subphase_enable,
+            ema_decay=self.learned_autonomy_ema_decay,
+            warmup_steps=self.learned_autonomy_warmup_steps,
+            phase1_score=self.learned_autonomy_phase1_score,
+            phase2_score=self.learned_autonomy_phase2_score,
+            unresolved_target=self.learned_autonomy_unresolved_target,
+        )
+        self.learned_autonomy_hard_phase_bonus = 0
+        self.learned_autonomy_objective_phase_bonus = 0
+        self.learned_autonomy_soft_override_scale = 1.0
+        self.parallel_reasoning_enable = os.getenv("PARALLEL_REASONING_ENGINE_ENABLE", "1") == "1"
+        self.parallel_reasoning_ema_decay = max(
+            0.5,
+            min(0.999, float(os.getenv("PARALLEL_REASONING_EMA_DECAY", "0.965"))),
+        )
+        self.parallel_reasoning_warmup_steps = max(
+            24,
+            int(os.getenv("PARALLEL_REASONING_WARMUP_STEPS", "140")),
+        )
+        self.parallel_reasoning_min_confidence = max(
+            0.05,
+            min(0.99, float(os.getenv("PARALLEL_REASONING_MIN_CONFIDENCE", "0.58"))),
+        )
+        self.parallel_reasoning_local_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_LOCAL_WEIGHT", "1.0")),
+        )
+        self.parallel_reasoning_adaptive_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_ADAPTIVE_WEIGHT", "1.0")),
+        )
+        self.parallel_reasoning_deliberative_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIBERATIVE_WEIGHT", "1.0")),
+        )
+        self.parallel_reasoning_deliberative_unknown_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIB_UNKNOWN_WEIGHT", "0.85")),
+        )
+        self.parallel_reasoning_deliberative_frontier_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIB_FRONTIER_WEIGHT", "0.95")),
+        )
+        self.parallel_reasoning_deliberative_lookahead_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIB_LOOKAHEAD_WEIGHT", "0.8")),
+        )
+        self.parallel_reasoning_deliberative_loop_penalty_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIB_LOOP_PENALTY_WEIGHT", "0.8")),
+        )
+        self.parallel_reasoning_deliberative_hazard_penalty_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIB_HAZARD_PENALTY_WEIGHT", "0.65")),
+        )
+        self.parallel_reasoning_deliberative_contradiction_penalty_weight = max(
+            0.0,
+            float(os.getenv("PARALLEL_REASONING_DELIB_CONTRADICTION_PENALTY_WEIGHT", "0.55")),
+        )
+        self.parallel_reasoning_engine = ParallelReasoningEngine(
+            enabled=self.parallel_reasoning_enable,
+            ema_decay=self.parallel_reasoning_ema_decay,
+            warmup_steps=self.parallel_reasoning_warmup_steps,
+            min_confidence=self.parallel_reasoning_min_confidence,
+            local_weight=self.parallel_reasoning_local_weight,
+            adaptive_weight=self.parallel_reasoning_adaptive_weight,
+            deliberative_weight=self.parallel_reasoning_deliberative_weight,
+            deliberative_unknown_weight=self.parallel_reasoning_deliberative_unknown_weight,
+            deliberative_frontier_weight=self.parallel_reasoning_deliberative_frontier_weight,
+            deliberative_lookahead_weight=self.parallel_reasoning_deliberative_lookahead_weight,
+            deliberative_loop_penalty_weight=self.parallel_reasoning_deliberative_loop_penalty_weight,
+            deliberative_hazard_penalty_weight=self.parallel_reasoning_deliberative_hazard_penalty_weight,
+            deliberative_contradiction_penalty_weight=self.parallel_reasoning_deliberative_contradiction_penalty_weight,
+        )
+        self.parallel_reasoning_last_result: dict[str, object] = {}
+        try:
+            self.parallel_reasoning_profile = ReasoningProfile(
+                str(os.getenv("PARALLEL_REASONING_PROFILE", "BALANCED")).strip().upper()
+            )
+        except Exception:
+            self.parallel_reasoning_profile = ReasoningProfile.BALANCED
+        self.parallel_reasoning_budget = ReasoningBudgetContract(
+            max_branches=max(1, int(os.getenv("PARALLEL_REASONING_MAX_BRANCHES", "8"))),
+            max_depth=max(1, int(os.getenv("PARALLEL_REASONING_MAX_DEPTH", "3"))),
+            time_budget_ms=max(8, int(os.getenv("PARALLEL_REASONING_TIME_BUDGET_MS", "90"))),
+            token_budget=max(64, int(os.getenv("PARALLEL_REASONING_TOKEN_BUDGET", "620"))),
+        )
+        governance_enable = os.getenv("GOVERNANCE_ORCHESTRATOR_ENABLE", "1") == "1"
+        try:
+            dev_stage = DevelopmentStage(str(os.getenv("KERNEL_DEVELOPMENT_STAGE", "JUVENILE_KERNEL")).strip())
+        except Exception:
+            dev_stage = DevelopmentStage.JUVENILE_KERNEL
+        self.governance_orchestrator = GovernanceOrchestrator(
+            enabled=governance_enable,
+            policy_version=str(os.getenv("GOVERNANCE_POLICY_VERSION", "2026-04-14")),
+            development_stage=dev_stage,
+        )
+        self.governance_orchestrator.register_module(
+            ModuleCapabilityDescriptor(
+                module_id="learned_autonomy_controller",
+                module_version="2.0",
+                supported_features=("state_machine", "continuous_modulation", "external_override"),
+                known_limitations=("ema_warmup_dependency",),
+                safety_guarantees=("supports_suspended_state",),
+            )
+        )
+        self.governance_orchestrator.register_module(
+            ModuleCapabilityDescriptor(
+                module_id="organism_control",
+                module_version="1.0",
+                supported_features=("reflex_policy", "trap_veto", "loop_escape"),
+                known_limitations=("local_signal_only",),
+                safety_guarantees=("catastrophic_trap_filter",),
+            )
+        )
+        self.governance_orchestrator.register_module(
+            ModuleCapabilityDescriptor(
+                module_id="parallel_reasoning_engine",
+                module_version="2.0",
+                supported_features=("multi_plan_ranking", "budget_pruning", "confidence_report"),
+                known_limitations=("no_long_horizon_tree_search",),
+                safety_guarantees=("min_confidence_probe_mode",),
+            )
+        )
         self.hormone_dynamic_legacy_enable = os.getenv("HORMONE_DYNAMIC_LEGACY_ENABLE", "1") == "1"
         self.hormone_dynamic_legacy_loop_center = max(
             -1.0,
@@ -1068,7 +1496,8 @@ class AIAssistantApp:
         self.hormone_confidence_risk_bonus = float(os.getenv("HORMONE_CONFIDENCE_RISK_BONUS", "8.0"))
         self.hormone_momentum_bonus_weight = float(os.getenv("HORMONE_MOMENTUM_BONUS_WEIGHT", "6.0"))
         self.hormone_mv_trust_bonus_weight = float(os.getenv("HORMONE_MV_TRUST_BONUS_WEIGHT", "9.0"))
-        self.endocrine_event_log: deque[str] = deque(maxlen=160)
+        self.endocrine_event_log_maxlen = max(160, int(os.getenv("ENDOCRINE_EVENT_LOG_MAXLEN", "1600")))
+        self.endocrine_event_log: deque[str] = deque(maxlen=self.endocrine_event_log_maxlen)
         self._last_endocrine_trace_step = -1
         self.organism_control_enable = os.getenv("ORGANISM_CONTROL_ENABLE", "1") == "1"
         self.organism_recent_window = max(6, int(os.getenv("ORGANISM_RECENT_WINDOW", "10")))
@@ -1157,13 +1586,101 @@ class AIAssistantApp:
             0,
             int(os.getenv("SLEEP_CYCLE_PREDICTION_KEEP_ROWS", "160000")),
         )
+        self.sleep_cycle_log_rle_enable = os.getenv("SLEEP_CYCLE_LOG_RLE_ENABLE", "1") == "1"
+        self.sleep_cycle_log_rle_min_run = max(
+            2,
+            int(os.getenv("SLEEP_CYCLE_LOG_RLE_MIN_RUN", "4")),
+        )
+        self.sleep_cycle_stm_max_rows = max(
+            0,
+            int(os.getenv("STM_MAX_ROWS", "25000")),
+        )
+        self.sleep_cycle_semantic_max_rows = max(
+            0,
+            int(os.getenv("SEMANTIC_MAX_ROWS", "40000")),
+        )
+        self.sleep_cycle_cause_effect_stm_max_rows = max(
+            0,
+            int(os.getenv("CAUSE_EFFECT_STM_MAX_ROWS", "25000")),
+        )
+        self.sleep_cycle_cause_effect_semantic_max_rows = max(
+            0,
+            int(os.getenv("CAUSE_EFFECT_SEMANTIC_MAX_ROWS", "40000")),
+        )
+        self.sleep_cycle_cause_effect_semantic_prune_enable = (
+            os.getenv("CAUSE_EFFECT_SEMANTIC_PRUNE_ENABLE", "1") == "1"
+        )
+        self.sleep_cycle_cause_effect_semantic_prune_strength_threshold = max(
+            0.0,
+            float(os.getenv("CAUSE_EFFECT_SEMANTIC_PRUNE_STRENGTH_THRESHOLD", "0.35")),
+        )
+        self.sleep_cycle_cause_effect_semantic_prune_recall_max = max(
+            0,
+            int(os.getenv("CAUSE_EFFECT_SEMANTIC_PRUNE_RECALL_MAX", "1")),
+        )
+        self.sleep_cycle_cause_effect_semantic_prune_abs_outcome_max = max(
+            0.0,
+            float(os.getenv("CAUSE_EFFECT_SEMANTIC_PRUNE_ABS_OUTCOME_MAX", "0.25")),
+        )
         self.sleep_cycle_vacuum_on_manual = os.getenv("SLEEP_CYCLE_VACUUM_ON_MANUAL", "0") == "1"
         self.sleep_cycle_vacuum_on_auto = os.getenv("SLEEP_CYCLE_VACUUM_ON_AUTO", "0") == "1"
+        self.step_hygiene_enable = os.getenv("STEP_HYGIENE_ENABLE", "1") == "1"
+        self.step_hygiene_interval_steps = max(
+            0,
+            int(os.getenv("STEP_HYGIENE_INTERVAL_STEPS", "24")),
+        )
+        self.step_hygiene_full_gc_interval_steps = max(
+            0,
+            int(os.getenv("STEP_HYGIENE_FULL_GC_INTERVAL_STEPS", "180")),
+        )
+        self.step_hygiene_pattern_cache_max = max(
+            64,
+            int(os.getenv("STEP_HYGIENE_PATTERN_CACHE_MAX", "1024")),
+        )
+        self.step_hygiene_context_cache_max = max(
+            64,
+            int(os.getenv("STEP_HYGIENE_CONTEXT_CACHE_MAX", "512")),
+        )
+        self.step_hygiene_log_keep_soft_cap = max(
+            200,
+            int(
+                os.getenv(
+                    "STEP_HYGIENE_LOG_KEEP_SOFT_CAP",
+                    str(
+                        max(
+                            self.sleep_cycle_memory_event_keep,
+                            min(self.memory_event_log_maxlen, self.sleep_cycle_memory_event_keep * 2),
+                        )
+                    ),
+                )
+            ),
+        )
+        self.step_hygiene_endocrine_log_keep_soft_cap = max(
+            80,
+            int(
+                os.getenv(
+                    "STEP_HYGIENE_ENDOCRINE_LOG_KEEP_SOFT_CAP",
+                    str(
+                        max(
+                            self.sleep_cycle_endocrine_event_keep,
+                            min(self.endocrine_event_log_maxlen, self.sleep_cycle_endocrine_event_keep * 2),
+                        )
+                    ),
+                )
+            ),
+        )
         self._last_sleep_cycle_step = -10_000
+        self._last_step_hygiene_step = -10_000
+        self._last_step_hygiene_full_gc_step = -10_000
         self.stm_reinforce_alpha = float(os.getenv("STM_REINFORCE_ALPHA", "0.2"))
         self.stm_decay_rate = float(os.getenv("STM_DECAY_RATE", "0.97"))
         self.stm_prune_threshold = float(os.getenv("STM_PRUNE_THRESHOLD", "0.15"))
         self.semantic_promotion_threshold = float(os.getenv("SEMANTIC_PROMOTION_THRESHOLD", "1.2"))
+        self.cause_effect_pruning_interval_steps = max(
+            1,
+            int(os.getenv("CAUSE_EFFECT_PRUNING_INTERVAL_STEPS", "12")),
+        )
+        self._last_cause_effect_pruning_step = -10_000
         self.stm_pruning_interval_steps = max(1, int(os.getenv("STM_PRUNING_INTERVAL_STEPS", "6")))
         self.stm_access_unused_prune_chance = min(
             1.0,
@@ -1294,6 +1811,21 @@ class AIAssistantApp:
             0,
             int(os.getenv("FRONTIER_LOCK_FORCE_SCORE_MARGIN", "120")),
         )
+        self.objective_unresolved_force_score_margin = max(
+            0,
+            int(os.getenv("OBJECTIVE_UNRESOLVED_FORCE_SCORE_MARGIN", "90")),
+        )
+        self.objective_unresolved_force_score_margin_reduction = max(
+            0,
+            int(os.getenv("OBJECTIVE_UNRESOLVED_FORCE_SCORE_MARGIN_REDUCTION", "20")),
+        )
+        self.objective_unresolved_force_require_repeat_improvement = (
+            os.getenv("OBJECTIVE_UNRESOLVED_FORCE_REQUIRE_REPEAT_IMPROVEMENT", "1") == "1"
+        )
+        self.objective_unresolved_force_repeat_delta_max = max(
+            0,
+            int(os.getenv("OBJECTIVE_UNRESOLVED_FORCE_REPEAT_DELTA_MAX", "0")),
+        )
         self.solved_region_penalty = max(0, int(os.getenv("SOLVED_REGION_PENALTY", "500")))
         self.loop_entropy_window = max(4, int(os.getenv("LOOP_ENTROPY_WINDOW", "8")))
         self.loop_entropy_threshold = max(0.0, float(os.getenv("LOOP_ENTROPY_THRESHOLD", "1.2")))
@@ -1327,7 +1859,38 @@ class AIAssistantApp:
         )
         self.visible_terminal_end_penalty = int(os.getenv("VISIBLE_TERMINAL_END_PENALTY", "40"))
         self.terminal_end_guard_margin = int(os.getenv("TERMINAL_END_GUARD_MARGIN", "8"))
+        self.terminal_override_unresolved_margin_reduction = max(
+            0,
+            int(os.getenv("TERMINAL_OVERRIDE_UNRESOLVED_MARGIN_REDUCTION", "6")),
+        )
+        self.terminal_override_require_repeat_improvement_unresolved = (
+            os.getenv("TERMINAL_OVERRIDE_REQUIRE_REPEAT_IMPROVEMENT_UNRESOLVED", "1") == "1"
+        )
         self.terminal_end_hard_avoid = os.getenv("TERMINAL_END_HARD_AVOID", "1") == "1"
+        self.terminal_trust_adapt_enable = os.getenv("TERMINAL_TRUST_ADAPT_ENABLE", "1") == "1"
+        self.terminal_trust_ema_decay = min(
+            0.999,
+            max(0.5, float(os.getenv("TERMINAL_TRUST_EMA_DECAY", "0.97"))),
+        )
+        self.terminal_trust_min_scale = min(
+            1.0,
+            max(0.05, float(os.getenv("TERMINAL_TRUST_MIN_SCALE", "0.35"))),
+        )
+        self.terminal_trust_max_scale = min(
+            1.5,
+            max(self.terminal_trust_min_scale, float(os.getenv("TERMINAL_TRUST_MAX_SCALE", "1.0"))),
+        )
+        self.terminal_trust_warmup_steps = max(
+            0,
+            int(os.getenv("TERMINAL_TRUST_WARMUP_STEPS", "64")),
+        )
+        self.terminal_trust_hard_avoid_min_scale = min(
+            1.0,
+            max(0.0, float(os.getenv("TERMINAL_TRUST_HARD_AVOID_MIN_SCALE", "0.72"))),
+        )
+        self.terminal_trust_score_ema = 0.0
+        self.terminal_trust_observations = 0
+        self._terminal_hard_filter_applied_last = False
         self.boxed_corridor_no_exit_penalty = int(os.getenv("BOXED_CORRIDOR_NO_EXIT_PENALTY", "60"))
         self.memory_risk_replay_guard_enable = os.getenv("MEMORY_RISK_REPLAY_GUARD_ENABLE", "1") == "1"
         self.memory_risk_replay_guard_min_repeat = max(
@@ -1402,6 +1965,49 @@ class AIAssistantApp:
             0.0,
             min(1.0, float(os.getenv("LONG_RUN_RUNTIME_GUARD_BLEND", "0.22"))),
         )
+        self.training_phase_enable = os.getenv("TRAINING_PHASE_ENABLE", "1") == "1"
+        self.training_phase_level = max(
+            1,
+            min(3, int(os.getenv("TRAINING_PHASE_LEVEL", "1"))),
+        )
+        self.training_phase_auto_advance = os.getenv("TRAINING_PHASE_AUTO_ADVANCE", "1") == "1"
+        self.training_phase2_min_steps = max(
+            120,
+            int(os.getenv("TRAINING_PHASE2_MIN_STEPS", "2500")),
+        )
+        self.training_phase3_min_steps = max(
+            self.training_phase2_min_steps + 120,
+            int(os.getenv("TRAINING_PHASE3_MIN_STEPS", "9000")),
+        )
+        self.training_phase1_projection_scale = max(
+            0.0,
+            min(1.0, float(os.getenv("TRAINING_PHASE1_PROJECTION_SCALE", "0.4"))),
+        )
+        self.training_phase2_projection_scale = max(
+            self.training_phase1_projection_scale,
+            min(1.0, float(os.getenv("TRAINING_PHASE2_PROJECTION_SCALE", "0.7"))),
+        )
+        self.training_phase3_projection_scale = max(
+            self.training_phase2_projection_scale,
+            min(1.0, float(os.getenv("TRAINING_PHASE3_PROJECTION_SCALE", "1.0"))),
+        )
+        self.training_phase_override_min_pred_gap = max(
+            0.0,
+            min(0.25, float(os.getenv("TRAINING_PHASE_OVERRIDE_MIN_PRED_GAP", "0.015"))),
+        )
+        self.runtime_batch_micro_progress_active = False
+        self.runtime_batch_micro_progress = 0.0
+        self.runtime_batch_micro_ramp = 0.0
+        self.runtime_batch_micro_hard_phase_bonus = 0
+        self.runtime_batch_micro_objective_phase_bonus = 0
+        self.runtime_batch_micro_phase2_scale = 1.0
+        self.runtime_batch_micro_model_assist_reliance = float(self.maze_model_assist_reliance)
+        self.runtime_batch_micro_guard_strength_scale = 1.0
+        self.runtime_batch_micro_stuck_no_progress_bonus = 0
+        self.runtime_batch_micro_stuck_repeat_bonus = 0
+        self.runtime_batch_micro_objective_unresolved_bonus = 0
+        self.runtime_batch_micro_cycle_avoid_margin_scale = 1.0
+        self.runtime_batch_micro_label = "inactive"
         self.micro_frontier_stall_enable = os.getenv("MICRO_FRONTIER_STALL_ENABLE", "1") == "1"
         self.micro_frontier_stall_window_steps = max(
             2,
@@ -1477,6 +2083,23 @@ class AIAssistantApp:
             0,
             int(os.getenv("MICRO_FRONTIER_STALL_SCORE_MAX_PENALTY", "46")),
         )
+        self.micro_frontier_stall_soft_enable = os.getenv("MICRO_FRONTIER_STALL_SOFT_ENABLE", "1") == "1"
+        self.micro_frontier_stall_soft_margin = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_SOFT_MARGIN", "10")),
+        )
+        self.micro_frontier_stall_soft_repeat_boost = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_SOFT_REPEAT_BOOST", "8")),
+        )
+        self.micro_frontier_stall_soft_risk_boost = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_SOFT_RISK_BOOST", "10")),
+        )
+        self.micro_frontier_stall_soft_signal_bonus = max(
+            0,
+            int(os.getenv("MICRO_FRONTIER_STALL_SOFT_SIGNAL_BONUS", "6")),
+        )
         self.long_loop_escape_enable = os.getenv("LONG_LOOP_ESCAPE_ENABLE", "1") == "1"
         self.long_loop_escape_no_progress_min = max(
             12,
@@ -1498,6 +2121,31 @@ class AIAssistantApp:
             0,
             int(os.getenv("LONG_LOOP_ESCAPE_EMERGENCY_NO_PROGRESS_DELTA", "16")),
         )
+        self.long_loop_subtype_learning_enable = os.getenv("LONG_LOOP_SUBTYPE_LEARNING_ENABLE", "1") == "1"
+        self.long_loop_subtype_learning_rate = max(
+            0.02,
+            min(0.9, float(os.getenv("LONG_LOOP_SUBTYPE_LEARNING_RATE", "0.18"))),
+        )
+        self.long_loop_subtype_decay_steps = max(
+            24,
+            int(os.getenv("LONG_LOOP_SUBTYPE_DECAY_STEPS", "220")),
+        )
+        self.long_loop_subtype_max_penalty = max(
+            0,
+            int(os.getenv("LONG_LOOP_SUBTYPE_MAX_PENALTY", "56")),
+        )
+        self.long_loop_subtype_min_repeat_pressure = max(
+            1,
+            int(os.getenv("LONG_LOOP_SUBTYPE_MIN_REPEAT_PRESSURE", "2")),
+        )
+        self.long_loop_subtype_penalty_scale = max(
+            0.0,
+            float(os.getenv("LONG_LOOP_SUBTYPE_PENALTY_SCALE", "1.0")),
+        )
+        self.long_loop_subtype_relief_scale = max(
+            0.0,
+            min(1.0, float(os.getenv("LONG_LOOP_SUBTYPE_RELIEF_SCALE", "0.35"))),
+        )
         self.adaptive_guard_recent_interventions: deque[int] = deque(maxlen=self.adaptive_guard_budget_window)
         self.guard_intervention_ema = 0.0
         self.guard_utility_ema = 0.5
@@ -1513,6 +2161,23 @@ class AIAssistantApp:
         self.forced_corridor_reentry_penalty = int(os.getenv("FORCED_CORRIDOR_REENTRY_PENALTY", "28"))
         self.trap_context_cause_effect_penalty_scale = float(
             os.getenv("TRAP_CAUSE_EFFECT_PENALTY_SCALE", "1.7")
+        )
+        self.loop_risk_mark_enable = os.getenv("LOOP_RISK_MARK_ENABLE", "1") == "1"
+        self.loop_risk_mark_repeat_threshold = max(
+            2,
+            int(os.getenv("LOOP_RISK_MARK_REPEAT_THRESHOLD", "2")),
+        )
+        self.loop_risk_mark_min_visits = max(
+            1,
+            int(os.getenv("LOOP_RISK_MARK_MIN_VISITS", "2")),
+        )
+        self.loop_risk_mark_unknown_max = max(
+            0,
+            int(os.getenv("LOOP_RISK_MARK_UNKNOWN_MAX", "0")),
+        )
+        self.loop_risk_mark_penalty = max(
+            0,
+            int(os.getenv("LOOP_RISK_MARK_PENALTY", "44")),
         )
         self.cycle_taboo_threshold = max(2, int(os.getenv("CYCLE_TABOO_THRESHOLD", "2")))
         self.cycle_taboo_duration_steps = max(4, int(os.getenv("CYCLE_TABOO_DURATION_STEPS", "18")))
@@ -1621,6 +2286,10 @@ class AIAssistantApp:
         self.taboo_transitions: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
         self.trap_transition_memory: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
         self.trap_cell_memory: dict[tuple[int, int], int] = {}
+        self.long_loop_subtype_memory: dict[
+            tuple[tuple[int, int], tuple[int, int]],
+            dict[str, float],
+        ] = {}
         self.spatial_transition_memory: dict[tuple[tuple[int, int], tuple[int, int]], dict[str, float]] = {}
         self.spatial_cell_memory: dict[tuple[int, int], dict[str, float]] = {}
         self.spatial_exit_last_seen_step = -10_000
@@ -1635,6 +2304,35 @@ class AIAssistantApp:
         )
         self.move_delay_ms = int(os.getenv("GAME_MOVE_DELAY_MS", "250"))
         self.look_preview_delay_ms = int(os.getenv("LOOK_AROUND_PREVIEW_MS", "180"))
+        self.normal_mode_move_delay_ms = max(0, int(os.getenv("NORMAL_MODE_GAME_MOVE_DELAY_MS", "250")))
+        self.normal_mode_look_preview_delay_ms = max(
+            0,
+            int(os.getenv("NORMAL_MODE_LOOK_AROUND_PREVIEW_MS", "180")),
+        )
+        self.normal_mode_sleep_after_maze_completion = os.getenv(
+            "NORMAL_MODE_SLEEP_AFTER_MAZE_COMPLETION",
+            "1",
+        ) == "1"
+        self.normal_mode_sleep_after_log_dump = os.getenv("NORMAL_MODE_SLEEP_AFTER_LOG_DUMP", "1") == "1"
+        self.normal_mode_adaptive_progress_report = os.getenv("NORMAL_MODE_ADAPTIVE_PROGRESS_REPORT", "1") == "1"
+        self.normal_mode_adaptive_progress_auto_tune = os.getenv("NORMAL_MODE_ADAPTIVE_PROGRESS_AUTO_TUNE", "1") == "1"
+        self.fast_mode_move_delay_ms = max(0, int(os.getenv("FAST_MODE_GAME_MOVE_DELAY_MS", "100")))
+        self.fast_mode_look_preview_delay_ms = max(0, int(os.getenv("FAST_MODE_LOOK_AROUND_PREVIEW_MS", "0")))
+        self.fast_mode_disable_sleep_after_maze_completion = os.getenv(
+            "FAST_MODE_DISABLE_SLEEP_AFTER_MAZE_COMPLETION",
+            "1",
+        ) == "1"
+        self.fast_mode_disable_sleep_after_log_dump = os.getenv("FAST_MODE_DISABLE_SLEEP_AFTER_LOG_DUMP", "1") == "1"
+        self.fast_mode_disable_adaptive_progress_report = os.getenv(
+            "FAST_MODE_DISABLE_ADAPTIVE_PROGRESS_REPORT",
+            "1",
+        ) == "1"
+        self.fast_mode_disable_adaptive_progress_auto_tune = os.getenv(
+            "FAST_MODE_DISABLE_ADAPTIVE_PROGRESS_AUTO_TUNE",
+            "1",
+        ) == "1"
+        self.fast_mode_enabled = self._detect_fast_mode_active()
+        self.fast_mode_enabled_var = tk.BooleanVar(value=self.fast_mode_enabled)
         self.player_x = (self.cell_size - self.player_size) // 2
         self.player_y = (self.cell_size - self.player_size) // 2
         self.movement_rules = (
@@ -1659,6 +2357,16 @@ class AIAssistantApp:
         )
         default_maze_label = "mazes" if self.default_maze_run_length != 1 else "maze"
         self.default_prompt_text = f"solve {self.default_maze_run_length} {default_maze_label}"
+        self.challenge_mode_force_hard_difficulty = os.getenv("CHALLENGE_MODE_FORCE_HARD_DIFFICULTY", "1") == "1"
+        self.challenge_mode_randomize_start_on_enable = os.getenv("CHALLENGE_MODE_RANDOMIZE_START_ON_ENABLE", "1") == "1"
+        self.challenge_mode_default_on = os.getenv("CHALLENGE_MODE_DEFAULT_ON", "0") == "1"
+        self.challenge_mode_run_length = max(
+            1,
+            min(self.max_repeat_executions, int(os.getenv("CHALLENGE_MODE_RUN_LENGTH", "25"))),
+        )
+        self.challenge_mode_previous_difficulty = self._normalized_maze_difficulty()
+        self.challenge_mode_enabled = self.challenge_mode_default_on
+        self.challenge_mode_enabled_var = tk.BooleanVar(value=self.challenge_mode_enabled)
         self.log_dump_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "Log Dump",
@@ -1721,6 +2429,41 @@ class AIAssistantApp:
             0.0,
             float(os.getenv("MAZE_STUCK_TRANSITION_REVERSE_BOOST", "34.0")),
         )
+        # Pattern-linked uncertainty memory: decay confidence under repeated
+        # no-progress/marked-loop contexts and bias scoring toward re-verification.
+        self.kernel_uncertainty_enable = os.getenv("KERNEL_UNCERTAINTY_ENABLE", "1") == "1"
+        self.kernel_uncertainty_no_progress_min = max(
+            2,
+            int(os.getenv("KERNEL_UNCERTAINTY_NO_PROGRESS_MIN", "8")),
+        )
+        self.kernel_uncertainty_repeat_min = max(
+            1,
+            int(os.getenv("KERNEL_UNCERTAINTY_REPEAT_MIN", "2")),
+        )
+        self.kernel_pattern_confidence_decay = max(
+            0.0,
+            min(0.95, float(os.getenv("KERNEL_PATTERN_CONFIDENCE_DECAY", "0.10"))),
+        )
+        self.kernel_pattern_uncertainty_growth = max(
+            0.0,
+            min(0.95, float(os.getenv("KERNEL_PATTERN_UNCERTAINTY_GROWTH", "0.12"))),
+        )
+        self.kernel_pattern_confidence_recovery = max(
+            0.0,
+            min(0.5, float(os.getenv("KERNEL_PATTERN_CONFIDENCE_RECOVERY", "0.03"))),
+        )
+        self.kernel_pattern_uncertainty_recovery = max(
+            0.0,
+            min(0.5, float(os.getenv("KERNEL_PATTERN_UNCERTAINTY_RECOVERY", "0.05"))),
+        )
+        self.kernel_uncertainty_reverify_bonus = max(
+            0,
+            int(os.getenv("KERNEL_UNCERTAINTY_REVERIFY_BONUS", "16")),
+        )
+        self.kernel_uncertainty_mark_replay_penalty = max(
+            0,
+            int(os.getenv("KERNEL_UNCERTAINTY_MARK_REPLAY_PENALTY", "12")),
+        )
         self.exploration_tie_noise = max(
             0.0,
             float(os.getenv("EXPLORATION_TIE_NOISE", "0.03")),
@@ -1735,6 +2478,8 @@ class AIAssistantApp:
         self._runtime_micro_frontier_signature: tuple[int, int] | None = None
         self._runtime_micro_frontier_disambiguation_cooldown_remaining = 0
         self._runtime_micro_frontier_disambiguation_signature: tuple[int, int] | None = None
+        self._runtime_no_progress_steps = 0
+        self._pattern_uncertainty_cache: dict[str, dict[str, float | int | str]] = {}
         # Loop-escape tracking: detect catastrophic penalty spirals
         self._recent_step_penalties = deque(maxlen=6)  # Last 6 step outcomes
         # Pulse set when a step-limit timeout reset occurs; consumed by step loop
@@ -1794,6 +2539,13 @@ class AIAssistantApp:
         self._build_ui()
         self._update_score_label()
         self._restore_window_geometry()
+        if self.challenge_mode_enabled:
+            self._apply_challenge_mode_profile(
+                True,
+                sync_var=True,
+                persist=False,
+                randomize_on_enable=False,
+            )
         self.root.bind("<Configure>", self._on_window_configure)
         self.root.protocol("WM_DELETE_WINDOW", self._on_shutdown)
 
@@ -1950,6 +2702,7 @@ class AIAssistantApp:
                     )
                     """
                 )
+                self._ensure_pattern_catalog_uncertainty_schema(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS maze_short_term_memory (
@@ -2192,10 +2945,31 @@ class AIAssistantApp:
                 "ALTER TABLE maze_action_outcome_memory ADD COLUMN maze_layout_id INTEGER NOT NULL DEFAULT 0"
             )
 
+    def _ensure_pattern_catalog_uncertainty_schema(self, conn: sqlite3.Connection) -> None:
+        try:
+            rows = conn.execute("PRAGMA table_info(maze_pattern_catalog)").fetchall()
+        except Exception:  # noqa: BLE001
+            return
+
+        column_names = {str(row[1]) for row in rows if len(row) > 1}
+        required_columns = {
+            "uncertainty_score": "REAL NOT NULL DEFAULT 0.0",
+            "confidence_score": "REAL NOT NULL DEFAULT 1.0",
+            "uncertainty_hits": "INTEGER NOT NULL DEFAULT 0",
+            "last_uncertainty_note": "TEXT NOT NULL DEFAULT ''",
+            "last_uncertainty_step": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column_name, column_spec in required_columns.items():
+            if column_name in column_names:
+                continue
+            conn.execute(f"ALTER TABLE maze_pattern_catalog ADD COLUMN {column_name} {column_spec}")
+
     def _maze_safety_margin(self) -> int:
         difficulty = self._normalized_maze_difficulty()
         if difficulty == "easy":
             return 8
+        if difficulty == "very hard":
+            return 2
         if difficulty == "hard":
             return 3
         return 5
@@ -2229,6 +3003,9 @@ class AIAssistantApp:
         self.taboo_transitions.clear()
         self.trap_transition_memory.clear()
         self.trap_cell_memory.clear()
+        self.long_loop_subtype_memory.clear()
+        self.verified_empty_opening_edges.clear()
+        self.loop_risk_opening_edges.clear()
         self._clear_spatial_memory_runtime()
         self.reset_epoch = 0
         self.step_limit_reset_count = 0
@@ -2450,6 +3227,16 @@ class AIAssistantApp:
         if not path:
             return False
 
+        # Do not allow objective forcing while unresolved uncertainty remains above
+        # a small safety window, even if the exit was recently visible.
+        ep_summary = self._episodic_memory_summary()
+        unresolved_unknown = int(ep_summary.get("unknown") or 0)
+        unresolved_frontier = int(ep_summary.get("frontier") or 0)
+        if unresolved_unknown > int(self.objective_override_safe_max_unknown):
+            return False
+        if unresolved_frontier > int(self.objective_override_safe_max_frontier):
+            return False
+
         probe_cell = self.current_player_cell
         prefix_len = min(4, len(path))
         min_frontier_distance = self._frontier_distance(self.current_player_cell)
@@ -2469,20 +3256,616 @@ class AIAssistantApp:
             return False
         return True
 
+    def _refresh_learned_autonomy_subphase_state(self) -> None:
+        if not self.learned_autonomy_subphase_enable:
+            self.learned_autonomy_hard_phase_bonus = 0
+            self.learned_autonomy_objective_phase_bonus = 0
+            self.learned_autonomy_soft_override_scale = 1.0
+            return
+        self.learned_autonomy_hard_phase_bonus = int(self.learned_autonomy_controller.hard_phase_bonus())
+        self.learned_autonomy_objective_phase_bonus = int(self.learned_autonomy_controller.objective_phase_bonus())
+        self.learned_autonomy_soft_override_scale = float(self.learned_autonomy_controller.soft_influence_scale())
+
+    def _effective_hard_override_phase_level(self) -> int:
+        base_phase = int(self.hard_override_phase_level)
+        if not self.learned_autonomy_subphase_enable:
+            runtime_bonus = int(getattr(self, "runtime_batch_micro_hard_phase_bonus", 0) or 0)
+            return max(0, min(4, base_phase + runtime_bonus))
+        bonus = int(self.learned_autonomy_hard_phase_bonus)
+        runtime_bonus = int(getattr(self, "runtime_batch_micro_hard_phase_bonus", 0) or 0)
+        return max(0, min(4, base_phase + bonus + runtime_bonus))
+
+    def _effective_objective_override_phase_level(self) -> int:
+        base_phase = int(self.objective_override_phase_level)
+        if not self.learned_autonomy_subphase_enable:
+            runtime_bonus = int(getattr(self, "runtime_batch_micro_objective_phase_bonus", 0) or 0)
+            return max(0, min(4, base_phase + runtime_bonus))
+        bonus = int(self.learned_autonomy_objective_phase_bonus)
+        runtime_bonus = int(getattr(self, "runtime_batch_micro_objective_phase_bonus", 0) or 0)
+        return max(0, min(4, base_phase + bonus + runtime_bonus))
+
+    def _effective_phase2_influence(self, base_influence: int) -> int:
+        influence = max(0, int(base_influence))
+        if not self.learned_autonomy_subphase_enable:
+            runtime_scale = max(
+                0.0,
+                min(1.0, float(getattr(self, "runtime_batch_micro_phase2_scale", 1.0) or 1.0)),
+            )
+            return max(0, int(round(float(influence) * runtime_scale)))
+        scaled = int(round(float(influence) * float(self.learned_autonomy_soft_override_scale)))
+        runtime_scale = max(
+            0.0,
+            min(1.0, float(getattr(self, "runtime_batch_micro_phase2_scale", 1.0) or 1.0)),
+        )
+        scaled = int(round(float(scaled) * runtime_scale))
+        return max(0, scaled)
+
+    def _effective_maze_model_assist_reliance(self) -> float:
+        if not bool(getattr(self, "runtime_batch_micro_progress_active", False)):
+            return float(self.maze_model_assist_reliance)
+        return min(
+            1.0,
+            max(
+                0.0,
+                float(getattr(self, "runtime_batch_micro_model_assist_reliance", self.maze_model_assist_reliance)),
+            ),
+        )
+
+    def _effective_batch_micro_guard_strength_scale(self) -> float:
+        if not bool(getattr(self, "runtime_batch_micro_progress_active", False)):
+            return 1.0
+        return max(
+            0.2,
+            min(
+                1.0,
+                float(getattr(self, "runtime_batch_micro_guard_strength_scale", 1.0) or 1.0),
+            ),
+        )
+
+    def _micro_progress_series_label(self) -> str:
+        current_value = max(
+            0.0,
+            float(getattr(self, "runtime_micro_progress_series_value", self.micro_progress_series_base) or 0.0),
+        )
+        return f"{current_value:.1f}"
+
+    def _batch_micro_progress_indices(self) -> tuple[int, int]:
+        value = max(
+            0.0,
+            float(getattr(self, "runtime_micro_progress_series_value", self.micro_progress_series_base) or 0.0),
+        )
+        major_batch = max(0, int(value))
+        fractional = max(0.0, min(0.999999, value - float(major_batch)))
+        micro_index = int(round(fractional * float(self.micro_progress_total)))
+        if micro_index >= int(self.micro_progress_total):
+            major_batch += 1
+            micro_index = 0
+        major_batch = max(1, min(int(self.batch_progress_total), major_batch))
+        micro_index = max(0, min(int(self.micro_progress_total), micro_index))
+        return major_batch, micro_index
+
+    def _update_micro_progress_header(self, *, announce_transition: bool) -> None:
+        batch_index, micro_index = self._batch_micro_progress_indices()
+        header_text = (
+            f"Batch {batch_index}/{self.batch_progress_total} "
+            f"| Micro {micro_index}/{self.micro_progress_total}"
+        )
+        micro_label = self._micro_progress_series_label()
+        self.micro_progress_header_var.set(header_text)
+
+        stage_index = max(0, int(getattr(self, "runtime_micro_progress_stage_index", 0) or 0))
+        if announce_transition and stage_index > int(self._last_micro_progress_stage_announce):
+            self._last_micro_progress_stage_announce = stage_index
+            self.status_var.set(
+                f"Micro progression advanced to {micro_label} (threshold {stage_index}/{len(self.micro_progress_series_thresholds)})."
+            )
+
+    def _schedule_micro_progress_header_update(self, *, announce_transition: bool = False) -> None:
+        if not hasattr(self, "root"):
+            return
+        self.root.after(
+            0,
+            lambda: self._update_micro_progress_header(announce_transition=announce_transition),
+        )
+
+    def _effective_training_phase_level(self) -> int:
+        if not self.training_phase_enable:
+            return 1
+        level = int(self.training_phase_level)
+        if self.training_phase_auto_advance and self.adaptive_controller is not None:
+            steps = int(getattr(self.adaptive_controller, "steps", 0) or 0)
+            if steps >= int(self.training_phase3_min_steps):
+                level = max(level, 3)
+            elif steps >= int(self.training_phase2_min_steps):
+                level = max(level, 2)
+        return max(1, min(3, level))
+
+    def _training_projection_feature_scale(self) -> float:
+        phase = self._effective_training_phase_level()
+        if phase >= 3:
+            return float(self.training_phase3_projection_scale)
+        if phase == 2:
+            return float(self.training_phase2_projection_scale)
+        return float(self.training_phase1_projection_scale)
+
+    def _projection_trust_scale(self) -> float:
+        if (not self.maze_projection_module_enable) or (not self.projection_trust_adapt_enable):
+            return 1.0
+        if int(self.projection_trust_observations) < int(self.projection_trust_warmup_steps):
+            return 1.0
+        normalized = max(-1.0, min(1.0, float(self.projection_trust_score_ema)))
+        blend = (normalized + 1.0) * 0.5
+        return float(self.projection_trust_min_scale) + (
+            (float(self.projection_trust_max_scale) - float(self.projection_trust_min_scale)) * blend
+        )
+
+    def _observe_projection_trust_feedback(
+        self,
+        *,
+        projection_forward_bonus: float,
+        projection_backward_penalty: float,
+        projection_backward_escape_bonus: float,
+        progress_delta: int,
+        reward_signal: float,
+        penalty_signal: float,
+    ) -> None:
+        if (not self.maze_projection_module_enable) or (not self.projection_trust_adapt_enable):
+            return
+
+        guidance_signal = float(projection_forward_bonus) + float(projection_backward_escape_bonus) - float(
+            projection_backward_penalty
+        )
+        if abs(guidance_signal) <= 1e-6:
+            return
+
+        outcome_signal = 0.0
+        if int(progress_delta) > 0:
+            outcome_signal += 1.0
+        elif int(progress_delta) < 0:
+            outcome_signal -= 1.0
+
+        reward_vs_penalty = float(reward_signal) - float(penalty_signal)
+        if reward_vs_penalty > 0.01:
+            outcome_signal += 0.5
+        elif reward_vs_penalty < -0.01:
+            outcome_signal -= 0.5
+        outcome_signal = max(-1.0, min(1.0, outcome_signal))
+
+        # Positive guidance means projection encouraged the path.
+        # Trust tracks whether that encouragement correlates with useful outcomes.
+        if guidance_signal >= 0.0:
+            trust_target = outcome_signal
+        else:
+            # Penalty-only guidance is weaker evidence because other channels can dominate selection.
+            trust_target = -0.35 * outcome_signal
+
+        self.projection_trust_score_ema = (
+            (float(self.projection_trust_score_ema) * float(self.projection_trust_ema_decay))
+            + (float(trust_target) * (1.0 - float(self.projection_trust_ema_decay)))
+        )
+        self.projection_trust_score_ema = max(-1.0, min(1.0, float(self.projection_trust_score_ema)))
+        self.projection_trust_observations = int(self.projection_trust_observations) + 1
+
+    def _terminal_risk_trust_scale(self) -> float:
+        if not self.terminal_trust_adapt_enable:
+            return 1.0
+        if int(self.terminal_trust_observations) < int(self.terminal_trust_warmup_steps):
+            return 1.0
+        normalized = max(-1.0, min(1.0, float(self.terminal_trust_score_ema)))
+        blend = (normalized + 1.0) * 0.5
+        return float(self.terminal_trust_min_scale) + (
+            (float(self.terminal_trust_max_scale) - float(self.terminal_trust_min_scale)) * blend
+        )
+
+    def _terminal_hard_avoid_active(self) -> bool:
+        if not self.terminal_end_hard_avoid:
+            return False
+        if not self.terminal_trust_adapt_enable:
+            return True
+        return self._terminal_risk_trust_scale() >= float(self.terminal_trust_hard_avoid_min_scale)
+
+    def _observe_terminal_trust_feedback(
+        self,
+        *,
+        terminal_guidance_pressure: float,
+        progress_delta: int,
+        reward_signal: float,
+        penalty_signal: float,
+        forced_single_exit: bool,
+        terminal_filtered: bool,
+    ) -> None:
+        if not self.terminal_trust_adapt_enable:
+            return
+
+        guidance_signal = max(0.0, float(terminal_guidance_pressure))
+        if bool(terminal_filtered):
+            guidance_signal += 20.0
+        if guidance_signal <= 1e-6:
+            return
+
+        outcome_signal = 0.0
+        if int(progress_delta) > 0:
+            outcome_signal += 1.0
+        elif int(progress_delta) < 0:
+            outcome_signal -= 1.0
+
+        reward_vs_penalty = float(reward_signal) - float(penalty_signal)
+        if reward_vs_penalty > 0.01:
+            outcome_signal += 0.5
+        elif reward_vs_penalty < -0.01:
+            outcome_signal -= 0.5
+        outcome_signal = max(-1.0, min(1.0, outcome_signal))
+
+        # Terminal pressure predicts downside risk, so trust rises when
+        # high-pressure selections correlate with worse outcomes.
+        trust_target = -outcome_signal
+        if bool(forced_single_exit):
+            trust_target *= 0.45
+        if bool(terminal_filtered):
+            trust_target *= 0.75
+
+        self.terminal_trust_score_ema = (
+            (float(self.terminal_trust_score_ema) * float(self.terminal_trust_ema_decay))
+            + (float(trust_target) * (1.0 - float(self.terminal_trust_ema_decay)))
+        )
+        self.terminal_trust_score_ema = max(-1.0, min(1.0, float(self.terminal_trust_score_ema)))
+        self.terminal_trust_observations = int(self.terminal_trust_observations) + 1
+
+    def _reset_batch_micro_progression_state(self, *, reason: str = "") -> None:
+        self.runtime_batch_micro_progress_active = False
+        self.runtime_batch_micro_progress = 0.0
+        self.runtime_batch_micro_ramp = 0.0
+        self.runtime_batch_micro_hard_phase_bonus = 0
+        self.runtime_batch_micro_objective_phase_bonus = 0
+        self.runtime_batch_micro_phase2_scale = 1.0
+        self.runtime_batch_micro_model_assist_reliance = float(self.maze_model_assist_reliance)
+        self.runtime_batch_micro_guard_strength_scale = 1.0
+        self.runtime_batch_micro_stuck_no_progress_bonus = 0
+        self.runtime_batch_micro_stuck_repeat_bonus = 0
+        self.runtime_batch_micro_objective_unresolved_bonus = 0
+        self.runtime_batch_micro_cycle_avoid_margin_scale = 1.0
+        self.runtime_batch_micro_label = reason or "inactive"
+        self.runtime_batch_requested_count = 0
+        self.runtime_batch_completed_count = 0
+        self.runtime_micro_progress_stage_index = 0
+        if self.maze_micro_progression_persist_enable:
+            base_value = float(self.micro_progress_persisted_series_value)
+        else:
+            base_value = float(self.micro_progress_series_base)
+        self.runtime_micro_progress_series_anchor = base_value
+        self.runtime_micro_progress_series_value = base_value
+        self._last_micro_progress_stage_announce = -1
+        self._schedule_micro_progress_header_update(announce_transition=False)
+
+    def _commit_batch_micro_progression_persistence(
+        self,
+        *,
+        requested_count: int,
+        completed_count: int,
+        success: bool,
+    ) -> None:
+        if not self.maze_micro_progression_persist_enable:
+            return
+
+        requested = max(1, int(requested_count))
+        completed = max(0, min(requested, int(completed_count)))
+        completion_ratio = float(completed) / float(requested)
+        prior_quality_ema = max(
+            0.0,
+            min(1.0, float(getattr(self, "micro_progress_batch_quality_ema", completion_ratio) or completion_ratio)),
+        )
+        ema_decay = float(self.maze_micro_progression_batch_quality_ema_decay)
+        updated_quality_ema = (prior_quality_ema * ema_decay) + (completion_ratio * (1.0 - ema_decay))
+        self.micro_progress_batch_quality_ema = max(0.0, min(1.0, float(updated_quality_ema)))
+
+        promotion_eligible = True
+        if requested < int(self.maze_micro_progression_persist_min_run):
+            promotion_eligible = False
+        if completed < int(self.maze_micro_progression_persist_min_completed_goals):
+            promotion_eligible = False
+        if completion_ratio < float(self.maze_micro_progression_persist_min_completion_ratio):
+            promotion_eligible = False
+        if self.micro_progress_batch_quality_ema < float(self.maze_micro_progression_persist_min_batch_quality_ema):
+            promotion_eligible = False
+        if self.maze_micro_progression_persist_require_success and (not bool(success)):
+            promotion_eligible = False
+
+        prior_fail_streak = int(getattr(self, "micro_progress_regression_fail_streak", 0) or 0)
+        state_changed = False
+        promoted = False
+        regressed = False
+
+        if promotion_eligible:
+            candidate_value = max(
+                float(self.micro_progress_series_base),
+                float(self.runtime_micro_progress_series_value),
+            )
+            if candidate_value > float(self.micro_progress_persisted_series_value) + 1e-9:
+                self.micro_progress_persisted_series_value = float(candidate_value)
+                self.runtime_micro_progress_series_anchor = float(candidate_value)
+                self.runtime_micro_progress_series_value = float(candidate_value)
+                promoted = True
+                state_changed = True
+            if self.micro_progress_regression_fail_streak != 0:
+                self.micro_progress_regression_fail_streak = 0
+                state_changed = True
+        else:
+            regression_underperform = False
+            if self.maze_micro_progression_regression_enable:
+                if requested >= int(self.maze_micro_progression_regression_min_run):
+                    completion_bad = completion_ratio <= float(
+                        self.maze_micro_progression_regression_max_completion_ratio
+                    )
+                    quality_bad = self.micro_progress_batch_quality_ema <= float(
+                        self.maze_micro_progression_regression_max_batch_quality_ema
+                    )
+                    goal_bad = completed < int(self.maze_micro_progression_regression_min_completed_goals)
+                    failure_gate = (not bool(success)) if self.maze_micro_progression_regression_require_failure else True
+                    regression_underperform = failure_gate and (completion_bad or quality_bad or goal_bad)
+
+            if regression_underperform:
+                self.micro_progress_regression_fail_streak = int(self.micro_progress_regression_fail_streak) + 1
+                state_changed = True
+                if self.micro_progress_regression_fail_streak >= int(self.maze_micro_progression_regression_fail_streak):
+                    step_delta = float(self.micro_progress_series_step) * float(
+                        self.maze_micro_progression_regression_step_count
+                    )
+                    candidate_floor = float(self.micro_progress_series_base)
+                    current_value = float(self.micro_progress_persisted_series_value)
+                    regressed_value = max(candidate_floor, current_value - step_delta)
+                    if regressed_value < current_value - 1e-9:
+                        self.micro_progress_persisted_series_value = float(regressed_value)
+                        self.runtime_micro_progress_series_anchor = float(regressed_value)
+                        self.runtime_micro_progress_series_value = float(regressed_value)
+                        regressed = True
+                        state_changed = True
+                    self.micro_progress_regression_fail_streak = 0
+                    state_changed = True
+            elif self.micro_progress_regression_fail_streak != 0:
+                self.micro_progress_regression_fail_streak = 0
+                state_changed = True
+
+        if prior_fail_streak != int(self.micro_progress_regression_fail_streak):
+            state_changed = True
+
+        if state_changed:
+            self._save_window_geometry()
+            if promoted:
+                self.root.after(
+                    0,
+                    lambda: self.status_var.set(
+                        (
+                            "Micro progression promoted to "
+                            f"{self._micro_progress_series_label()} "
+                            f"(batch_ema={self.micro_progress_batch_quality_ema:.3f})"
+                        )
+                    ),
+                )
+            elif regressed:
+                self.root.after(
+                    0,
+                    lambda: self.status_var.set(
+                        (
+                            "Micro progression regressed to "
+                            f"{self._micro_progress_series_label()} "
+                            f"after underperformance streak "
+                            f"(batch_ema={self.micro_progress_batch_quality_ema:.3f})"
+                        )
+                    ),
+                )
+
+    def _apply_batch_micro_progression(self, *, requested_count: int, completed_count: int) -> None:
+        if (not self.maze_batch_micro_progression_enable) or requested_count < self.maze_batch_micro_progression_min_run:
+            self._reset_batch_micro_progression_state(reason="disabled")
+            return
+
+        total = max(1, int(requested_count))
+        completed = max(0, min(total, int(completed_count)))
+        if total <= 1:
+            progress = 1.0 if completed > 0 else 0.0
+        else:
+            progress = float(completed) / float(total - 1)
+        progress = max(0.0, min(1.0, progress))
+
+        start = float(self.maze_batch_micro_progression_start_ratio)
+        if progress <= start:
+            ramp = 0.0
+        else:
+            ramp = (progress - start) / max(1e-6, 1.0 - start)
+        ramp = max(0.0, min(1.0, ramp))
+        ramp = max(0.0, min(1.0, ramp ** float(self.maze_batch_micro_progression_curve)))
+
+        hard_bonus = int(round(float(self.maze_batch_micro_progression_max_hard_phase_bonus) * ramp))
+        objective_bonus = int(round(float(self.maze_batch_micro_progression_max_objective_phase_bonus) * ramp))
+        phase2_scale = 1.0 - (float(self.maze_batch_micro_progression_phase2_reduction) * ramp)
+        phase2_scale = max(0.0, min(1.0, phase2_scale))
+
+        base_reliance = float(self.maze_model_assist_reliance)
+        floor_reliance = min(base_reliance, float(self.maze_batch_micro_progression_assist_reliance_floor))
+        effective_reliance = base_reliance + ((floor_reliance - base_reliance) * ramp)
+        effective_reliance = max(0.0, min(1.0, effective_reliance))
+        guard_strength_scale = 1.0 - (float(self.maze_batch_micro_progression_guard_strength_reduction) * ramp)
+        guard_strength_scale = max(0.2, min(1.0, guard_strength_scale))
+        stuck_no_progress_bonus = int(
+            round(float(self.maze_batch_micro_progression_stuck_trigger_no_progress_bonus) * ramp)
+        )
+        stuck_repeat_bonus = int(
+            round(float(self.maze_batch_micro_progression_stuck_trigger_repeat_bonus) * ramp)
+        )
+        objective_unresolved_bonus = int(
+            round(float(self.maze_batch_micro_progression_objective_unresolved_bonus) * ramp)
+        )
+        cycle_avoid_margin_scale = 1.0 - (
+            float(self.maze_batch_micro_progression_cycle_avoid_margin_reduction) * ramp
+        )
+        cycle_avoid_margin_scale = max(0.1, min(1.0, cycle_avoid_margin_scale))
+
+        prior_stage_index = max(0, int(getattr(self, "runtime_micro_progress_stage_index", 0) or 0))
+        stage_index = sum(1 for threshold in self.micro_progress_series_thresholds if progress >= float(threshold))
+        stage_index = max(0, min(len(self.micro_progress_series_thresholds), int(stage_index)))
+        stage_changed = stage_index > prior_stage_index
+        anchor_value = max(
+            float(self.micro_progress_series_base),
+            float(getattr(self, "runtime_micro_progress_series_anchor", self.micro_progress_series_base) or 0.0),
+        )
+        micro_series_value = anchor_value + (
+            float(self.micro_progress_series_step) * float(stage_index)
+        )
+
+        self.runtime_batch_micro_progress_active = True
+        self.runtime_batch_micro_progress = progress
+        self.runtime_batch_micro_ramp = ramp
+        self.runtime_batch_micro_hard_phase_bonus = max(0, int(hard_bonus))
+        self.runtime_batch_micro_objective_phase_bonus = max(0, int(objective_bonus))
+        self.runtime_batch_micro_phase2_scale = phase2_scale
+        self.runtime_batch_micro_model_assist_reliance = effective_reliance
+        self.runtime_batch_micro_guard_strength_scale = guard_strength_scale
+        self.runtime_batch_micro_stuck_no_progress_bonus = max(0, int(stuck_no_progress_bonus))
+        self.runtime_batch_micro_stuck_repeat_bonus = max(0, int(stuck_repeat_bonus))
+        self.runtime_batch_micro_objective_unresolved_bonus = max(0, int(objective_unresolved_bonus))
+        self.runtime_batch_micro_cycle_avoid_margin_scale = cycle_avoid_margin_scale
+        self.runtime_batch_requested_count = total
+        self.runtime_batch_completed_count = completed
+        self.runtime_micro_progress_stage_index = stage_index
+        self.runtime_micro_progress_series_anchor = anchor_value
+        self.runtime_micro_progress_series_value = micro_series_value
+        self.runtime_batch_micro_label = (
+            f"progress={round(progress, 3)} ramp={round(ramp, 3)} "
+            f"micro={self._micro_progress_series_label()} "
+            f"hard_bonus={self.runtime_batch_micro_hard_phase_bonus} "
+            f"objective_bonus={self.runtime_batch_micro_objective_phase_bonus} "
+            f"assist={round(effective_reliance, 3)} "
+            f"guard_scale={round(guard_strength_scale, 3)} "
+            f"stuck_np+={self.runtime_batch_micro_stuck_no_progress_bonus} "
+            f"stuck_r+={self.runtime_batch_micro_stuck_repeat_bonus} "
+            f"objective_unresolved+={self.runtime_batch_micro_objective_unresolved_bonus} "
+            f"cycle_margin_scale={round(cycle_avoid_margin_scale, 3)}"
+        )
+        self._schedule_micro_progress_header_update(announce_transition=stage_changed)
+
+    def _observe_learned_autonomy_step(
+        self,
+        *,
+        telemetry_channel: str,
+        intervention_types: list[str],
+        unresolved_objective_override: bool,
+    ) -> None:
+        if not self.learned_autonomy_subphase_enable:
+            return
+        transition_event = self.learned_autonomy_controller.observe_step(
+            telemetry_channel=str(telemetry_channel or "unknown"),
+            intervention_applied=bool(intervention_types),
+            utility_anchor=float(self.guard_utility_ema),
+            unresolved_objective_override=bool(unresolved_objective_override),
+        )
+        self._refresh_learned_autonomy_subphase_state()
+        if transition_event is not None:
+            self.governance_orchestrator.record_autonomy_transition(transition_event)
+
+    def _parallel_reasoning_snapshot(self) -> dict[str, float | int]:
+        if not self.parallel_reasoning_enable:
+            return {
+                "enabled": 0,
+                "step_count": 0,
+                "plan_trust_local": 0.0,
+                "plan_trust_adaptive": 0.0,
+                "plan_trust_deliberative": 0.0,
+                "confidence_ema": 0.0,
+                "utility_ema": 0.0,
+                "last_confidence": 0.0,
+                "last_confidence_margin": 0.0,
+            }
+        return self.parallel_reasoning_engine.snapshot()
+
+    def _report_global_error(
+        self,
+        *,
+        module: str,
+        code: str,
+        message: str,
+        category: GlobalErrorCategory,
+        handling_hint: ErrorHandlingHint,
+        retryable: bool,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        event = GlobalErrorEvent(
+            module=str(module),
+            category=category,
+            code=str(code),
+            message=str(message),
+            handling_hint=handling_hint,
+            retryable=bool(retryable),
+            details=dict(details or {}),
+        )
+        self.governance_orchestrator.record_error(event)
+
+    def _record_action_outcome(
+        self,
+        *,
+        action_id: str,
+        action_type: str,
+        parameters: dict[str, object],
+        context: dict[str, object],
+        outcome: str,
+        safety_flags: tuple[str, ...] = (),
+        anomalies: tuple[str, ...] = (),
+    ) -> None:
+        self.governance_orchestrator.record_action_outcome(
+            ActionOutcomeEvent(
+                action_id=str(action_id),
+                action_type=str(action_type),
+                parameters=dict(parameters),
+                context=dict(context),
+                outcome=str(outcome),
+                safety_flags=tuple(safety_flags),
+                anomalies=tuple(anomalies),
+            )
+        )
+
+    def _unified_introspection_snapshot(self) -> dict[str, object]:
+        autonomy = self.learned_autonomy_controller.snapshot() if self.learned_autonomy_subphase_enable else {}
+        reasoning = self._parallel_reasoning_snapshot() if self.parallel_reasoning_enable else {}
+        return self.governance_orchestrator.introspection_snapshot(
+            autonomy=autonomy,
+            reasoning=reasoning,
+        )
+
+    def _observe_parallel_reasoning_feedback(
+        self,
+        *,
+        selected_move: str,
+        progress_delta: int,
+        reward_signal: float,
+        penalty_signal: float,
+    ) -> None:
+        if not self.parallel_reasoning_enable:
+            return
+        if not selected_move:
+            return
+        self.parallel_reasoning_engine.observe_feedback(
+            selected_move=str(selected_move),
+            progress_delta=int(progress_delta),
+            reward_signal=float(reward_signal),
+            penalty_signal=float(penalty_signal),
+        )
+
     def _hard_override_phase_disables_frontier_lock(self) -> bool:
-        return int(self.hard_override_phase_level) >= 1
+        return self._effective_hard_override_phase_level() >= 1
 
     def _hard_override_phase_disables_persistent_frontier(self) -> bool:
-        return int(self.hard_override_phase_level) >= 2
+        return self._effective_hard_override_phase_level() >= 2
 
     def _hard_override_phase_softens_anti_oscillation(self) -> bool:
-        return int(self.hard_override_phase_level) >= 1
+        return self._effective_hard_override_phase_level() >= 1
+
+    def _hard_override_phase_softens_micro_frontier(self) -> bool:
+        return self._effective_hard_override_phase_level() >= 1
 
     def _hard_override_phase_disables_verification_priority(self) -> bool:
-        return int(self.hard_override_phase_level) >= 3
+        return self._effective_hard_override_phase_level() >= 3
 
     def _hard_override_phase_disables_plan_hold(self) -> bool:
-        return int(self.hard_override_phase_level) >= 4
+        return self._effective_hard_override_phase_level() >= 4
 
     def _prediction_accuracy(self) -> float:
         if self.prediction_resolved_count <= 0:
@@ -4855,10 +6238,24 @@ class AIAssistantApp:
                 # half-visible local cells that are shown as open/blocked in the view.
                 if cell in self.blocked_cells:
                     self.maze_known_cells[cell] = "#"
-                elif vis_kind != "none" and cell == self.current_target_cell:
+                elif cell == self.current_target_cell and (
+                    vis_kind != "none" or self.maze_known_cells.get(cell, "") == "E"
+                ):
+                    # Preserve objective knowledge once discovered; edge-context probes
+                    # can include non-visible cells and should not erase E -> .
                     self.maze_known_cells[cell] = "E"
+                elif cell == self.episode_start_player_cell and (
+                    vis_kind != "none" or self.maze_known_cells.get(cell, "") == "S"
+                ):
+                    # Preserve current-episode start anchor once observed in-beam so
+                    # perception retains a stable spatial reference.
+                    self.maze_known_cells[cell] = "S"
                 else:
                     self.maze_known_cells[cell] = "."
+
+        for known_cell, token in list(self.maze_known_cells.items()):
+            if token == "S" and known_cell != self.episode_start_player_cell:
+                self.maze_known_cells[known_cell] = "."
 
         self.maze_known_cells[(player_row, player_col)] = "P"
 
@@ -4921,9 +6318,8 @@ class AIAssistantApp:
         if distance <= 0.0:
             return 0.0
 
-        base_half_angle = max(28.0, min(88.0, self.maze_fov_cone_degrees / 2.0))
-        peripheral_bonus = max(0.0, float(self.maze_fov_peripheral) - 1.0) * 4.0
-        half_angle = max(28.0, min(88.0, base_half_angle + peripheral_bonus))
+        lateral_offset = self._fov_lateral_offset(dr, dc, fv_r, fv_c)
+        half_angle = self._effective_fov_half_angle(forward, lateral_offset)
         cos_limit = math.cos(math.radians(half_angle))
         cos_theta = forward / distance
         if cos_theta < cos_limit:
@@ -4938,7 +6334,47 @@ class AIAssistantApp:
         graze_factor = max(0.25, min(1.0, self.maze_fov_corner_graze_factor))
         corner_factor = graze_factor ** max(0, corner_graze_steps)
         strength = angle_factor * distance_factor * corner_factor
+
+        # Keep immediate in-cone cells perceptible so near diagonal exits are
+        # not suppressed below half-visible purely by attenuation math.
+        if distance <= math.sqrt(2.0):
+            immediate_floor = self.maze_fov_half_threshold + 0.01
+            strength = max(strength, immediate_floor)
+
+        # Extra side-band support for broad corridors: near-forward lateral cells
+        # remain perceptible to prevent tunnel vision on wider passages.
+        if (
+            forward <= max(1.0, float(self.maze_fov_lateral_near_depth))
+            and lateral_offset <= max(1.0, float(self.maze_fov_lateral_band_cells))
+        ):
+            lateral_floor = self.maze_fov_half_threshold + max(0.0, self.maze_fov_lateral_floor_margin)
+            strength = max(strength, lateral_floor)
+
         return max(0.0, min(1.0, strength))
+
+    def _fov_base_half_angle(self) -> float:
+        base_half_angle = max(28.0, min(88.0, self.maze_fov_cone_degrees / 2.0))
+        peripheral_bonus = max(0.0, float(self.maze_fov_peripheral) - 1.0) * 4.0
+        return max(28.0, min(88.0, base_half_angle + peripheral_bonus))
+
+    def _fov_lateral_offset(self, dr: int, dc: int, fv_r: int, fv_c: int) -> float:
+        side_r = -fv_c
+        side_c = fv_r
+        return abs((dr * side_r) + (dc * side_c))
+
+    def _effective_fov_half_angle(self, forward: float, lateral_offset: float) -> float:
+        half_angle = self._fov_base_half_angle()
+        if lateral_offset <= 0.0:
+            return half_angle
+
+        near_depth = max(1.0, float(self.maze_fov_lateral_near_depth))
+        near_weight = max(0.0, min(1.0, (near_depth - max(0.0, forward - 1.0)) / near_depth))
+        lateral_weight = max(
+            0.0,
+            min(1.0, lateral_offset / max(1.0, float(self.maze_fov_lateral_band_cells))),
+        )
+        widen = max(0.0, float(self.maze_fov_lateral_extra_degrees)) * near_weight * lateral_weight
+        return max(28.0, min(88.0, half_angle + widen))
 
     def _facing_vector_for(self, facing: str | None) -> tuple[int, int]:
         facing_value = (facing or self.player_facing or "UP").strip().upper()
@@ -4973,9 +6409,8 @@ class AIAssistantApp:
         distance = math.hypot(dr, dc)
         if distance <= 0.0:
             return True
-        base_half_angle = max(28.0, min(88.0, self.maze_fov_cone_degrees / 2.0))
-        peripheral_bonus = max(0.0, float(self.maze_fov_peripheral) - 1.0) * 4.0
-        half_angle = max(28.0, min(88.0, base_half_angle + peripheral_bonus))
+        lateral_offset = self._fov_lateral_offset(dr, dc, fv_r, fv_c)
+        half_angle = self._effective_fov_half_angle(forward, lateral_offset)
         cos_limit = math.cos(math.radians(half_angle))
         return (forward / distance) >= cos_limit
 
@@ -5086,6 +6521,9 @@ class AIAssistantApp:
             return
         if int(self.current_maze_episode_id) < 0:
             return
+        step_gap = int(self.memory_step_index) - int(self._last_layout_cell_snapshot_step)
+        if step_gap < int(self.layout_cell_snapshot_interval_steps):
+            return
 
         rows = self._layout_cell_rows_from_known_map()
         if not rows:
@@ -5138,6 +6576,7 @@ class AIAssistantApp:
                 )
                 conn.commit()
             self._last_saved_layout_cell_signature = signature
+            self._last_layout_cell_snapshot_step = int(self.memory_step_index)
         except Exception:  # noqa: BLE001
             return
 
@@ -5344,6 +6783,13 @@ class AIAssistantApp:
         player_cell = self.current_player_cell
         if player_cell:
             restored_map[player_cell] = "P"
+
+        # Rehydrate objective semantics from deterministic layout recall. Layout-cell
+        # storage tracks structure (#/.), so restore E at the known target location
+        # when that cell is traversable in the recalled map.
+        target_token = str(restored_map.get(self.current_target_cell, "") or "")
+        if target_token in {".", "P", "S", "E"} and self.current_target_cell not in self.blocked_cells:
+            restored_map[self.current_target_cell] = "E"
 
         restored_map, mutated, mutation_detail, decayed_cell = self._apply_layout_recall_mutation(restored_map)
 
@@ -5995,7 +7441,13 @@ class AIAssistantApp:
             with sqlite3.connect(self.memory_db_path) as conn:
                 rows = conn.execute(
                     """
-                    SELECT pattern_name, seen_count, pattern_signature
+                    SELECT
+                        pattern_name,
+                        seen_count,
+                        pattern_signature,
+                        uncertainty_score,
+                        confidence_score,
+                        uncertainty_hits
                     FROM maze_pattern_catalog
                     ORDER BY seen_count DESC, updated_at DESC
                     LIMIT ?
@@ -6005,9 +7457,11 @@ class AIAssistantApp:
             if not rows:
                 return "(no named patterns yet)"
             lines: list[str] = []
-            for pattern_name, seen_count, pattern_signature in rows:
+            for pattern_name, seen_count, pattern_signature, uncertainty_score, confidence_score, uncertainty_hits in rows:
                 lines.append(
-                    f"- {pattern_name} (seen={seen_count}) signature={pattern_signature}"
+                    f"- {pattern_name} (seen={seen_count}, conf={round(float(confidence_score or 1.0), 2)}, "
+                    f"unc={round(float(uncertainty_score or 0.0), 2)}, unc_hits={int(uncertainty_hits or 0)}) "
+                    f"signature={pattern_signature}"
                 )
             return "\n".join(lines)
         except Exception:  # noqa: BLE001
@@ -6038,6 +7492,233 @@ class AIAssistantApp:
                 conn.commit()
         except Exception:  # noqa: BLE001
             return
+
+    def _pattern_uncertainty_state(
+        self,
+        pattern_signature: str,
+        pattern_name: str = "",
+    ) -> dict[str, float | int | str]:
+        signature = self._canonical_pattern_signature(pattern_signature)
+        default_name = self._sanitize_pattern_name(pattern_name)
+        if not signature:
+            return {
+                "pattern_name": default_name,
+                "uncertainty_score": 0.0,
+                "confidence_score": 1.0,
+                "uncertainty_hits": 0,
+                "last_uncertainty_note": "",
+                "last_uncertainty_step": 0,
+            }
+
+        cached = self._pattern_uncertainty_cache.get(signature)
+        if cached is not None:
+            if default_name and (not str(cached.get("pattern_name", "") or "")):
+                cached["pattern_name"] = default_name
+            return cached
+
+        state = {
+            "pattern_name": default_name,
+            "uncertainty_score": 0.0,
+            "confidence_score": 1.0,
+            "uncertainty_hits": 0,
+            "last_uncertainty_note": "",
+            "last_uncertainty_step": 0,
+        }
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT pattern_name, uncertainty_score, confidence_score,
+                           uncertainty_hits, last_uncertainty_note, last_uncertainty_step
+                    FROM maze_pattern_catalog
+                    WHERE pattern_signature = ?
+                    """,
+                    (signature,),
+                ).fetchone()
+            if row:
+                raw_name = self._sanitize_pattern_name(str(row[0] or ""))
+                state["pattern_name"] = raw_name or default_name
+                state["uncertainty_score"] = max(0.0, min(1.0, float(row[1] or 0.0)))
+                state["confidence_score"] = max(0.0, min(1.0, float(row[2] or 1.0)))
+                state["uncertainty_hits"] = max(0, int(row[3] or 0))
+                state["last_uncertainty_note"] = str(row[4] or "")
+                state["last_uncertainty_step"] = max(0, int(row[5] or 0))
+        except Exception:  # noqa: BLE001
+            pass
+
+        self._pattern_uncertainty_cache[signature] = state
+        return state
+
+    def _prune_pattern_uncertainty_cache(self, keep_rows: int) -> int:
+        keep = max(0, int(keep_rows))
+        cache = self._pattern_uncertainty_cache
+        if keep <= 0 or len(cache) <= keep:
+            return 0
+
+        removable = len(cache) - keep
+        ranked: list[tuple[int, str]] = []
+        for signature, payload in cache.items():
+            last_step = 0
+            if isinstance(payload, dict):
+                try:
+                    last_step = max(0, int(payload.get("last_uncertainty_step", 0) or 0))
+                except Exception:  # noqa: BLE001
+                    last_step = 0
+            ranked.append((last_step, signature))
+
+        ranked.sort(key=lambda item: item[0])
+        removed = 0
+        for _last_step, signature in ranked[:removable]:
+            if signature in cache:
+                del cache[signature]
+                removed += 1
+        return removed
+
+    def _persist_pattern_uncertainty_state(
+        self,
+        pattern_signature: str,
+        state: dict[str, float | int | str],
+        reason: str,
+    ) -> None:
+        signature = self._canonical_pattern_signature(pattern_signature)
+        if not signature:
+            return
+        safe_name = self._sanitize_pattern_name(str(state.get("pattern_name", "") or ""))
+        uncertainty_score = max(0.0, min(1.0, float(state.get("uncertainty_score", 0.0) or 0.0)))
+        confidence_score = max(0.0, min(1.0, float(state.get("confidence_score", 1.0) or 1.0)))
+        uncertainty_hits = max(0, int(state.get("uncertainty_hits", 0) or 0))
+        last_uncertainty_note = str(state.get("last_uncertainty_note", "") or "")[:280]
+        last_uncertainty_step = max(0, int(state.get("last_uncertainty_step", 0) or 0))
+
+        try:
+            with sqlite3.connect(self.memory_db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO maze_pattern_catalog (
+                        pattern_signature,
+                        pattern_name,
+                        seen_count,
+                        last_reason,
+                        uncertainty_score,
+                        confidence_score,
+                        uncertainty_hits,
+                        last_uncertainty_note,
+                        last_uncertainty_step,
+                        updated_at
+                    ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(pattern_signature) DO UPDATE SET
+                        pattern_name = CASE
+                            WHEN excluded.pattern_name != '' THEN excluded.pattern_name
+                            ELSE maze_pattern_catalog.pattern_name
+                        END,
+                        seen_count = maze_pattern_catalog.seen_count,
+                        last_reason = excluded.last_reason,
+                        uncertainty_score = excluded.uncertainty_score,
+                        confidence_score = excluded.confidence_score,
+                        uncertainty_hits = excluded.uncertainty_hits,
+                        last_uncertainty_note = excluded.last_uncertainty_note,
+                        last_uncertainty_step = excluded.last_uncertainty_step,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        signature,
+                        safe_name,
+                        (reason or "")[:280],
+                        uncertainty_score,
+                        confidence_score,
+                        uncertainty_hits,
+                        last_uncertainty_note,
+                        last_uncertainty_step,
+                    ),
+                )
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            return
+
+    def _update_kernel_pattern_uncertainty(
+        self,
+        *,
+        pattern_signature: str,
+        pattern_name: str,
+        progress_delta: int,
+        no_progress_steps: int,
+        current_cell_repeats: int,
+        unresolved_unknown: int,
+        unresolved_frontier: int,
+        marked_replay_signal: bool,
+        transition_repeat_pressure: int,
+    ) -> str:
+        if (not self.kernel_uncertainty_enable) or self._normalized_layout_mode() != "maze":
+            return ""
+
+        signature = self._canonical_pattern_signature(pattern_signature)
+        if not signature:
+            return ""
+
+        state = self._pattern_uncertainty_state(signature, pattern_name)
+        prior_conf = max(0.0, min(1.0, float(state.get("confidence_score", 1.0) or 1.0)))
+        prior_unc = max(0.0, min(1.0, float(state.get("uncertainty_score", 0.0) or 0.0)))
+        hits = max(0, int(state.get("uncertainty_hits", 0) or 0))
+        unresolved_signal = unresolved_unknown > 0 or unresolved_frontier > 0
+
+        next_conf = prior_conf
+        next_unc = prior_unc
+        note = ""
+        loop_pressure_active = (
+            unresolved_signal
+            and no_progress_steps >= int(self.kernel_uncertainty_no_progress_min)
+            and current_cell_repeats >= int(self.kernel_uncertainty_repeat_min)
+            and progress_delta <= 0
+        )
+
+        if loop_pressure_active and marked_replay_signal:
+            pressure_units = min(6, max(0, no_progress_steps - int(self.kernel_uncertainty_no_progress_min)))
+            conf_drop = min(
+                0.55,
+                float(self.kernel_pattern_confidence_decay) + (0.02 * pressure_units),
+            )
+            unc_gain = min(
+                0.55,
+                float(self.kernel_pattern_uncertainty_growth) + (0.02 * pressure_units),
+            )
+            next_conf = max(0.05, prior_conf - conf_drop)
+            next_unc = min(1.0, prior_unc + unc_gain)
+            hits += 1
+            note = (
+                "[KERNEL-UNCERTAINTY: loop-mark replay detected "
+                f"signature={signature} pattern={self._sanitize_pattern_name(pattern_name) or '(unnamed)'} "
+                f"conf={round(prior_conf, 3)}->{round(next_conf, 3)} "
+                f"unc={round(prior_unc, 3)}->{round(next_unc, 3)} "
+                f"repeat_pressure={transition_repeat_pressure} "
+                f"no_progress={no_progress_steps} repeats={current_cell_repeats}]"
+            )
+        elif progress_delta > 0:
+            conf_gain = min(0.2, float(self.kernel_pattern_confidence_recovery) * min(3, progress_delta))
+            unc_drop = min(0.2, float(self.kernel_pattern_uncertainty_recovery) * min(3, progress_delta))
+            next_conf = min(1.0, prior_conf + conf_gain)
+            next_unc = max(0.0, prior_unc - unc_drop)
+        elif loop_pressure_active:
+            # Even without explicit marker replay, unresolved no-progress pressure
+            # should slowly raise verification uncertainty.
+            unc_gain = min(0.18, float(self.kernel_pattern_uncertainty_growth) * 0.45)
+            next_unc = min(1.0, prior_unc + unc_gain)
+            next_conf = max(0.05, prior_conf - (unc_gain * 0.35))
+
+        changed = (abs(next_conf - prior_conf) >= 1e-4) or (abs(next_unc - prior_unc) >= 1e-4)
+        if not changed:
+            return note
+
+        state["pattern_name"] = self._sanitize_pattern_name(pattern_name) or str(state.get("pattern_name", "") or "")
+        state["confidence_score"] = next_conf
+        state["uncertainty_score"] = next_unc
+        state["uncertainty_hits"] = hits
+        state["last_uncertainty_step"] = int(self.memory_step_index)
+        if note:
+            state["last_uncertainty_note"] = note
+
+        self._pattern_uncertainty_cache[signature] = state
+        self._persist_pattern_uncertainty_state(signature, state, reason="kernel_uncertainty_update")
+        return note
 
     def _working_memory_snapshot(self, current_cell: tuple[int, int] | None = None) -> tuple[str, str]:
         if self._normalized_layout_mode() != "maze":
@@ -6415,16 +8096,24 @@ class AIAssistantApp:
         self.working_memory_look_sweep = {}
         self.working_memory_look_sweep_step = -1
 
-    def _capture_working_memory_look_snapshot(self, facing: str) -> None:
+    def _capture_working_memory_look_snapshot_payload(
+        self,
+        facing: str,
+        signature: str,
+        ascii_pattern: str,
+        spatial_context_key: str = "",
+        spatial_zone: str = "z?",
+        sequence_motif: str = "none",
+    ) -> None:
         if self._normalized_layout_mode() != "maze":
             return
         direction = (facing or "").strip().upper()
         if direction not in {"UP", "RIGHT", "DOWN", "LEFT"}:
             return
 
-        signature = self.working_memory_active.get("signature", "")
-        ascii_pattern = self.working_memory_active.get("ascii", "")
-        if not signature or not ascii_pattern:
+        signature_text = str(signature or "")
+        ascii_text = str(ascii_pattern or "")
+        if not signature_text or not ascii_text:
             return
 
         if self.working_memory_look_sweep_step != self.memory_step_index:
@@ -6432,12 +8121,22 @@ class AIAssistantApp:
             self.working_memory_look_sweep_step = self.memory_step_index
 
         self.working_memory_look_sweep[direction] = {
-            "signature": signature,
-            "ascii": ascii_pattern,
-            "spatial_context_key": str(self.working_memory_active.get("spatial_context_key", "") or ""),
-            "spatial_zone": str(self.working_memory_active.get("spatial_zone", "z?") or "z?"),
-            "sequence_motif": str(self.working_memory_active.get("sequence_motif", "none") or "none"),
+            "signature": signature_text,
+            "ascii": ascii_text,
+            "spatial_context_key": str(spatial_context_key or ""),
+            "spatial_zone": str(spatial_zone or "z?"),
+            "sequence_motif": str(sequence_motif or "none"),
         }
+
+    def _capture_working_memory_look_snapshot(self, facing: str) -> None:
+        self._capture_working_memory_look_snapshot_payload(
+            facing=facing,
+            signature=str(self.working_memory_active.get("signature", "") or ""),
+            ascii_pattern=str(self.working_memory_active.get("ascii", "") or ""),
+            spatial_context_key=str(self.working_memory_active.get("spatial_context_key", "") or ""),
+            spatial_zone=str(self.working_memory_active.get("spatial_zone", "z?") or "z?"),
+            sequence_motif=str(self.working_memory_active.get("sequence_motif", "none") or "none"),
+        )
 
     def _append_memory_log(self, message: str) -> None:
         self.memory_event_log.append(f"step={self.memory_step_index} {message}")
@@ -6452,101 +8151,6 @@ class AIAssistantApp:
             if abs(delta) >= 0.0005:
                 deltas.append(f"{field}:{delta:+.3f}")
         return " ".join(deltas)
-
-    def _hormone_blended_weight(
-        self,
-        modern_value: float,
-        legacy_value: float,
-        legacy_blend_override: float | None = None,
-    ) -> float:
-        if legacy_blend_override is None:
-            legacy_blend = max(0.0, min(1.0, float(self.hormone_legacy_weight_blend)))
-        else:
-            legacy_blend = max(0.0, min(1.0, float(legacy_blend_override)))
-        return ((1.0 - legacy_blend) * float(modern_value)) + (legacy_blend * float(legacy_value))
-
-    def _legacy_batch_1_low_impact_disabled(self) -> bool:
-        # Least impact: remove legacy confidence/momentum shaping first.
-        return int(self.hormone_legacy_batch_level) >= 1
-
-    def _legacy_batch_2_repeat_pressure_disabled(self) -> bool:
-        # Next: remove legacy repeat/fatigue pressure coupling.
-        return int(self.hormone_legacy_batch_level) >= 2
-
-    def _legacy_batch_3_exploration_bias_disabled(self) -> bool:
-        # Then: remove legacy curiosity-novelty exploration weighting.
-        return int(self.hormone_legacy_batch_level) >= 3
-
-    def _legacy_batch_4_risk_guard_disabled(self) -> bool:
-        # Highest impact: remove legacy caution/risk weighting.
-        return int(self.hormone_legacy_batch_level) >= 4
-
-    def _legacy_weight_disabled_for_channel(self, channel: str) -> bool:
-        key = (channel or "").strip().lower()
-        if key in {"confidence", "momentum"}:
-            return self._legacy_batch_1_low_impact_disabled()
-        if key in {"boredom", "repeat_pressure", "fatigue"}:
-            return self._legacy_batch_2_repeat_pressure_disabled()
-        if key in {"curiosity", "exploration"}:
-            return self._legacy_batch_3_exploration_bias_disabled()
-        if key in {"caution", "risk"}:
-            return self._legacy_batch_4_risk_guard_disabled()
-        return False
-
-    def _hormone_loop_adaptation_signal(self) -> float:
-        if not self.endocrine_enabled:
-            return 0.0
-        if not hasattr(self, "endocrine"):
-            return 0.0
-        try:
-            hormone = self.endocrine.state()
-        except Exception:  # noqa: BLE001
-            return 0.0
-
-        H_caution = float(hormone.get("H_caution", 0.0) or 0.0)
-        H_boredom = float(hormone.get("H_boredom", 0.0) or 0.0)
-        H_confidence = float(hormone.get("H_confidence", 0.0) or 0.0)
-        H_persistence = float(hormone.get("H_persistence", 0.0) or 0.0)
-
-        raw_pressure = (
-            (0.75 * H_caution)
-            + (0.70 * H_boredom)
-            - (0.55 * H_confidence)
-            - (0.45 * H_persistence)
-        )
-        centered = raw_pressure - float(self.hormone_dynamic_legacy_loop_center)
-        scaled = centered * float(self.hormone_dynamic_legacy_loop_gain)
-        return max(0.0, min(1.0, scaled))
-
-    def _dynamic_legacy_blend_for_channel(self, channel: str, base_blend: float) -> float:
-        blend = max(0.0, min(1.0, float(base_blend)))
-        if blend <= 0.0:
-            return 0.0
-        if not self.hormone_dynamic_legacy_enable:
-            return blend
-
-        key = (channel or "").strip().lower()
-        if key not in {"confidence", "momentum", "boredom", "repeat_pressure", "fatigue"}:
-            return blend
-
-        loop_signal = self._hormone_loop_adaptation_signal()
-        if loop_signal <= 0.0:
-            return blend
-
-        max_suppression = float(self.hormone_dynamic_legacy_batch12_suppression_max)
-        suppression = max(0.0, min(max_suppression, loop_signal * max_suppression))
-        return blend * (1.0 - suppression)
-
-    def _hormone_weight_for_channel(self, channel: str, modern_value: float, legacy_value: float) -> float:
-        if self._legacy_weight_disabled_for_channel(channel):
-            return float(modern_value)
-        base_blend = max(0.0, min(1.0, float(self.hormone_legacy_weight_blend)))
-        effective_blend = self._dynamic_legacy_blend_for_channel(channel, base_blend)
-        return self._hormone_blended_weight(
-            modern_value,
-            legacy_value,
-            legacy_blend_override=effective_blend,
-        )
 
     def _append_endocrine_event(self, source: str, detail: str) -> None:
         text = (detail or "").strip()
@@ -6978,9 +8582,13 @@ class AIAssistantApp:
                 conn.commit()
         except Exception:  # noqa: BLE001
             return
-        self._run_cause_effect_pruning_cycle()
+        self._run_cause_effect_pruning_cycle(force=False)
 
-    def _run_cause_effect_pruning_cycle(self) -> None:
+    def _run_cause_effect_pruning_cycle(self, force: bool = False) -> None:
+        if not force:
+            step_gap = int(self.memory_step_index) - int(self._last_cause_effect_pruning_step)
+            if step_gap < int(self.cause_effect_pruning_interval_steps):
+                return
         try:
             with sqlite3.connect(self.memory_db_path) as conn:
                 conn.execute(
@@ -7028,6 +8636,7 @@ class AIAssistantApp:
                     (self.stm_prune_threshold,),
                 )
                 conn.commit()
+                self._last_cause_effect_pruning_step = int(self.memory_step_index)
         except Exception:  # noqa: BLE001
             return
 
@@ -7340,26 +8949,40 @@ class AIAssistantApp:
             f"shortest_route_integrity={integrity}"
         )
 
-    def _memory_export_text(self) -> str:
-        memory_text = self._maze_memory_view_text(limit=self.memory_export_section_limit, compact=True)
-        memory_logs = self._memory_log_text(limit=self.memory_export_log_limit)
+    def _memory_export_text(
+        self,
+        force_full: bool = False,
+        debug_text_override: str | None = None,
+    ) -> str:
+        section_limit = 0 if force_full else int(self.memory_export_section_limit)
+        log_limit = 0 if force_full else int(self.memory_export_log_limit)
+        debug_limit = 0 if force_full else int(self.memory_export_debug_limit)
+
+        memory_text = self._maze_memory_view_text(
+            limit=section_limit,
+            compact=(not force_full),
+        )
+        memory_logs = self._memory_log_text(limit=log_limit)
         memory_log_total = len(self.memory_event_log)
         hormone_text = self._hormone_monitor_text()
-        debug_text = self.debug_output.get("1.0", tk.END).strip() if hasattr(self, "debug_output") else ""
-        debug_tail, debug_total, debug_truncated = self._tail_text_lines(debug_text, self.memory_export_debug_limit)
-        if self.memory_export_section_limit > 0:
-            memory_header = f"[MEMORY] (top {self.memory_export_section_limit} rows per persisted section)"
+        if debug_text_override is not None:
+            debug_text = str(debug_text_override).strip()
+        else:
+            debug_text = self.debug_output.get("1.0", tk.END).strip() if hasattr(self, "debug_output") else ""
+        debug_tail, debug_total, debug_truncated = self._tail_text_lines(debug_text, debug_limit)
+        if section_limit > 0:
+            memory_header = f"[MEMORY] (top {section_limit} rows per persisted section)"
         else:
             memory_header = "[MEMORY] (all rows per persisted section)"
         memory_logs_header = "[MEMORY LOGS]"
-        if self.memory_export_log_limit > 0 and memory_log_total > self.memory_export_log_limit:
+        if log_limit > 0 and memory_log_total > log_limit:
             memory_logs_header = (
-                f"[MEMORY LOGS] (showing last {self.memory_export_log_limit} of {memory_log_total} events)"
+                f"[MEMORY LOGS] (showing last {log_limit} of {memory_log_total} events)"
             )
         pipeline_header = "[PIPELINE DEBUG]"
         if debug_truncated:
             pipeline_header = (
-                f"[PIPELINE DEBUG] (showing last {self.memory_export_debug_limit} of {debug_total} lines)"
+                f"[PIPELINE DEBUG] (showing last {debug_limit} of {debug_total} lines)"
             )
         return (
             f"{memory_header}\n"
@@ -8168,6 +9791,8 @@ class AIAssistantApp:
             self._refresh_memory_viewer()
             self._last_memory_viewer_refresh_step = int(self.memory_step_index)
             return
+        if self.goal_session_active or self.agent_move_animation_active:
+            return
         step_gap = int(self.memory_step_index) - int(self._last_memory_viewer_refresh_step)
         if step_gap < int(self.memory_viewer_refresh_interval_steps):
             return
@@ -8595,7 +10220,8 @@ class AIAssistantApp:
             return (False, "", 0.0)
         if not self.maze_targeted_model_assist_enable:
             return (False, "", 0.0)
-        if self.maze_model_assist_reliance <= 0.0:
+        effective_reliance = self._effective_maze_model_assist_reliance()
+        if effective_reliance <= 0.0:
             return (False, "", 0.0)
         if self.maze_step_model_hints:
             return (False, "", 0.0)
@@ -8628,7 +10254,7 @@ class AIAssistantApp:
         if no_progress_steps >= self.maze_stuck_no_progress_threshold:
             trigger_strength += 0.12
 
-        threshold = 0.92 - (0.55 * float(self.maze_model_assist_reliance))
+        threshold = 0.92 - (0.55 * float(effective_reliance))
         return (
             trigger_strength >= threshold,
             ",".join(trigger_reasons) or "pressure_spike",
@@ -8699,7 +10325,7 @@ class AIAssistantApp:
                             "Trigger context:\n"
                             f"trigger={trigger_reason}\n"
                             f"trigger_strength={trigger_strength}\n"
-                            f"reliance={round(self.maze_model_assist_reliance, 3)}\n\n"
+                            f"reliance={round(self._effective_maze_model_assist_reliance(), 3)}\n\n"
                             f"Game perception context:\n{game_context}\n\n"
                             f"Score/progress context:\n{score_context}\n\n"
                             f"Current pattern signature:\n{pattern_signature}\n\n"
@@ -8793,6 +10419,7 @@ class AIAssistantApp:
         self._runtime_micro_frontier_signature = None
         self._runtime_micro_frontier_disambiguation_cooldown_remaining = 0
         self._runtime_micro_frontier_disambiguation_signature = None
+        self._runtime_no_progress_steps = 0
         self.adaptive_guard_recent_interventions.clear()
         self.adaptive_guard_escape_lock_move = ""
         self.adaptive_guard_escape_lock_steps = 0
@@ -8800,6 +10427,10 @@ class AIAssistantApp:
         self._recent_step_penalties.clear()
         if maze_mode:
             self._normalize_long_run_runtime_state(trigger="run-set-start")
+            self._reset_batch_micro_progression_state(reason="run-set-start")
+            self._apply_batch_micro_progression(requested_count=requested_count, completed_count=0)
+        else:
+            self._reset_batch_micro_progression_state(reason="non-maze")
         recent_state_keys: deque[tuple[tuple[int, int], str]] = deque(maxlen=18)
         recent_positions: deque[tuple[int, int]] = deque(maxlen=max(8, self.maze_stuck_window))
         no_progress_steps = 0
@@ -8843,6 +10474,8 @@ class AIAssistantApp:
                 ("objective_progress_guard", "[OBJECTIVE-PROGRESS-GUARD:"),
                 ("micro_frontier_stall", "[MICRO-FRONTIER-STALL:"),
                 ("micro_frontier_disambiguation", "[MICRO-FRONTIER-DISAMBIGUATION:"),
+                ("long_loop_escape_override", "Long-loop no-progress escape override:"),
+                ("long_loop_subtype_learn", "[LONG-LOOP-SUBTYPE-LEARN:"),
                 ("deathloop_escape_override", "Deathloop escape override:"),
                 (
                     "navigation_lock_emergency_escape",
@@ -8879,6 +10512,8 @@ class AIAssistantApp:
             channel = _phase1_channel(memory_event, intervention_types)
             intervention_token = "|".join(intervention_types) if intervention_types else "none"
             guard_budget_used, guard_budget_allowed = self._adaptive_guard_budget_snapshot()
+            autonomy_snapshot = self.learned_autonomy_controller.snapshot()
+            reasoning_snapshot = self._parallel_reasoning_snapshot()
             return (
                 f"telemetry_channel={channel} "
                 f"telemetry_intervention={1 if intervention_types else 0} "
@@ -8890,11 +10525,32 @@ class AIAssistantApp:
                 f"telemetry_guard_strength={round(self._adaptive_guard_strength(), 3)} "
                 f"telemetry_guard_budget_used={guard_budget_used} "
                 f"telemetry_guard_budget_allowed={guard_budget_allowed} "
-                f"telemetry_guard_utility_ema={round(float(self.guard_utility_ema), 3)}"
+                f"telemetry_guard_utility_ema={round(float(self.guard_utility_ema), 3)} "
+                f"telemetry_autonomy_score={autonomy_snapshot.get('score_ema', 0.0)} "
+                f"telemetry_effective_objective_phase={self._effective_objective_override_phase_level()} "
+                f"telemetry_effective_hard_phase={self._effective_hard_override_phase_level()} "
+                f"telemetry_autonomy_soft_scale={autonomy_snapshot.get('soft_influence_scale', 1.0)} "
+                f"telemetry_reasoning_conf={reasoning_snapshot.get('last_confidence', 0.0)} "
+                f"telemetry_reasoning_conf_margin={reasoning_snapshot.get('last_confidence_margin', 0.0)} "
+                f"telemetry_reasoning_trust_local={reasoning_snapshot.get('plan_trust_local', 0.0)} "
+                f"telemetry_reasoning_trust_adaptive={reasoning_snapshot.get('plan_trust_adaptive', 0.0)} "
+                f"telemetry_reasoning_trust_deliberative={reasoning_snapshot.get('plan_trust_deliberative', 0.0)} "
+                f"telemetry_batch_progress={round(float(getattr(self, 'runtime_batch_micro_progress', 0.0)), 3)} "
+                f"telemetry_batch_ramp={round(float(getattr(self, 'runtime_batch_micro_ramp', 0.0)), 3)} "
+                f"telemetry_batch_hard_bonus={int(getattr(self, 'runtime_batch_micro_hard_phase_bonus', 0) or 0)} "
+                f"telemetry_batch_objective_bonus={int(getattr(self, 'runtime_batch_micro_objective_phase_bonus', 0) or 0)} "
+                f"telemetry_batch_assist_reliance={round(self._effective_maze_model_assist_reliance(), 3)} "
+                f"telemetry_batch_guard_scale={round(self._effective_batch_micro_guard_strength_scale(), 3)} "
+                f"telemetry_batch_stuck_no_progress_bonus={int(getattr(self, 'runtime_batch_micro_stuck_no_progress_bonus', 0) or 0)} "
+                f"telemetry_batch_stuck_repeat_bonus={int(getattr(self, 'runtime_batch_micro_stuck_repeat_bonus', 0) or 0)} "
+                f"telemetry_training_phase={self._effective_training_phase_level()} "
+                f"telemetry_projection_feature_scale={round(self._training_projection_feature_scale(), 3)}"
             )
 
         while iterations < iteration_budget:
             completed, remaining = self._goal_session_progress()
+            if maze_mode:
+                self._apply_batch_micro_progression(requested_count=requested_count, completed_count=completed)
             self.auto_goal_hits_remaining = remaining
             if remaining <= 0:
                 break
@@ -9019,6 +10675,7 @@ class AIAssistantApp:
             self._runtime_micro_frontier_no_progress_steps = 0
             self._runtime_micro_frontier_stall_streak = 0
             self._runtime_micro_frontier_signature = None
+            self._runtime_no_progress_steps = 0
             if maze_mode:
                 if self._maze_reexplore_cooldown_remaining > 0:
                     self._maze_reexplore_cooldown_remaining = max(0, self._maze_reexplore_cooldown_remaining - 1)
@@ -9160,7 +10817,7 @@ class AIAssistantApp:
                     and retry_capture_resolution_ok
                     and self._active_same_maze_retry_count() > 0
                 )
-                objective_override_batch_stage = max(0, min(4, int(self.objective_override_phase_level)))
+                objective_override_batch_stage = self._effective_objective_override_phase_level()
                 objective_phase4_disable_override = objective_override_batch_stage >= 4
                 objective_priority_active = bool(target_known_in_episode and (sticky_objective_active or target_path_now)) and (
                     sticky_objective_active
@@ -9193,6 +10850,7 @@ class AIAssistantApp:
                     no_progress_steps = 0
                 else:
                     no_progress_steps += 1
+                self._runtime_no_progress_steps = int(no_progress_steps)
 
                 # Detect unresolved tiny-pocket stalls where uncertainty stays tiny
                 # and the agent replays local corridor choices without progress.
@@ -9250,13 +10908,18 @@ class AIAssistantApp:
                     contradiction_escalation = 2
                 elif local_contradiction_pressure >= 0.9:
                     contradiction_escalation = 1
+                (
+                    loop_pattern_escalation,
+                    loop_pattern_awareness,
+                    loop_pattern_confidence,
+                ) = self._loop_pattern_awareness_escalation(self.current_player_cell)
                 repeat_trigger_threshold = max(
                     2,
-                    self.maze_stuck_repeat_threshold - contradiction_escalation,
+                    self.maze_stuck_repeat_threshold - contradiction_escalation - loop_pattern_escalation,
                 )
                 no_progress_trigger_threshold = max(
                     2,
-                    self.maze_stuck_no_progress_threshold - contradiction_escalation,
+                    self.maze_stuck_no_progress_threshold - contradiction_escalation - loop_pattern_escalation,
                 )
                 recent_objective_routing_count = int(sum(recent_objective_routing_flags))
                 recent_objective_intervention_count = int(sum(recent_objective_intervention_flags))
@@ -9343,21 +11006,34 @@ class AIAssistantApp:
                     or micro_frontier_stall_active
                     or objective_unresolved_override_streak >= 3
                 )
+                objective_unresolved_bonus = max(
+                    0,
+                    int(getattr(self, "runtime_batch_micro_objective_unresolved_bonus", 0) or 0),
+                )
+                effective_unknown_for_objective = max(0, int(_unknown_now) + objective_unresolved_bonus)
+                effective_frontier_for_objective = max(0, int(_frontier_now) + objective_unresolved_bonus)
                 objective_verification_unresolved = (
-                    _unknown_now >= adaptive_unknown_trigger_threshold
-                    or _frontier_now >= adaptive_frontier_trigger_threshold
+                    effective_unknown_for_objective >= adaptive_unknown_trigger_threshold
+                    or effective_frontier_for_objective >= adaptive_frontier_trigger_threshold
                     or (
                         retry_count_now > 0
                         and (
-                            _unknown_now >= retry_unknown_trigger_threshold
-                            or _frontier_now >= retry_frontier_trigger_threshold
+                            effective_unknown_for_objective >= retry_unknown_trigger_threshold
+                            or effective_frontier_for_objective >= retry_frontier_trigger_threshold
                         )
                     )
                 )
+                # At stronger attenuation phases, treat any remaining unresolved
+                # uncertainty as sufficient to hold objective overrides, rather
+                # than waiting for larger threshold pockets.
+                objective_unresolved_any = (_unknown_now > 0 or _frontier_now > 0)
+                objective_batch_unresolved_signal = bool(
+                    objective_verification_unresolved
+                    or (objective_override_batch_stage >= 3 and objective_unresolved_any)
+                )
                 if (
                     objective_override_batch_stage >= 1
-                    and objective_verification_unresolved
-                    and (not self._hard_override_phase_disables_verification_priority())
+                    and objective_batch_unresolved_signal
                     and (not mv_exit_beam_equivalent)
                     and (not mv_bootstrap_route_active)
                     and (not mv_route_mode_active)
@@ -9379,14 +11055,14 @@ class AIAssistantApp:
                         batch_weaken_hold = (
                             (not exit_visible_now)
                             and (
-                                _unknown_now >= retry_unknown_trigger_threshold
-                                or _frontier_now >= retry_frontier_trigger_threshold
+                                effective_unknown_for_objective >= retry_unknown_trigger_threshold
+                                or effective_frontier_for_objective >= retry_frontier_trigger_threshold
                             )
                         )
                     else:
                         batch_weaken_hold = (not exit_visible_now) and (
-                            _unknown_now >= adaptive_unknown_trigger_threshold
-                            or _frontier_now >= adaptive_frontier_trigger_threshold
+                            effective_unknown_for_objective >= adaptive_unknown_trigger_threshold
+                            or effective_frontier_for_objective >= adaptive_frontier_trigger_threshold
                             or objective_unresolved_override_streak >= 1
                         )
 
@@ -9410,7 +11086,6 @@ class AIAssistantApp:
                     objective_priority_active
                     and objective_verification_unresolved
                     and objective_verification_loop_pressure
-                    and (not self._hard_override_phase_disables_verification_priority())
                     and (not visible_exit_latch_active)
                     and (not mv_exit_beam_equivalent)
                     and (not mv_bootstrap_route_active)
@@ -9430,10 +11105,30 @@ class AIAssistantApp:
                         f"repeats={current_cell_repeats} no_progress={no_progress_steps} "
                         f"retries={retry_count_now} "
                         f"entropy={round(self._recent_move_direction_entropy(), 3)} "
+                        f"loop_awareness={round(loop_pattern_awareness, 3)} "
+                        f"loop_conf={round(loop_pattern_confidence, 3)} "
+                        f"loop_escalation={loop_pattern_escalation} "
                         f"adaptive_sensitivity={round(adaptive_guard_sensitivity, 3)} "
                         f"adaptive_intervention_rate={round(recent_objective_intervention_rate, 3)} "
                         f"adaptive_hold_rate={round(recent_objective_hold_rate, 3)}]"
                     )
+                micro_frontier_deadlock_relax = bool(
+                    micro_frontier_stall_active
+                    and _frontier_now <= 0
+                    and _unknown_now <= 1
+                    and no_progress_steps >= int(self.micro_frontier_stall_disambiguation_no_progress_cap)
+                )
+                effective_repeat_trigger_threshold = max(
+                    1,
+                    int(adaptive_repeat_trigger_threshold)
+                    + int(getattr(self, "runtime_batch_micro_stuck_repeat_bonus", 0) or 0),
+                )
+                effective_no_progress_trigger_threshold = max(
+                    1,
+                    int(adaptive_no_progress_trigger_threshold)
+                    + int(getattr(self, "runtime_batch_micro_stuck_no_progress_bonus", 0) or 0),
+                )
+
                 should_trigger_stuck_reexplore = (
                     self.maze_stuck_reexplore_enable
                     and self._maze_reexplore_cooldown_remaining == 0
@@ -9445,13 +11140,14 @@ class AIAssistantApp:
                     and (not sticky_objective_active)
                     and ((not frontier_lock_active) or micro_frontier_stall_active)
                     and (not exit_visible_now)
-                    and current_cell_repeats >= adaptive_repeat_trigger_threshold
-                    and no_progress_steps >= adaptive_no_progress_trigger_threshold
+                    and current_cell_repeats >= effective_repeat_trigger_threshold
+                    and no_progress_steps >= effective_no_progress_trigger_threshold
                     and (
                         _frontier_now > 0
                         or _unknown_now >= retry_unknown_trigger_threshold
                         or (not fully_mapped_now and _frontier_now > 0)
                     )
+                    and (not micro_frontier_deadlock_relax)
                 )
                 if should_trigger_stuck_reexplore:
                     # Escalate re-explore duration when repeated stuck episodes occur.
@@ -9470,11 +11166,21 @@ class AIAssistantApp:
                     or visible_exit_latch_active
                     or mv_exit_beam_equivalent
                     or mv_route_mode_active
+                    or micro_frontier_deadlock_relax
                 ):
                     # Do not let exploration recovery suppress objective routing
                     # once target is known or a retry frontier target is available.
                     self._maze_reexplore_cooldown_remaining = 0
                     stuck_reexplore_active = False
+                    if micro_frontier_deadlock_relax:
+                        objective_relax_guard_note = self._append_guard_reason(
+                            objective_relax_guard_note,
+                            (
+                                "[OBJECTIVE-RELAX-GUARD: micro-frontier deadlock released "
+                                f"stuck_reexplore unknown={_unknown_now} frontier={_frontier_now} "
+                                f"no_progress={no_progress_steps}]"
+                            ),
+                        )
 
                 if self.maze_map_doubt_enable and fully_mapped_now and current_state_repeats >= self.maze_map_doubt_repeat_threshold:
                     map_doubt_stall_count += 1
@@ -9519,7 +11225,6 @@ class AIAssistantApp:
                     objective_phase4_disable_override
                     and (_unknown_now > 0 or _frontier_now > 0)
                     and (not fully_mapped_now)
-                    and (not self._hard_override_phase_disables_verification_priority())
                     and (not mv_bootstrap_route_active)
                     and (not mv_route_mode_active)
                     and (not mv_capture_ready)
@@ -9636,10 +11341,52 @@ class AIAssistantApp:
                         for move in ["UP", "DOWN", "LEFT", "RIGHT"]
                         if self._is_valid_traversal_move(move)
                     ]
+                    objective_margin_effective = max(
+                        0,
+                        int(self.objective_unresolved_force_score_margin)
+                        - int(self.objective_unresolved_force_score_margin_reduction),
+                    )
                     objective_force_allowed, objective_force_reason = self._frontier_forced_move_score_guard(
                         objective_move,
                         objective_candidates,
+                        margin_override=objective_margin_effective,
                     )
+                    if (
+                        objective_force_allowed
+                        and self.objective_unresolved_force_require_repeat_improvement
+                        and objective_candidates
+                    ):
+                        objective_candidate_cell = self._neighbor_for_move(
+                            self.current_player_cell,
+                            objective_move,
+                        )
+                        objective_forward_count, objective_reverse_count = self._recent_transition_counts(
+                            self.current_player_cell,
+                            objective_candidate_cell,
+                        )
+                        objective_repeat_pressure = int(objective_forward_count + objective_reverse_count)
+
+                        best_repeat_pressure = objective_repeat_pressure
+                        for candidate_move, candidate_cell in objective_candidates:
+                            if candidate_move == objective_move:
+                                continue
+                            candidate_forward_count, candidate_reverse_count = self._recent_transition_counts(
+                                self.current_player_cell,
+                                candidate_cell,
+                            )
+                            candidate_repeat_pressure = int(candidate_forward_count + candidate_reverse_count)
+                            if candidate_repeat_pressure < best_repeat_pressure:
+                                best_repeat_pressure = candidate_repeat_pressure
+
+                        repeat_delta_max = int(self.objective_unresolved_force_repeat_delta_max)
+                        if objective_repeat_pressure > (best_repeat_pressure + repeat_delta_max):
+                            objective_force_allowed = False
+                            objective_force_reason = (
+                                "repeat_pressure_guard "
+                                f"objective={objective_repeat_pressure} "
+                                f"best={best_repeat_pressure} "
+                                f"delta_max={repeat_delta_max}"
+                            )
                     if not objective_force_allowed:
                         objective_move = ""
                         if sticky_objective_active:
@@ -9876,7 +11623,8 @@ class AIAssistantApp:
                     legal_candidate_rows.sort(
                         key=lambda item: (int(item[1].get("score", 0) or 0), tie_order.get(item[0], 9))
                     )
-                    assist_candidate_count = max(2, min(4, 2 + int(round(self.maze_model_assist_reliance * 2))))
+                    effective_reliance = self._effective_maze_model_assist_reliance()
+                    assist_candidate_count = max(2, min(4, 2 + int(round(effective_reliance * 2))))
                     assist_result = self._targeted_maze_model_assist(
                         user_prompt,
                         plan,
@@ -9901,7 +11649,7 @@ class AIAssistantApp:
                         planner_breakdown = _step_breakdown(selected_move) if selected_move else None
                         assist_score = int(assist_breakdown.get("score", 0) or 0)
                         planner_score = int(planner_breakdown.get("score", 0) or 0) if planner_breakdown else 0
-                        assist_margin = max(2, int(round(4 + (self.maze_model_assist_reliance * 24))))
+                        assist_margin = max(2, int(round(4 + (effective_reliance * 24))))
                         if bool(assist_result.get("used")) and ((not selected_move) or assist_score <= planner_score + assist_margin):
                             selected_move = targeted_assist_move
                             fallback_used = False
@@ -9945,7 +11693,9 @@ class AIAssistantApp:
                             guard_reason,
                             (
                                 f"Plan-hold phase attenuation: accepted model move '{model_candidate}' "
-                                f"instead of planner '{best_explore}' (phase={int(self.hard_override_phase_level)})."
+                                f"instead of planner '{best_explore}' "
+                                f"(phase={self._effective_hard_override_phase_level()} "
+                                f"base_phase={int(self.hard_override_phase_level)})."
                             ),
                         )
                     else:
@@ -9954,7 +11704,7 @@ class AIAssistantApp:
                         candidate_score = candidate_breakdown["score"]
                         best_score = best_breakdown["score"]
                         if self.phase2_soft_override_enable:
-                            soft_plan_delta = int(self.phase2_plan_hold_influence)
+                            soft_plan_delta = self._effective_phase2_influence(self.phase2_plan_hold_influence)
                             adjusted_model_score = int(candidate_score - soft_plan_delta)
                             if adjusted_model_score <= int(best_score):
                                 selected_move = model_candidate
@@ -10012,6 +11762,13 @@ class AIAssistantApp:
             telemetry_reward_signal = 0.0
             telemetry_penalty_signal = 0.0
             telemetry_decision_score = 0.0
+            projection_score_delta_log = 0
+            projection_score_delta_scaled_log = 0.0
+            projection_score_delta_clipped_log = 0
+            projection_forward_bonus_log = 0
+            projection_backward_penalty_log = 0
+            projection_backward_escape_bonus_log = 0
+            projection_score_influence_scale_log = 0.0
             if (not maze_mode) and self.strict_progress_guard and selected_move and selected_distance > current_distance:
                 guard_move = self._best_progress_move()
                 if guard_move:
@@ -10055,6 +11812,27 @@ class AIAssistantApp:
 
             if maze_mode and self._is_valid_traversal_move(selected_move):
                 selected_breakdown = self._exploration_move_breakdown(selected_move)
+                current_pattern_signature = self._canonical_pattern_signature(self._current_pattern_signature())
+                current_pattern_name = self._sanitize_pattern_name(str(evaluation.get("pattern_name", "") or ""))
+                if not current_pattern_name:
+                    current_pattern_name = self._local_planner_pattern_name(current_pattern_signature)
+                uncertainty_note = self._update_kernel_pattern_uncertainty(
+                    pattern_signature=current_pattern_signature,
+                    pattern_name=current_pattern_name,
+                    progress_delta=int(current_distance - selected_distance),
+                    no_progress_steps=max(0, int(no_progress_steps)),
+                    current_cell_repeats=max(0, int(current_cell_repeats)),
+                    unresolved_unknown=max(0, int(locals().get("_unknown_now", 0) or 0)),
+                    unresolved_frontier=max(0, int(locals().get("_frontier_now", 0) or 0)),
+                    marked_replay_signal=bool(int(selected_breakdown.get("loop_risk_marked_edge", 0) or 0) > 0),
+                    transition_repeat_pressure=max(
+                        0,
+                        int(selected_breakdown.get("recent_transition_count", 0) or 0)
+                        + int(selected_breakdown.get("recent_reverse_transition_count", 0) or 0),
+                    ),
+                )
+                if uncertainty_note:
+                    guard_reason = self._append_guard_reason(guard_reason, uncertainty_note)
                 if (
                     int(selected_breakdown.get("forced_single_exit", 0) or 0) > 0
                     and int(selected_breakdown.get("transition_pressure_bucket", 0) or 0) > 0
@@ -10066,16 +11844,94 @@ class AIAssistantApp:
                 outcome_value = -decision_score
                 reward_signal = max(0.0, -decision_score)
                 penalty_signal = max(0.0, decision_score)
+                projection_guidance_reward = 0.0
                 if int(selected_breakdown.get("forced_single_exit", 0) or 0) > 0 and outcome_value < 0:
                     # Avoid writing huge punishment traces for unavoidable moves.
                     capped_penalty = min(12.0, penalty_signal)
                     penalty_signal = capped_penalty
                     reward_signal = 0.0
                     outcome_value = -capped_penalty
+                if self.kernel_projection_reward_enable and self.maze_projection_module_enable:
+                    projection_forward_bonus = max(
+                        0.0,
+                        float(selected_breakdown.get("projection_forward_bonus", 0) or 0),
+                    )
+                    projection_escape_bonus = max(
+                        0.0,
+                        float(selected_breakdown.get("projection_backward_escape_bonus", 0) or 0),
+                    )
+                    projection_backtrace_penalty = max(
+                        0.0,
+                        float(selected_breakdown.get("projection_backward_penalty", 0) or 0),
+                    )
+                    # Small intrinsic reward when projection guidance is net-positive.
+                    projection_guidance_signal = max(
+                        0.0,
+                        projection_forward_bonus
+                        + projection_escape_bonus
+                        - (0.35 * projection_backtrace_penalty),
+                    )
+                    projection_guidance_reward = min(
+                        float(self.kernel_projection_reward_max),
+                        projection_guidance_signal * float(self.kernel_projection_reward_scale),
+                    )
+                    if projection_guidance_reward > 0.0:
+                        reward_signal += projection_guidance_reward
+                        outcome_value += projection_guidance_reward
                 telemetry_decision_score = decision_score
                 telemetry_reward_signal = reward_signal
                 telemetry_penalty_signal = penalty_signal
                 telemetry_progress_delta = int(current_distance - selected_distance)
+                projection_score_delta_log = int(selected_breakdown.get("projection_score_delta", 0) or 0)
+                projection_score_delta_scaled_log = float(
+                    selected_breakdown.get("projection_score_delta_scaled", 0.0) or 0.0
+                )
+                projection_score_delta_clipped_log = int(
+                    selected_breakdown.get("projection_score_delta_clipped", 0) or 0
+                )
+                projection_forward_bonus_log = int(selected_breakdown.get("projection_forward_bonus", 0) or 0)
+                projection_backward_penalty_log = int(
+                    selected_breakdown.get("projection_backward_penalty", 0) or 0
+                )
+                projection_backward_escape_bonus_log = int(
+                    selected_breakdown.get("projection_backward_escape_bonus", 0) or 0
+                )
+                projection_score_influence_scale_log = float(
+                    selected_breakdown.get("projection_score_influence_scale", 0.0) or 0.0
+                )
+                terminal_guidance_pressure_log = (
+                    float(selected_breakdown.get("terminal_hard_veto_penalty", 0) or 0)
+                    + float(selected_breakdown.get("dead_end_end_slap_penalty", 0) or 0)
+                    + float(selected_breakdown.get("dead_end_tip_revisit_slap_penalty", 0) or 0)
+                    + float(selected_breakdown.get("visible_terminal_end_penalty", 0) or 0)
+                    + float(selected_breakdown.get("boxed_corridor_penalty", 0) or 0)
+                )
+                self._observe_projection_trust_feedback(
+                    projection_forward_bonus=float(selected_breakdown.get("projection_forward_bonus", 0) or 0),
+                    projection_backward_penalty=float(
+                        selected_breakdown.get("projection_backward_penalty", 0) or 0
+                    ),
+                    projection_backward_escape_bonus=float(
+                        selected_breakdown.get("projection_backward_escape_bonus", 0) or 0
+                    ),
+                    progress_delta=telemetry_progress_delta,
+                    reward_signal=telemetry_reward_signal,
+                    penalty_signal=telemetry_penalty_signal,
+                )
+                self._observe_terminal_trust_feedback(
+                    terminal_guidance_pressure=terminal_guidance_pressure_log,
+                    progress_delta=telemetry_progress_delta,
+                    reward_signal=telemetry_reward_signal,
+                    penalty_signal=telemetry_penalty_signal,
+                    forced_single_exit=bool(selected_breakdown.get("forced_single_exit", 0) or 0),
+                    terminal_filtered=bool(self._terminal_hard_filter_applied_last),
+                )
+                self._observe_parallel_reasoning_feedback(
+                    selected_move=selected_move,
+                    progress_delta=telemetry_progress_delta,
+                    reward_signal=telemetry_reward_signal,
+                    penalty_signal=telemetry_penalty_signal,
+                )
                 tags: list[str] = []
                 risk_tag_fields = [
                     ("dead_end_end_slap_penalty", "dead_end_slap"),
@@ -10083,6 +11939,7 @@ class AIAssistantApp:
                     ("revisit_dead_end_entrance_penalty", "dead_end_entrance_revisit"),
                     ("transition_repeat_penalty", "transition_repeat"),
                     ("cycle_pair_penalty", "cycle_pair"),
+                    ("loop_risk_marked_edge_penalty", "loop_marker"),
                     ("visible_terminal_end_penalty", "visible_terminal"),
                     ("boxed_corridor_penalty", "boxed_corridor"),
                     ("immediate_backtrack_hard_penalty", "immediate_backtrack"),
@@ -10105,6 +11962,8 @@ class AIAssistantApp:
                         tags.append("frontier_visible")
                     if bool(selected_breakdown.get("edge_junction", False)):
                         tags.append("junction_visible")
+                if projection_guidance_reward > 0.0:
+                    tags.append("projection_guidance_reward")
                 self._record_action_outcome_memory(
                     action_taken=f"MOVE_{selected_move}",
                     outcome_value=outcome_value,
@@ -10130,6 +11989,7 @@ class AIAssistantApp:
                         "spatial_exit_recall_bonus": selected_breakdown.get("spatial_exit_recall_bonus", 0),
                         "spatial_exit_recall_penalty": selected_breakdown.get("spatial_exit_recall_penalty", 0),
                         "spatial_exit_progress_norm": selected_breakdown.get("spatial_exit_progress_norm", 0.0),
+                        "projection_guidance_reward": round(projection_guidance_reward, 3),
                         "adaptive_features": selected_breakdown.get("adaptive_features", []),
                         "from_cell": list(self.current_player_cell),
                         "to_cell": list(self._neighbor_for_move(self.current_player_cell, selected_move)),
@@ -10180,11 +12040,26 @@ class AIAssistantApp:
             iterations += 1
             step_reason_text = f"{evaluation['reason']} {guard_reason}".strip()
             step_memory_event = str(evaluation.get("memory_event", "") or "")
+            step_intervention_types = _phase1_intervention_types(step_reason_text, guard_override)
+            step_telemetry_channel = _phase1_channel(step_memory_event, step_intervention_types)
+            unresolved_objective_override_active = bool(
+                maze_mode
+                and ("objective_override" in step_intervention_types)
+                and (
+                    locals().get("_unknown_now", 0) > 0
+                    or locals().get("_frontier_now", 0) > 0
+                )
+            )
             self._update_adaptive_guard_learning(
                 guard_override=guard_override,
                 progress_delta=telemetry_progress_delta,
                 reward_signal=telemetry_reward_signal,
                 penalty_signal=telemetry_penalty_signal,
+            )
+            self._observe_learned_autonomy_step(
+                telemetry_channel=step_telemetry_channel,
+                intervention_types=step_intervention_types,
+                unresolved_objective_override=unresolved_objective_override_active,
             )
 
             step_logs.append(
@@ -10198,6 +12073,20 @@ class AIAssistantApp:
                 f"distance_before={'hidden' if maze_mode else current_distance} "
                 f"distance_after={'hidden' if maze_mode else selected_distance} "
                 f"reason={step_reason_text} "
+                f"projection_score_delta={projection_score_delta_log} "
+                f"projection_score_delta_scaled={round(projection_score_delta_scaled_log, 3)} "
+                f"projection_score_delta_clipped={projection_score_delta_clipped_log} "
+                f"projection_forward_bonus={projection_forward_bonus_log} "
+                f"projection_backward_penalty={projection_backward_penalty_log} "
+                f"projection_backward_escape_bonus={projection_backward_escape_bonus_log} "
+                f"projection_score_influence_scale={round(projection_score_influence_scale_log, 3)} "
+                f"projection_trust_scale={round(self._projection_trust_scale(), 3)} "
+                f"projection_trust_score_ema={round(float(self.projection_trust_score_ema), 3)} "
+                f"terminal_guidance_pressure={round(terminal_guidance_pressure_log, 3)} "
+                f"terminal_trust_scale={round(self._terminal_risk_trust_scale(), 3)} "
+                f"terminal_trust_score_ema={round(float(self.terminal_trust_score_ema), 3)} "
+                f"terminal_hard_avoid_active={1 if self._terminal_hard_avoid_active() else 0} "
+                f"terminal_filtered={1 if self._terminal_hard_filter_applied_last else 0} "
                 f"{_phase1_telemetry_fields(step_memory_event, step_reason_text, guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, decision_score=telemetry_decision_score)} "
                 f"{('[MV-PREPLAN: ' + mv_preplan_note + ']') if mv_preplan_note else ''}".strip()
             )
@@ -10233,6 +12122,14 @@ class AIAssistantApp:
             self.root.after(0, lambda: self.status_var.set("Step mode stopped: max iterations reached"))
 
         self._end_auto_goal_session()
+        if success:
+            self._enter_power_save_mode()
+        self._commit_batch_micro_progression_persistence(
+            requested_count=requested_count,
+            completed_count=completed,
+            success=success,
+        )
+        self._reset_batch_micro_progression_state(reason="run-set-end")
         regression_summary: dict[str, object] = {
             "maze_layout_id": last_regression_layout_id,
             "recall_source": self.layout_recall_last_source,
@@ -10263,8 +12160,22 @@ class AIAssistantApp:
         container = tk.Frame(self.root, padx=14, pady=14)
         container.pack(fill=tk.BOTH, expand=True)
 
-        title = tk.Label(container, text="AI Assistant", font=("Helvetica", 18, "bold"))
-        title.pack(anchor="w", pady=(0, 8))
+        title_row = tk.Frame(container)
+        title_row.pack(fill=tk.X, pady=(0, 8))
+
+        title = tk.Label(title_row, text="AI Assistant", font=("Helvetica", 18, "bold"))
+        title.pack(side=tk.LEFT, anchor="w")
+
+        self.micro_progress_label = tk.Label(
+            title_row,
+            textvariable=self.micro_progress_header_var,
+            font=("Helvetica", 10),
+            fg="#3b4d69",
+            anchor="e",
+            justify=tk.RIGHT,
+        )
+        self.micro_progress_label.pack(side=tk.RIGHT, anchor="e")
+        self._update_micro_progress_header(announce_transition=False)
 
         panes = tk.PanedWindow(container, orient=tk.HORIZONTAL, sashwidth=6)
         panes.pack(fill=tk.BOTH, expand=True)
@@ -10362,9 +12273,10 @@ class AIAssistantApp:
             "easy",
             "medium",
             "hard",
+            "very hard",
             command=self._on_layout_settings_changed,
         )
-        diff_menu.config(width=7)
+        diff_menu.config(width=10)
         diff_menu.pack(side=tk.LEFT, padx=(6, 8))
 
         tk.Checkbutton(
@@ -10384,6 +12296,14 @@ class AIAssistantApp:
         )
         self.mv_route_mode_checkbutton.pack(side=tk.LEFT, padx=(0, 10))
         self._sync_machine_vision_toggle_controls()
+
+        tk.Checkbutton(
+            game_controls,
+            text="Fast Mode",
+            variable=self.fast_mode_enabled_var,
+            command=self._on_fast_mode_toggled,
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(0, 10))
 
         tk.Button(game_controls, text="Reset Target", command=self._spawn_target).pack(side=tk.LEFT)
         tk.Button(game_controls, text="New Layout", command=self._regenerate_blockers).pack(side=tk.LEFT, padx=(8, 0))
@@ -10405,6 +12325,10 @@ class AIAssistantApp:
             padx=(8, 0),
         )
         tk.Button(memory_header, text="Log Dump", command=self.dump_memory_bundle).pack(
+            side=tk.RIGHT,
+            padx=(8, 0),
+        )
+        tk.Button(memory_header, text="Log Dump Full", command=self.dump_memory_bundle_full).pack(
             side=tk.RIGHT,
             padx=(8, 0),
         )
@@ -10500,12 +12424,63 @@ class AIAssistantApp:
                 (
                     "legacy_batches: "
                     f"level={int(self.hormone_legacy_batch_level)} "
-                    f"objective_override_phase={int(self.objective_override_phase_level)} "
-                    f"hard_override_phase={int(self.hard_override_phase_level)} "
+                    f"objective_override_phase={self._effective_objective_override_phase_level()} "
+                    f"hard_override_phase={self._effective_hard_override_phase_level()} "
+                    f"base_objective_phase={int(self.objective_override_phase_level)} "
+                    f"base_hard_phase={int(self.hard_override_phase_level)} "
                     f"b1_low_impact_off={1 if self._legacy_batch_1_low_impact_disabled() else 0} "
                     f"b2_repeat_off={1 if self._legacy_batch_2_repeat_pressure_disabled() else 0} "
                     f"b3_exploration_off={1 if self._legacy_batch_3_exploration_bias_disabled() else 0} "
                     f"b4_risk_off={1 if self._legacy_batch_4_risk_guard_disabled() else 0}"
+                )
+            )
+            if self.learned_autonomy_subphase_enable:
+                autonomy_snapshot = self.learned_autonomy_controller.snapshot()
+                lines.append(
+                    (
+                        "learned_autonomy_subphase: "
+                        f"score={autonomy_snapshot.get('score_ema', 0.0)} "
+                        f"learned_only_ema={autonomy_snapshot.get('learned_only_ema', 0.0)} "
+                        f"hardcoded_only_ema={autonomy_snapshot.get('hardcoded_only_ema', 0.0)} "
+                        f"intervention_ema={autonomy_snapshot.get('intervention_ema', 0.0)} "
+                        f"utility_ema={autonomy_snapshot.get('utility_ema', 0.0)} "
+                        f"unresolved_override_ema={autonomy_snapshot.get('unresolved_override_ema', 0.0)} "
+                        f"hard_phase_bonus={autonomy_snapshot.get('hard_phase_bonus', 0)} "
+                        f"objective_phase_bonus={autonomy_snapshot.get('objective_phase_bonus', 0)} "
+                        f"soft_scale={autonomy_snapshot.get('soft_influence_scale', 1.0)}"
+                    )
+                )
+            else:
+                lines.append("learned_autonomy_subphase: disabled")
+
+            if self.parallel_reasoning_enable:
+                reasoning_snapshot = self._parallel_reasoning_snapshot()
+                lines.append(
+                    (
+                        "parallel_reasoning_engine: "
+                        f"confidence={reasoning_snapshot.get('last_confidence', 0.0)} "
+                        f"confidence_margin={reasoning_snapshot.get('last_confidence_margin', 0.0)} "
+                        f"confidence_ema={reasoning_snapshot.get('confidence_ema', 0.0)} "
+                        f"utility_ema={reasoning_snapshot.get('utility_ema', 0.0)} "
+                        f"trust_local={reasoning_snapshot.get('plan_trust_local', 0.0)} "
+                        f"trust_adaptive={reasoning_snapshot.get('plan_trust_adaptive', 0.0)} "
+                        f"trust_deliberative={reasoning_snapshot.get('plan_trust_deliberative', 0.0)} "
+                        f"steps={reasoning_snapshot.get('step_count', 0)}"
+                    )
+                )
+            else:
+                lines.append("parallel_reasoning_engine: disabled")
+
+            governance_snapshot = self._unified_introspection_snapshot()
+            recent_events = governance_snapshot.get("recent_events", [])
+            lines.append(
+                (
+                    "governance_orchestrator: "
+                    f"enabled={governance_snapshot.get('enabled', 0)} "
+                    f"policy={governance_snapshot.get('policy_version', 'unknown')} "
+                    f"stage={governance_snapshot.get('development_stage', 'unknown')} "
+                    f"registered={len(governance_snapshot.get('registered_modules', []))} "
+                    f"recent_events={len(recent_events) if isinstance(recent_events, list) else 0}"
                 )
             )
 
@@ -10550,7 +12525,7 @@ class AIAssistantApp:
                 self.layout_mode.set(saved_mode)
 
             saved_difficulty = str(payload.get("maze_difficulty", "")).strip().lower()
-            if saved_difficulty in {"easy", "medium", "hard"}:
+            if saved_difficulty in {"easy", "medium", "hard", "very hard"}:
                 self.maze_difficulty.set(saved_difficulty)
 
             saved_mv_route_mode = payload.get("mv_route_planning_mode_enable")
@@ -10587,6 +12562,50 @@ class AIAssistantApp:
                     self.machine_vision_master_enable = False
                     self.machine_vision_master_enable_var.set(False)
 
+            saved_fast_mode = payload.get("fast_mode_enabled")
+            if isinstance(saved_fast_mode, bool):
+                self._apply_fast_mode_profile(saved_fast_mode, sync_var=True, persist=False)
+            elif isinstance(saved_fast_mode, (int, float)):
+                self._apply_fast_mode_profile(bool(saved_fast_mode), sync_var=True, persist=False)
+            elif isinstance(saved_fast_mode, str):
+                parsed_text = saved_fast_mode.strip().lower()
+                if parsed_text in {"1", "true", "yes", "on"}:
+                    self._apply_fast_mode_profile(True, sync_var=True, persist=False)
+                elif parsed_text in {"0", "false", "no", "off"}:
+                    self._apply_fast_mode_profile(False, sync_var=True, persist=False)
+
+            saved_challenge_mode = payload.get("challenge_mode_enabled")
+            if isinstance(saved_challenge_mode, bool):
+                self._apply_challenge_mode_profile(
+                    saved_challenge_mode,
+                    sync_var=True,
+                    persist=False,
+                    randomize_on_enable=False,
+                )
+            elif isinstance(saved_challenge_mode, (int, float)):
+                self._apply_challenge_mode_profile(
+                    bool(saved_challenge_mode),
+                    sync_var=True,
+                    persist=False,
+                    randomize_on_enable=False,
+                )
+            elif isinstance(saved_challenge_mode, str):
+                parsed_text = saved_challenge_mode.strip().lower()
+                if parsed_text in {"1", "true", "yes", "on"}:
+                    self._apply_challenge_mode_profile(
+                        True,
+                        sync_var=True,
+                        persist=False,
+                        randomize_on_enable=False,
+                    )
+                elif parsed_text in {"0", "false", "no", "off"}:
+                    self._apply_challenge_mode_profile(
+                        False,
+                        sync_var=True,
+                        persist=False,
+                        randomize_on_enable=False,
+                    )
+
             self._sync_machine_vision_toggle_controls()
 
             self._on_layout_settings_changed()
@@ -10595,6 +12614,50 @@ class AIAssistantApp:
             if isinstance(saved_sash, int):
                 self._saved_sash_x = saved_sash
                 self.root.after(50, self._restore_pane_sash)
+
+            saved_micro_progress = payload.get("micro_progress_persisted_series_value")
+            if self.maze_micro_progression_persist_enable:
+                parsed_micro_progress: float | None = None
+                if isinstance(saved_micro_progress, (int, float)):
+                    parsed_micro_progress = float(saved_micro_progress)
+                elif isinstance(saved_micro_progress, str):
+                    try:
+                        parsed_micro_progress = float(saved_micro_progress.strip())
+                    except Exception:  # noqa: BLE001
+                        parsed_micro_progress = None
+                if parsed_micro_progress is not None:
+                    self.micro_progress_persisted_series_value = max(
+                        float(self.micro_progress_series_base),
+                        parsed_micro_progress,
+                    )
+                    self.runtime_micro_progress_series_anchor = float(self.micro_progress_persisted_series_value)
+                    self.runtime_micro_progress_series_value = float(self.micro_progress_persisted_series_value)
+                    self.runtime_micro_progress_stage_index = 0
+                    self._schedule_micro_progress_header_update(announce_transition=False)
+
+                saved_quality_ema = payload.get("micro_progress_batch_quality_ema")
+                parsed_quality_ema: float | None = None
+                if isinstance(saved_quality_ema, (int, float)):
+                    parsed_quality_ema = float(saved_quality_ema)
+                elif isinstance(saved_quality_ema, str):
+                    try:
+                        parsed_quality_ema = float(saved_quality_ema.strip())
+                    except Exception:  # noqa: BLE001
+                        parsed_quality_ema = None
+                if parsed_quality_ema is not None:
+                    self.micro_progress_batch_quality_ema = max(0.0, min(1.0, parsed_quality_ema))
+
+                saved_fail_streak = payload.get("micro_progress_regression_fail_streak")
+                parsed_fail_streak: int | None = None
+                if isinstance(saved_fail_streak, (int, float)):
+                    parsed_fail_streak = int(saved_fail_streak)
+                elif isinstance(saved_fail_streak, str):
+                    try:
+                        parsed_fail_streak = int(float(saved_fail_streak.strip()))
+                    except Exception:  # noqa: BLE001
+                        parsed_fail_streak = None
+                if parsed_fail_streak is not None:
+                    self.micro_progress_regression_fail_streak = max(0, parsed_fail_streak)
         except Exception:  # noqa: BLE001
             # If window-state file is missing/corrupt, continue with defaults.
             return
@@ -10632,6 +12695,19 @@ class AIAssistantApp:
             payload["maze_difficulty"] = self._normalized_maze_difficulty()
             payload["mv_route_planning_mode_enable"] = bool(self.mv_route_planning_mode_enable)
             payload["machine_vision_master_enable"] = bool(self.machine_vision_master_enable)
+            payload["fast_mode_enabled"] = bool(self.fast_mode_enabled)
+            payload["challenge_mode_enabled"] = bool(self.challenge_mode_enabled)
+            payload["micro_progress_persisted_series_value"] = round(
+                float(self.micro_progress_persisted_series_value),
+                6,
+            )
+            payload["micro_progress_batch_quality_ema"] = round(
+                float(getattr(self, "micro_progress_batch_quality_ema", 1.0) or 1.0),
+                6,
+            )
+            payload["micro_progress_regression_fail_streak"] = int(
+                getattr(self, "micro_progress_regression_fail_streak", 0) or 0
+            )
             if hasattr(self, "main_panes"):
                 sash_x, _ = self.main_panes.sash_coord(0)
                 payload["pane_sash_x"] = int(sash_x)
@@ -10658,6 +12734,72 @@ class AIAssistantApp:
         log_deque.clear()
         log_deque.extend(tail)
         return current - keep
+
+    def _split_step_prefixed_log_line(self, line: str) -> tuple[int | None, str]:
+        text = str(line or "").strip()
+        if not text:
+            return (None, "")
+        match = re.match(r"^step=(\d+)\s+(.*)$", text)
+        if not match:
+            return (None, text)
+        step_val = None
+        try:
+            step_val = int(match.group(1))
+        except Exception:  # noqa: BLE001
+            step_val = None
+        return (step_val, str(match.group(2)).strip())
+
+    def _compress_log_deque_runs(self, log_deque: deque[str], min_run: int) -> tuple[int, int]:
+        threshold = max(2, int(min_run))
+        rows = list(log_deque)
+        if len(rows) < threshold:
+            return (0, 0)
+
+        compressed_rows = 0
+        compressed_runs = 0
+        rebuilt: list[str] = []
+        idx = 0
+        row_total = len(rows)
+        while idx < row_total:
+            first_step, first_payload = self._split_step_prefixed_log_line(rows[idx])
+            last_step = first_step
+            cursor = idx + 1
+            while cursor < row_total:
+                next_step, next_payload = self._split_step_prefixed_log_line(rows[cursor])
+                if next_payload != first_payload:
+                    break
+                last_step = next_step
+                cursor += 1
+
+            run_len = cursor - idx
+            if run_len >= threshold and first_payload:
+                compressed_rows += max(0, run_len - 1)
+                compressed_runs += 1
+                final_step = (
+                    int(last_step)
+                    if last_step is not None
+                    else int(first_step)
+                    if first_step is not None
+                    else int(self.memory_step_index)
+                )
+                start_step = (
+                    int(first_step)
+                    if first_step is not None
+                    else final_step
+                )
+                payload_preview = first_payload.replace("\n", " ")[:220]
+                rebuilt.append(
+                    f"step={final_step} compressed_run={run_len} first_step={start_step} "
+                    f"last_step={final_step} event={payload_preview}"
+                )
+            else:
+                rebuilt.extend(rows[idx:cursor])
+            idx = cursor
+
+        if compressed_rows > 0:
+            log_deque.clear()
+            log_deque.extend(rebuilt)
+        return (compressed_rows, compressed_runs)
 
     def _prune_table_to_recent_rows(self, conn: sqlite3.Connection, table_name: str, keep_rows: int) -> int:
         keep = max(0, int(keep_rows))
@@ -10688,6 +12830,42 @@ class AIAssistantApp:
         except Exception:  # noqa: BLE001
             return 0
 
+    def _prune_table_to_recent_timestamp_rows(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        keep_rows: int,
+    ) -> int:
+        keep = max(0, int(keep_rows))
+        if keep <= 0:
+            return 0
+
+        allowed_tables = {
+            "maze_short_term_memory",
+            "maze_semantic_memory",
+            "maze_cause_effect_stm",
+            "maze_cause_effect_semantic",
+        }
+        if table_name not in allowed_tables:
+            return 0
+
+        try:
+            deleted_rows = conn.execute(
+                f"""
+                DELETE FROM {table_name}
+                WHERE rowid IN (
+                    SELECT rowid
+                    FROM {table_name}
+                    ORDER BY updated_at DESC, rowid DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (keep,),
+            )
+            return max(0, int(deleted_rows.rowcount or 0))
+        except Exception:  # noqa: BLE001
+            return 0
+
     def _run_sleep_cycle(self, trigger: str = "manual", auto_mode: bool = False) -> dict[str, int | str]:
         if not self.sleep_cycle_enable:
             return {
@@ -10696,11 +12874,31 @@ class AIAssistantApp:
                 "reason": "disabled",
             }
 
+        compressed_memory_events = 0
+        compressed_memory_runs = 0
+        compressed_endocrine_events = 0
+        compressed_endocrine_runs = 0
+        if self.sleep_cycle_log_rle_enable:
+            compressed_memory_events, compressed_memory_runs = self._compress_log_deque_runs(
+                self.memory_event_log,
+                self.sleep_cycle_log_rle_min_run,
+            )
+            compressed_endocrine_events, compressed_endocrine_runs = self._compress_log_deque_runs(
+                self.endocrine_event_log,
+                self.sleep_cycle_log_rle_min_run,
+            )
+
         removed_memory_events = self._trim_log_deque(self.memory_event_log, self.sleep_cycle_memory_event_keep)
         removed_endocrine_events = self._trim_log_deque(self.endocrine_event_log, self.sleep_cycle_endocrine_event_keep)
         usage_reinforced_stm = 0
         usage_reinforced_cause_effect = 0
         usage_pruned_stm = 0
+        cause_effect_stm_pruned = 0
+        cause_effect_semantic_pruned = 0
+        stm_rows_pruned = 0
+        semantic_rows_pruned = 0
+        cause_effect_stm_rows_pruned = 0
+        cause_effect_semantic_rows_pruned = 0
         hormone_prune_applied = 0
         hormone_prune_passes = 0
         hormone_saturated_before = 0
@@ -10750,6 +12948,53 @@ class AIAssistantApp:
                 )
                 usage_pruned_stm = int(usage_stale_pruned.rowcount or 0)
 
+                cause_stale_pruned = conn.execute(
+                    """
+                    DELETE FROM maze_cause_effect_stm
+                    WHERE strength < ?
+                      AND recall_count <= 1
+                    """,
+                    (float(self.stm_prune_threshold),),
+                )
+                cause_effect_stm_pruned = int(cause_stale_pruned.rowcount or 0)
+
+                if self.sleep_cycle_cause_effect_semantic_prune_enable:
+                    semantic_stale_pruned = conn.execute(
+                        """
+                        DELETE FROM maze_cause_effect_semantic
+                        WHERE recall_count <= ?
+                          AND strength < ?
+                          AND abs(avg_outcome) <= ?
+                        """,
+                        (
+                            int(self.sleep_cycle_cause_effect_semantic_prune_recall_max),
+                            float(self.sleep_cycle_cause_effect_semantic_prune_strength_threshold),
+                            float(self.sleep_cycle_cause_effect_semantic_prune_abs_outcome_max),
+                        ),
+                    )
+                    cause_effect_semantic_pruned = int(semantic_stale_pruned.rowcount or 0)
+
+                stm_rows_pruned = self._prune_table_to_recent_timestamp_rows(
+                    conn,
+                    "maze_short_term_memory",
+                    self.sleep_cycle_stm_max_rows,
+                )
+                semantic_rows_pruned = self._prune_table_to_recent_timestamp_rows(
+                    conn,
+                    "maze_semantic_memory",
+                    self.sleep_cycle_semantic_max_rows,
+                )
+                cause_effect_stm_rows_pruned = self._prune_table_to_recent_timestamp_rows(
+                    conn,
+                    "maze_cause_effect_stm",
+                    self.sleep_cycle_cause_effect_stm_max_rows,
+                )
+                cause_effect_semantic_rows_pruned = self._prune_table_to_recent_timestamp_rows(
+                    conn,
+                    "maze_cause_effect_semantic",
+                    self.sleep_cycle_cause_effect_semantic_max_rows,
+                )
+
                 action_rows_pruned = self._prune_table_to_recent_rows(
                     conn,
                     "maze_action_outcome_memory",
@@ -10765,7 +13010,7 @@ class AIAssistantApp:
             db_error = str(exc)
 
         stm_result = self._run_stm_pruning_cycle()
-        self._run_cause_effect_pruning_cycle()
+        self._run_cause_effect_pruning_cycle(force=True)
 
         if self.endocrine_enabled and self.sleep_cycle_hormone_prune_enable and hasattr(self, "endocrine"):
             try:
@@ -10797,11 +13042,21 @@ class AIAssistantApp:
         summary: dict[str, int | str] = {
             "trigger": str(trigger or "manual"),
             "auto": 1 if auto_mode else 0,
+            "compressed_memory_events": int(compressed_memory_events),
+            "compressed_memory_runs": int(compressed_memory_runs),
+            "compressed_endocrine_events": int(compressed_endocrine_events),
+            "compressed_endocrine_runs": int(compressed_endocrine_runs),
             "removed_memory_events": int(removed_memory_events),
             "removed_endocrine_events": int(removed_endocrine_events),
             "usage_reinforced_stm": int(usage_reinforced_stm),
             "usage_reinforced_cause_effect": int(usage_reinforced_cause_effect),
             "usage_pruned_stm": int(usage_pruned_stm),
+            "cause_effect_stm_pruned": int(cause_effect_stm_pruned),
+            "cause_effect_semantic_pruned": int(cause_effect_semantic_pruned),
+            "stm_rows_pruned": int(stm_rows_pruned),
+            "semantic_rows_pruned": int(semantic_rows_pruned),
+            "cause_effect_stm_rows_pruned": int(cause_effect_stm_rows_pruned),
+            "cause_effect_semantic_rows_pruned": int(cause_effect_semantic_rows_pruned),
             "hormone_prune": int(hormone_prune_applied),
             "hormone_prune_passes": int(hormone_prune_passes),
             "hormone_sat_before": int(hormone_saturated_before),
@@ -10820,10 +13075,18 @@ class AIAssistantApp:
         summary_text = (
             "[SLEEP-CYCLE: "
             f"trigger={summary['trigger']} auto={summary['auto']} step={summary['memory_step']} "
+            f"log_rle={summary['compressed_memory_events']}@{summary['compressed_memory_runs']} "
+            f"endo_rle={summary['compressed_endocrine_events']}@{summary['compressed_endocrine_runs']} "
             f"mem_log_trim={summary['removed_memory_events']} endocrine_trim={summary['removed_endocrine_events']} "
             f"usage_reinforce_stm={summary['usage_reinforced_stm']} "
             f"usage_reinforce_cause={summary['usage_reinforced_cause_effect']} "
             f"usage_pruned_stm={summary['usage_pruned_stm']} "
+            f"cause_stm_pruned={summary['cause_effect_stm_pruned']} "
+            f"cause_sem_pruned={summary['cause_effect_semantic_pruned']} "
+            f"stm_rows_pruned={summary['stm_rows_pruned']} "
+            f"semantic_rows_pruned={summary['semantic_rows_pruned']} "
+            f"cause_stm_rows_pruned={summary['cause_effect_stm_rows_pruned']} "
+            f"cause_sem_rows_pruned={summary['cause_effect_semantic_rows_pruned']} "
             f"hormone_prune={summary['hormone_prune']} "
             f"hormone_passes={summary['hormone_prune_passes']} "
             f"hormone_sat={summary['hormone_sat_before']}->{summary['hormone_sat_after']} "
@@ -10852,6 +13115,84 @@ class AIAssistantApp:
             f"prediction_pruned={summary.get('prediction_rows_pruned', 0)}"
         )
         self.status_var.set(status_text)
+
+    def _run_step_hygiene(self) -> dict[str, int | str]:
+        removed_memory_events = self._trim_log_deque(
+            self.memory_event_log,
+            self.step_hygiene_log_keep_soft_cap,
+        )
+        removed_endocrine_events = self._trim_log_deque(
+            self.endocrine_event_log,
+            self.step_hygiene_endocrine_log_keep_soft_cap,
+        )
+        pattern_cache_pruned = self._prune_pattern_uncertainty_cache(self.step_hygiene_pattern_cache_max)
+
+        context_cache_entries = int(len(self._prediction_context_stats_cache) + len(self._prediction_context_trust_cache))
+        context_cache_cleared = 0
+        if context_cache_entries > int(self.step_hygiene_context_cache_max):
+            self._prediction_context_stats_cache.clear()
+            self._prediction_context_trust_cache.clear()
+            context_cache_cleared = 1
+
+        hazard_cache_entries = int(len(self._hazard_preparedness_cache))
+        hazard_cache_cleared = 0
+        if hazard_cache_entries > max(128, int(self.step_hygiene_context_cache_max)):
+            self._hazard_preparedness_cache.clear()
+            hazard_cache_cleared = 1
+
+        gc_mode = "gen0"
+        gc_collected = 0
+        full_gc_ran = 0
+        full_interval = max(0, int(self.step_hygiene_full_gc_interval_steps))
+        if full_interval > 0 and (int(self.memory_step_index) - int(self._last_step_hygiene_full_gc_step)) >= full_interval:
+            gc_collected = int(gc.collect())
+            gc_mode = "full"
+            full_gc_ran = 1
+            self._last_step_hygiene_full_gc_step = int(self.memory_step_index)
+        else:
+            gc_collected = int(gc.collect(0))
+
+        if (
+            removed_memory_events > 0
+            or removed_endocrine_events > 0
+            or pattern_cache_pruned > 0
+            or context_cache_cleared > 0
+            or hazard_cache_cleared > 0
+            or gc_collected > 0
+        ):
+            self._append_memory_log(
+                "[STEP-HYGIENE: "
+                f"step={int(self.memory_step_index)} "
+                f"gc_mode={gc_mode} gc={gc_collected} "
+                f"mem_trim={removed_memory_events} endocrine_trim={removed_endocrine_events} "
+                f"pattern_cache_pruned={pattern_cache_pruned} "
+                f"context_cache_cleared={context_cache_cleared} "
+                f"hazard_cache_cleared={hazard_cache_cleared}]"
+            )
+
+        return {
+            "step": int(self.memory_step_index),
+            "removed_memory_events": int(removed_memory_events),
+            "removed_endocrine_events": int(removed_endocrine_events),
+            "pattern_cache_pruned": int(pattern_cache_pruned),
+            "context_cache_cleared": int(context_cache_cleared),
+            "hazard_cache_cleared": int(hazard_cache_cleared),
+            "gc_collected": int(gc_collected),
+            "gc_full": int(full_gc_ran),
+        }
+
+    def _maybe_run_step_hygiene(self) -> None:
+        if not self.step_hygiene_enable:
+            return
+        if self._normalized_layout_mode() != "maze":
+            return
+        interval = max(0, int(self.step_hygiene_interval_steps))
+        if interval <= 0:
+            return
+        if int(self.memory_step_index) - int(self._last_step_hygiene_step) < interval:
+            return
+        self._run_step_hygiene()
+        self._last_step_hygiene_step = int(self.memory_step_index)
 
     def run_sleep_cycle_now(self) -> None:
         summary = self._run_sleep_cycle(trigger="manual-button", auto_mode=False)
@@ -11169,18 +13510,8 @@ class AIAssistantApp:
             self.status_var.set("Snapshot import failed (restored previous local state)")
 
     def dump_memory_bundle(self) -> None:
-        bundle = redact_secrets(self._memory_export_text())
         try:
-            os.makedirs(self.log_dump_dir, exist_ok=True)
-            filename = self._log_dump_filename()
-            base_name, ext = os.path.splitext(filename)
-            output_path = os.path.join(self.log_dump_dir, filename)
-            suffix = 2
-            while os.path.exists(output_path):
-                output_path = os.path.join(self.log_dump_dir, f"{base_name}_{suffix}{ext}")
-                suffix += 1
-            with open(output_path, "w", encoding="utf-8") as handle:
-                handle.write(bundle)
+            output_path = self._write_memory_bundle_to_file(force_full=False)
             status_text = f"Log dump saved to Log Dump/{os.path.basename(output_path)}"
             if self.sleep_cycle_enable and self.sleep_cycle_auto_after_log_dump:
                 summary = self._run_sleep_cycle(trigger="post-log-dump", auto_mode=True)
@@ -11191,6 +13522,20 @@ class AIAssistantApp:
             self.status_var.set(status_text)
         except Exception:  # noqa: BLE001
             self.status_var.set("Failed to write log dump")
+
+    def dump_memory_bundle_full(self) -> None:
+        try:
+            output_path = self._write_memory_bundle_to_file(force_full=True)
+            status_text = f"Full log dump saved to Log Dump/{os.path.basename(output_path)}"
+            if self.sleep_cycle_enable and self.sleep_cycle_auto_after_log_dump:
+                summary = self._run_sleep_cycle(trigger="post-log-dump", auto_mode=True)
+                status_text += (
+                    f" | sleep cycle: action_pruned={summary.get('action_rows_pruned', 0)}"
+                    f" prediction_pruned={summary.get('prediction_rows_pruned', 0)}"
+                )
+            self.status_var.set(status_text)
+        except Exception:  # noqa: BLE001
+            self.status_var.set("Failed to write full log dump")
 
     def copy_pipeline_bundle(self) -> None:
         prompt_text = self.prompt_input.get("1.0", tk.END).strip()
@@ -11382,21 +13727,27 @@ class AIAssistantApp:
             self.mental_sweep_cells = self._build_mental_sweep(player_row, player_col)
             self._draw_fov_overlay(player_row, player_col)
             self._draw_mental_sweep_overlay(player_row, player_col)
-            self._working_memory_snapshot(current_cell=(player_row, player_col))
-            self._store_current_maze_memory_snapshot()
+            suppress_wm_preview = bool(getattr(self, "_suppress_wm_snapshot_during_look_preview", False))
+            if not suppress_wm_preview:
+                self._working_memory_snapshot(current_cell=(player_row, player_col))
+                self._store_current_maze_memory_snapshot()
             personality = self.maze_personality or {}
             visibility_legend_line = (
-                "Legend: P=player, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
-                "B=visible blocker/wall frame, ?=not visible, arrows (^ > v <)=single opening-edge marker side.\n\n"
+                "Legend: P=player, S=visible episode start, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
+                "B=visible blocker/wall, ?=not visible, arrows (^ > v <)=single opening-edge marker side, x=marked-off verified-empty side opening.\n\n"
                 if not self.maze_ascii_visible_only
                 else
-                "Legend: P=player, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
-                "B=visible blocker/wall frame, .=hidden cell omitted/cropped by visibility mode, "
-                "arrows (^ > v <)=single opening-edge marker side.\n\n"
+                "Legend: P=player, S=visible episode start, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
+                "B=visible blocker/wall, .=hidden cell omitted/cropped by visibility mode, "
+                "arrows (^ > v <)=single opening-edge marker side, x=marked-off verified-empty side opening.\n\n"
             )
             perception_block = (
                 f"Directional FOV status (facing={self.player_facing}, depth={self.maze_fov_depth}, "
                 f"peripheral={self.maze_fov_peripheral}, cone_deg={round(self.maze_fov_cone_degrees, 1)}, "
+                f"lateral_extra_deg={round(self.maze_fov_lateral_extra_degrees, 1)}, "
+                f"lateral_near_depth={round(self.maze_fov_lateral_near_depth, 2)}, "
+                f"lateral_band={round(self.maze_fov_lateral_band_cells, 2)}, "
+                f"lateral_floor+={round(self.maze_fov_lateral_floor_margin, 3)}, "
                 f"falloff={round(self.maze_fov_distance_falloff, 3)}, "
                 f"corner_graze={round(self.maze_fov_corner_graze_factor, 3)}, "
                 f"wedge_dist_scale={round(self.maze_fov_wedge_distance_scale, 3)}, "
@@ -11725,6 +14076,16 @@ class AIAssistantApp:
         edge_context_cells = self._edge_context_probe_cells(player_row, player_col, facing_for_view)
         if include_render_details:
             edge_list = self._visible_edge_opening_cells(player_row, player_col, facing_for_view)
+            marked_off_edges = self._visible_verified_empty_opening_edges(
+                player_row,
+                player_col,
+                facing_for_view,
+            )
+            loop_marked_edges = self._visible_loop_risk_opening_edges(
+                player_row,
+                player_col,
+                facing_for_view,
+            )
             for row, col, side in edge_list:
                 edge_markers[(row, col)] = {
                     "UP": "^",
@@ -11732,6 +14093,12 @@ class AIAssistantApp:
                     "DOWN": "v",
                     "LEFT": "<",
                 }.get(side, "*")
+            for row, col, _side in marked_off_edges:
+                existing = edge_markers.get((row, col), "")
+                edge_markers[(row, col)] = (existing + "x") if existing else "x"
+            for row, col, _side in loop_marked_edges:
+                existing = edge_markers.get((row, col), "")
+                edge_markers[(row, col)] = (existing + "!") if existing else "!"
 
         grid_rows: list[str] = []
         for row in range(self.grid_cells):
@@ -11747,6 +14114,8 @@ class AIAssistantApp:
                         token = "?"
                 elif (row, col) == self.current_target_cell:
                     token = "E"
+                elif (row, col) == self.episode_start_player_cell:
+                    token = "S"
                 elif (row, col) in self.blocked_cells:
                     token = "B"
                 elif vis_kind == "half":
@@ -11760,17 +14129,35 @@ class AIAssistantApp:
                 tokens.append(token)
             grid_rows.append(" ".join(tokens))
 
-        rows: list[str] = [self._with_ascii_boundary(grid_rows)]
+        rows: list[str] = ["\n".join(grid_rows)]
 
         if include_render_details:
-            if edge_markers:
-                details = ", ".join(
+            open_details = ", ".join(
                     f"({row},{col}) side={side}"
                     for row, col, side in self._visible_edge_opening_cells(player_row, player_col, facing_for_view)
                 )
-            else:
-                details = "none"
-            rows.append(f"Beam side edge marker(s): {details}")
+            marked_details = ", ".join(
+                f"({row},{col}) side={side}"
+                for row, col, side in self._visible_verified_empty_opening_edges(
+                    player_row,
+                    player_col,
+                    facing_for_view,
+                )
+            )
+            loop_marked_details = ", ".join(
+                f"({row},{col}) side={side}"
+                for row, col, side in self._visible_loop_risk_opening_edges(
+                    player_row,
+                    player_col,
+                    facing_for_view,
+                )
+            )
+            rows.append(
+                "Beam side edge marker(s): "
+                f"open={open_details if open_details else 'none'}; "
+                f"marked_off={marked_details if marked_details else 'none'}; "
+                f"loop_marked={loop_marked_details if loop_marked_details else 'none'}"
+            )
 
         return self._apply_ascii_visibility_mode("\n".join(rows))
 
@@ -11784,6 +14171,20 @@ class AIAssistantApp:
                 "DOWN": "v",
                 "LEFT": "<",
             }.get(side, "*")
+        for row, col, _side in self._visible_verified_empty_opening_edges(
+            player_row,
+            player_col,
+            self.player_facing,
+        ):
+            existing = edge_markers.get((row, col), "")
+            edge_markers[(row, col)] = (existing + "x") if existing else "x"
+        for row, col, _side in self._visible_loop_risk_opening_edges(
+            player_row,
+            player_col,
+            self.player_facing,
+        ):
+            existing = edge_markers.get((row, col), "")
+            edge_markers[(row, col)] = (existing + "!") if existing else "!"
 
         grid_rows: list[str] = []
         corner_graze_cells: list[str] = []
@@ -11821,6 +14222,8 @@ class AIAssistantApp:
 
                 if (row, col) == self.current_target_cell:
                     token = f"E{strength_bin}"
+                elif (row, col) == self.episode_start_player_cell:
+                    token = f"S{strength_bin}"
                 elif (row, col) in self.blocked_cells:
                     token = f"B{strength_bin}"
                 elif vis_kind == "half":
@@ -11836,9 +14239,12 @@ class AIAssistantApp:
 
             grid_rows.append(" ".join(tokens))
 
-        rows: list[str] = [self._with_ascii_boundary(grid_rows)]
+        rows: list[str] = ["\n".join(grid_rows)]
 
-        rows.append("Legend2: O#/H#/B#/E# use visibility strength bins 0..9 (higher=clearer/brighter).")
+        rows.append(
+            "Legend2: O#/H#/B#/S#/E# use visibility strength bins 0..9 (higher=clearer/brighter); "
+            "suffix x=marked-off verified-empty side opening, !=loop-risk marked side opening."
+        )
         if corner_graze_cells:
             rows.append(f"Corner-graze cells: {', '.join(corner_graze_cells)}")
         else:
@@ -11856,6 +14262,9 @@ class AIAssistantApp:
                     cell = (row, col)
                     if cell == self.current_target_cell:
                         seen[cell] = "E"
+                    elif cell == self.episode_start_player_cell:
+                        if seen.get(cell) != "P":
+                            seen[cell] = "S"
                     elif cell in self.blocked_cells:
                         seen[cell] = "B"
                     else:
@@ -11880,20 +14289,49 @@ class AIAssistantApp:
         inferred_side_open_steps = 0
         inferred_side_open_contacts = 0
         inferred_diagonal_open_contacts = 0
+        verified_empty_opening_steps = 0
+        verified_empty_opening_contacts = 0
+        wide_open_steps = 0
+        max_open_width = 1
+        wide_open_visible = False
 
         if facing in {"UP", "DOWN"}:
-            side_vectors = [(0, -1), (0, 1)]
+            side_specs = [((0, -1), "LEFT"), ((0, 1), "RIGHT")]
         else:
-            side_vectors = [(-1, 0), (1, 0)]
+            side_specs = [((-1, 0), "UP"), ((1, 0), "DOWN")]
+        side_vectors = [spec[0] for spec in side_specs]
 
         def is_wall(cell_row: int, cell_col: int) -> bool:
-            return (cell_row, cell_col) in self.blocked_cells
+            # Treat maze bounds as blocking geometry for side-gap inference.
+            # Without this, border-adjacent openings can be misread as terminal corridors.
+            return (not (0 <= cell_row < self.grid_cells and 0 <= cell_col < self.grid_cells)) or (
+                (cell_row, cell_col) in self.blocked_cells
+            )
 
         def in_bounds(cell_row: int, cell_col: int) -> bool:
             return 0 <= cell_row < self.grid_cells and 0 <= cell_col < self.grid_cells
 
         def is_open_geometry(cell_row: int, cell_col: int) -> bool:
             return in_bounds(cell_row, cell_col) and (not is_wall(cell_row, cell_col))
+
+        def lateral_open_extent(center_row: int, center_col: int, step_vec: tuple[int, int]) -> int:
+            extent = 0
+            # Probe a short lateral span so open rooms/plazas are recognized as
+            # branch-rich geometry rather than narrow corridor dead-ends.
+            for offset in range(1, 4):
+                side_row = center_row + (step_vec[0] * offset)
+                side_col = center_col + (step_vec[1] * offset)
+                if is_wall(side_row, side_col):
+                    break
+                if self._is_local_cell_visible(player_row, player_col, side_row, side_col, facing=facing):
+                    extent += 1
+                    continue
+                known_token = str(self.maze_known_cells.get((side_row, side_col), "") or "")
+                if known_token in {".", "E", "S", "P"}:
+                    extent += 1
+                    continue
+                break
+            return extent
 
         max_probe = max(2, self.grid_cells)
         for step in range(1, max_probe + 1):
@@ -11920,20 +14358,38 @@ class AIAssistantApp:
                 edge_type = "exit"
                 break
 
-            side_a = (row + side_vectors[0][0], col + side_vectors[0][1])
-            side_b = (row + side_vectors[1][0], col + side_vectors[1][1])
-            side_cells = [side_a, side_b]
+            side_cells: list[tuple[int, int]] = []
+            for (sv_r, sv_c), _side_name in side_specs:
+                side_cells.append((row + sv_r, col + sv_c))
 
             side_statuses: list[str] = []
             inferred_side_flags = [False, False]
             for idx, (side_row, side_col) in enumerate(side_cells):
+                side_name = side_specs[idx][1]
+                edge_key = (row, col, side_name)
                 if is_wall(side_row, side_col):
                     side_statuses.append("blocked")
                     side_blocked_contacts += 1
+                    self.verified_empty_opening_edges.discard(edge_key)
                 elif self._is_local_cell_visible(player_row, player_col, side_row, side_col, facing=facing):
-                    side_statuses.append("open")
-                    side_open_contacts += 1
+                    if self._opening_cell_fully_verified_empty((side_row, side_col)):
+                        side_statuses.append("verified_empty")
+                        verified_empty_opening_contacts += 1
+                        self.verified_empty_opening_edges.add(edge_key)
+                    else:
+                        side_statuses.append("open")
+                        side_open_contacts += 1
+                        self.verified_empty_opening_edges.discard(edge_key)
                 else:
+                    if edge_key in self.verified_empty_opening_edges:
+                        if (
+                            (side_row, side_col) in self.maze_known_cells
+                            and self._opening_cell_fully_verified_empty((side_row, side_col))
+                        ):
+                            side_statuses.append("verified_empty")
+                            verified_empty_opening_contacts += 1
+                            continue
+                        self.verified_empty_opening_edges.discard(edge_key)
                     side_statuses.append("unknown")
                     side_unknown_contacts += 1
 
@@ -11970,6 +14426,8 @@ class AIAssistantApp:
                 side_open_steps += 1
                 # A visible lateral opening along the beam is a decision point.
                 junction_visible = True
+            if "verified_empty" in side_statuses:
+                verified_empty_opening_steps += 1
 
             if any(inferred_side_flags):
                 inferred_side_open_steps += 1
@@ -11979,6 +14437,16 @@ class AIAssistantApp:
 
             if side_statuses[0] == "blocked" and side_statuses[1] == "blocked":
                 boxed_side_steps += 1
+
+            left_extent = lateral_open_extent(row, col, side_vectors[0])
+            right_extent = lateral_open_extent(row, col, side_vectors[1])
+            open_width = 1 + left_extent + right_extent
+            max_open_width = max(max_open_width, int(open_width))
+            if open_width >= 3:
+                wide_open_steps += 1
+                wide_open_visible = True
+                junction_visible = True
+                frontier_visible = True
 
             degree = len(self._traversable_neighbors((row, col)))
             if degree >= 3:
@@ -11995,6 +14463,7 @@ class AIAssistantApp:
             and edge_type in {"blocked", "bounds", "occluded"}
             and (not frontier_visible)
             and (not junction_visible)
+            and (not wide_open_visible)
             and (not exit_visible)
         )
 
@@ -12013,6 +14482,11 @@ class AIAssistantApp:
             "inferred_side_open_steps": inferred_side_open_steps,
             "inferred_side_open_contacts": inferred_side_open_contacts,
             "inferred_diagonal_open_contacts": inferred_diagonal_open_contacts,
+            "verified_empty_opening_steps": verified_empty_opening_steps,
+            "verified_empty_opening_contacts": verified_empty_opening_contacts,
+            "wide_open_steps": wide_open_steps,
+            "max_open_width": max_open_width,
+            "wide_open_visible": wide_open_visible,
             "boxed_corridor_without_exit": boxed_corridor_without_exit,
             "edge_type": edge_type,
             "edge_detected": edge_type in {"blocked", "bounds", "occluded", "decision", "exit"},
@@ -12053,7 +14527,10 @@ class AIAssistantApp:
                     f"frontier_visible={scan['frontier_visible']} junction_visible={scan['junction_visible']} "
                     f"side_open_steps={scan.get('side_open_steps', 0)} "
                     f"side_blocked_steps={scan.get('side_blocked_steps', 0)} "
-                    f"inferred_side_open_steps={scan.get('inferred_side_open_steps', 0)}"
+                    f"inferred_side_open_steps={scan.get('inferred_side_open_steps', 0)} "
+                    f"verified_empty_opening_steps={scan.get('verified_empty_opening_steps', 0)} "
+                    f"wide_open_steps={scan.get('wide_open_steps', 0)} "
+                    f"max_open_width={scan.get('max_open_width', 1)}"
                 )
             )
         return "\n".join(lines)
@@ -12068,8 +14545,10 @@ class AIAssistantApp:
         difficulty = self._normalized_maze_difficulty()
         if difficulty == "easy":
             return (8, 0.003)
+        if difficulty == "very hard":
+            return (20, 0.0011)
         if difficulty == "hard":
-            return (12, 0.001)
+            return (12, 0.0022)
         return (10, 0.002)
 
     def _open_region_connected(self, blocked: set[tuple[int, int]]) -> bool:
@@ -12105,6 +14584,83 @@ class AIAssistantApp:
                 queue.append(nxt)
         return len(seen) == open_count
 
+    def _open_components(self, blocked: set[tuple[int, int]]) -> list[set[tuple[int, int]]]:
+        components: list[set[tuple[int, int]]] = []
+        unseen = {
+            (row, col)
+            for row in range(self.grid_cells)
+            for col in range(self.grid_cells)
+            if (row, col) not in blocked
+        }
+        while unseen:
+            start = unseen.pop()
+            component = {start}
+            queue: deque[tuple[int, int]] = deque([start])
+            while queue:
+                row, col = queue.popleft()
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    rr = row + dr
+                    cc = col + dc
+                    if rr < 0 or rr >= self.grid_cells or cc < 0 or cc >= self.grid_cells:
+                        continue
+                    nxt = (rr, cc)
+                    if nxt in blocked or nxt not in unseen:
+                        continue
+                    unseen.remove(nxt)
+                    component.add(nxt)
+                    queue.append(nxt)
+            components.append(component)
+        return components
+
+    def _maze_start_component_min_cells(self, difficulty: str) -> int:
+        total = max(1, self.grid_cells * self.grid_cells)
+        ratio_map = {
+            "easy": 0.34,
+            "medium": 0.30,
+            "hard": 0.26,
+            "very hard": 0.22,
+        }
+        ratio = ratio_map.get(difficulty, 0.30)
+        return max(1, int(round(float(total) * ratio)))
+
+    def _select_start_anchor_in_largest_open_component(
+        self,
+        start_anchor: tuple[int, int],
+        difficulty: str,
+        rng: random.Random,
+    ) -> tuple[int, int]:
+        components = self._open_components(self.blocked_cells)
+        if not components:
+            return self._sanitize_cell(start_anchor)
+
+        largest = max(components, key=len)
+        start_component = None
+        for component in components:
+            if start_anchor in component:
+                start_component = component
+                break
+
+        min_cells = self._maze_start_component_min_cells(difficulty)
+        if start_component is not None and len(start_component) >= min_cells:
+            return start_anchor
+        if start_component is not None and start_component is largest:
+            return start_anchor
+
+        ordered_largest = sorted(largest)
+        if not ordered_largest:
+            return self._sanitize_cell(start_anchor)
+
+        best_distance = min(
+            abs(cell[0] - start_anchor[0]) + abs(cell[1] - start_anchor[1])
+            for cell in ordered_largest
+        )
+        nearest = [
+            cell
+            for cell in ordered_largest
+            if (abs(cell[0] - start_anchor[0]) + abs(cell[1] - start_anchor[1])) == best_distance
+        ]
+        return nearest[rng.randrange(len(nearest))]
+
     def _narrow_wide_openings(
         self,
         difficulty: str,
@@ -12114,7 +14670,8 @@ class AIAssistantApp:
         tightening_map = {
             "easy": (5, 24),
             "medium": (4, 18),
-            "hard": (1, 6),
+            "hard": (1, 5),
+            "very hard": (1, 2),
         }
         passes, max_fills = tightening_map.get(difficulty, (2, 10))
         protected = protected_cell
@@ -12246,7 +14803,7 @@ class AIAssistantApp:
         if not farthest:
             return None
 
-        diff_offset = {"easy": 10, "medium": 20, "hard": 30}.get(difficulty, 20)
+        diff_offset = {"easy": 10, "medium": 20, "hard": 30, "very hard": 40}.get(difficulty, 20)
         algo_offset = sum(ord(ch) for ch in self.current_maze_algorithm)
         seed = self.maze_seed_base + 300_000 + (map_id * 97) + diff_offset + algo_offset + int(self.grid_cells)
         rng = random.Random(seed)
@@ -12257,10 +14814,13 @@ class AIAssistantApp:
         # easy (8x8): branchier texture is usually easier to read.
         # medium (10x10): longer DFS corridors/dead-ends raise complexity.
         # hard (12x12): rotate the two hardest structural styles.
+        # very hard (20x20): bias toward long-walk topology for broader search pressure.
         if difficulty == "easy":
             return "prim_kruskal"
         if difficulty == "medium":
             return "dfs_backtracker"
+        if difficulty == "very hard":
+            return "aldous_broder" if rng.random() < 0.75 else "recursive_division"
         return "recursive_division" if rng.random() < 0.5 else "aldous_broder"
 
     def _maze_node_cells(self) -> list[tuple[int, int]]:
@@ -12484,9 +15044,13 @@ class AIAssistantApp:
         return self._cell_from_center(center_x, center_y)
 
     def _update_score_label(self) -> None:
+        last_solve_text = f"{round(self.last_maze_solve_seconds, 1)}s"
+        if self.last_maze_fast_treat_bonus > 0.0:
+            last_solve_text += f" (+{round(self.last_maze_fast_treat_bonus, 1)} treat)"
         self.score_var.set(
             f"Targets reached: {self.targets_reached} | Reward: {round(self.total_reward, 1)} "
-            f"| Last maze attempts: {self.last_maze_solve_attempts}"
+            f"| Last maze attempts: {self.last_maze_solve_attempts} "
+            f"| Last solve: {last_solve_text}"
         )
 
     def _score_context(self) -> str:
@@ -12501,6 +15065,9 @@ class AIAssistantApp:
             f"episode_steps_remaining={step_remaining}\n"
             f"maze_attempt_count_current={self.episode_maze_attempt_count}\n"
             f"maze_last_solve_attempts={self.last_maze_solve_attempts}\n"
+            f"maze_last_solve_seconds={round(self.last_maze_solve_seconds, 2)}\n"
+            f"maze_last_fast_treat_bonus={round(self.last_maze_fast_treat_bonus, 2)}\n"
+            f"maze_fast_treat_target_seconds={round(self.last_maze_fast_treat_target_seconds, 2)}\n"
             f"dead_end_entrances_tracked={len(self.episode_dead_end_entrances)}\n"
             f"goal_session_active={self.goal_session_active}\n"
             f"goal_session_target_hits={self.goal_session_target_hits}\n"
@@ -12512,6 +15079,8 @@ class AIAssistantApp:
         difficulty = self._normalized_maze_difficulty()
         if difficulty == "easy":
             return max(0.1, self.easy_dead_end_scale)
+        if difficulty == "very hard":
+            return max(0.1, self.hard_dead_end_scale)
         if difficulty == "hard":
             return max(0.1, self.hard_dead_end_scale)
         return max(0.1, self.medium_dead_end_scale)
@@ -12535,18 +15104,47 @@ class AIAssistantApp:
         self.goal_session_target_hits = 0
         self.auto_goal_hits_remaining = 0
 
+    def _enter_power_save_mode(self) -> None:
+        """Lower process scheduling priority after a run set completes to reduce battery draw while idle."""
+        if getattr(self, "_power_save_active", False):
+            return
+        try:
+            self._power_save_nice_delta = 10
+            os.nice(self._power_save_nice_delta)
+        except OSError:
+            self._power_save_nice_delta = 0
+        self._power_save_active = True
+        self.root.after(0, lambda: self.status_var.set("Idle — power saving active"))
+
+    def _exit_power_save_mode(self) -> None:
+        """Restore process scheduling priority when a new request is submitted."""
+        if not getattr(self, "_power_save_active", False):
+            return
+        try:
+            delta = int(getattr(self, "_power_save_nice_delta", 0) or 0)
+            if delta > 0:
+                os.nice(-delta)
+        except OSError:
+            pass
+        self._power_save_active = False
+        self._power_save_nice_delta = 0
+
     def _reset_score(self) -> None:
         self.targets_reached = 0
         self.total_reward = 0.0
         self.episode_steps = 0
         self.episode_optimal_steps = 0
         self.episode_step_limit = 0
+        self.episode_started_monotonic = time.perf_counter()
         self._clear_sticky_objective_path()
         self._clear_spatial_memory_runtime()
         self.episode_revisit_steps = 0
         self.episode_backtracks = 0
         self.episode_maze_attempt_count = 1
         self.last_maze_solve_attempts = 0
+        self.last_maze_solve_seconds = 0.0
+        self.last_maze_fast_treat_bonus = 0.0
+        self.last_maze_fast_treat_target_seconds = 0.0
         self.episode_visited_cells = {}
         self._end_auto_goal_session()
         self._update_score_label()
@@ -12662,6 +15260,71 @@ class AIAssistantApp:
 
         return min(max(1, raw_count), self.max_repeat_executions)
 
+    def _extract_maze_batch_multiplier(self, prompt: str) -> int:
+        text = (prompt or "").strip().lower()
+        if not text:
+            return 1
+        if self._normalized_layout_mode() != "maze":
+            return 1
+
+        # Batch modifier form: "... x6" (suffix only).
+        suffix_match = re.search(r"\bx\s*(\d+)\s*$", text)
+        if not suffix_match:
+            return 1
+
+        # Only treat xN as a batch modifier when the base instruction clearly
+        # requests a maze run count (for example "run 15 mazes x6").
+        has_base_maze_count = bool(
+            re.search(r"\b\d+\s+(?:\w+\s+)?(?:\w+\s+)?(?:mazes?|runs?|episodes?)\b", text)
+        )
+        if not has_base_maze_count:
+            return 1
+
+        return max(1, min(self.max_repeat_executions, int(suffix_match.group(1))))
+
+    def _strip_maze_batch_multiplier(self, prompt: str) -> str:
+        text = (prompt or "").strip()
+        if not text:
+            return ""
+        return re.sub(r"\s+\bx\s*\d+\s*$", "", text, flags=re.IGNORECASE).strip()
+
+    def _extract_maze_batch_sequence_segments(self, prompt: str) -> list[dict[str, int | str]]:
+        text = (prompt or "").strip()
+        if not text:
+            return []
+        if self._normalized_layout_mode() != "maze":
+            return []
+
+        # Supports forms like:
+        # - "run 15 mazes x10, run 50 mazes x2"
+        # - "run 15 mazes x10; run 50 mazes x2"
+        # - one clause per line
+        parts = [part.strip() for part in re.split(r"[,;\n]+", text) if part.strip()]
+        if len(parts) < 2:
+            return []
+
+        segments: list[dict[str, int | str]] = []
+        for part in parts:
+            lowered = part.lower()
+            has_base_maze_count = bool(
+                re.search(r"\b\d+\s+(?:\w+\s+)?(?:\w+\s+)?(?:mazes?|runs?|episodes?)\b", lowered)
+            )
+            if not has_base_maze_count:
+                return []
+
+            suffix_match = re.search(r"\bx\s*(\d+)\s*$", lowered)
+            loops = 1
+            if suffix_match:
+                loops = max(1, min(self.max_repeat_executions, int(suffix_match.group(1))))
+
+            base_prompt = re.sub(r"\s+\bx\s*\d+\s*$", "", part, flags=re.IGNORECASE).strip()
+            if not base_prompt:
+                return []
+
+            segments.append({"base_prompt": base_prompt, "loops": loops})
+
+        return segments if len(segments) >= 2 else []
+
     def _extract_local_execution_count(self, prompt: str) -> int:
         text = (prompt or "").strip().lower()
         # Prevent step-budget numbers from being mistaken as repeat-goal counts.
@@ -12677,10 +15340,6 @@ class AIAssistantApp:
         )
 
         count_units = r"times?|hits?|goals?|targets?|mazes?|runs?|episodes?"
-        digit_match = re.search(rf"\b(?:x|repeat|repeats?)\s*(\d+)\b", text)
-        if digit_match:
-            return max(1, min(self.max_repeat_executions, int(digit_match.group(1))))
-
         # Handles forms like:
         # - "10 mazes"
         # - "10 individual mazes"
@@ -12698,6 +15357,10 @@ class AIAssistantApp:
         )
         if leading_digit_match:
             return max(1, min(self.max_repeat_executions, int(leading_digit_match.group(1))))
+
+        digit_match = re.search(rf"\b(?:x|repeat|repeats?)\s*(\d+)\b", text)
+        if digit_match:
+            return max(1, min(self.max_repeat_executions, int(digit_match.group(1))))
 
         word_counts = {
             "one": 1,
@@ -12718,6 +15381,202 @@ class AIAssistantApp:
             ):
                 return count
         return 1
+
+    def _execute_local_navigation_batch_runs(
+        self,
+        prompt: str,
+        assistant_instructions: str,
+        batch_multiplier: int,
+    ) -> dict[str, str]:
+        base_prompt = self._strip_maze_batch_multiplier(prompt)
+        if not base_prompt:
+            base_prompt = (prompt or "").strip()
+
+        loops = max(1, min(self.max_repeat_executions, int(batch_multiplier or 1)))
+        base_count = self._extract_local_execution_count(base_prompt)
+        total_requested = base_count * loops
+        total_completed = 0
+        total_iterations = 0
+        batch_lines: list[str] = []
+        dump_failures = 0
+
+        for loop_index in range(1, loops + 1):
+            self.root.after(
+                0,
+                lambda i=loop_index, n=loops: self.status_var.set(
+                    f"Batch run {i}/{n}: randomizing maze, executing local kernel, dumping full log..."
+                ),
+            )
+
+            random_info = "(maze randomization skipped: non-maze mode)"
+            if self._normalized_layout_mode() == "maze":
+                self._randomize_maze_start_number()
+                random_info = (
+                    f"map_id={self._current_maze_map_id()} "
+                    f"difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}"
+                )
+
+            run_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
+            step_session = run_result.get("step_session", {})
+            completed = int(step_session.get("completed", 0) or 0)
+            iterations = int(step_session.get("iterations", 0) or 0)
+            success = bool(step_session.get("success", False))
+            remaining = int(step_session.get("remaining", 0) or 0)
+
+            total_completed += completed
+            total_iterations += iterations
+
+            dump_name = "(failed)"
+            dump_error = ""
+            try:
+                debug_for_dump = self._format_local_navigation_debug(
+                    run_result,
+                    header="[LOCAL KERNEL BATCH LOOP]",
+                )
+                output_path = self._write_memory_bundle_to_file(
+                    force_full=True,
+                    debug_text_override=debug_for_dump,
+                )
+                dump_name = os.path.basename(output_path)
+            except Exception as exc:  # noqa: BLE001
+                dump_failures += 1
+                dump_error = str(exc)
+
+            batch_line = (
+                f"batch={loop_index}/{loops} {random_info} "
+                f"completed={completed}/{base_count} iterations={iterations} "
+                f"success={success} remaining={remaining} full_dump={dump_name}"
+            )
+            if dump_error:
+                batch_line += f" dump_error={dump_error}"
+            batch_lines.append(batch_line)
+
+        debug_text = (
+            "[LOCAL KERNEL BATCH MODIFIER]\n"
+            f"modifier: x{loops}\n"
+            f"base_prompt: {base_prompt}\n"
+            f"base_execution_count: {base_count}\n"
+            f"total_requested: {total_requested}\n"
+            f"total_completed: {total_completed}\n"
+            f"total_iterations: {total_iterations}\n"
+            f"dump_failures: {dump_failures}\n"
+            "\n[BATCH DETAILS]\n"
+            + ("\n".join(batch_lines) if batch_lines else "(none)")
+        )
+
+        completion_label = "maze runs" if self._normalized_layout_mode() == "maze" else "target hits"
+        answer = (
+            f"Batch modifier x{loops} complete. Ran {base_count} {completion_label} per batch "
+            f"({total_requested} requested total), completed {total_completed} in {total_iterations} step iterations. "
+            f"Automatic Random # and Full Log Dump executed after each batch"
+            + (" (some dumps failed)." if dump_failures else ".")
+        )
+
+        return {"debug_text": debug_text, "answer": answer}
+
+    def _execute_local_navigation_batch_sequence_runs(
+        self,
+        segments: list[dict[str, int | str]],
+        assistant_instructions: str,
+    ) -> dict[str, str]:
+        if not segments:
+            return {
+                "debug_text": "[LOCAL KERNEL BATCH SEQUENCE]\n(no segments)",
+                "answer": "No batch sequence segments were parsed.",
+            }
+
+        total_requested = 0
+        total_completed = 0
+        total_iterations = 0
+        total_loops = 0
+        dump_failures = 0
+        batch_lines: list[str] = []
+
+        for segment_index, segment in enumerate(segments, start=1):
+            base_prompt = str(segment.get("base_prompt", "") or "").strip()
+            loops = max(1, min(self.max_repeat_executions, int(segment.get("loops", 1) or 1)))
+            base_count = self._extract_local_execution_count(base_prompt)
+            total_requested += base_count * loops
+            total_loops += loops
+
+            for loop_index in range(1, loops + 1):
+                self.root.after(
+                    0,
+                    lambda s=segment_index, n=len(segments), i=loop_index, l=loops: self.status_var.set(
+                        f"Batch sequence {s}/{n}, run {i}/{l}: randomizing maze, executing local kernel, dumping full log..."
+                    ),
+                )
+
+                random_info = "(maze randomization skipped: non-maze mode)"
+                if self._normalized_layout_mode() == "maze":
+                    self._randomize_maze_start_number()
+                    random_info = (
+                        f"map_id={self._current_maze_map_id()} "
+                        f"difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}"
+                    )
+
+                run_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
+                step_session = run_result.get("step_session", {})
+                completed = int(step_session.get("completed", 0) or 0)
+                iterations = int(step_session.get("iterations", 0) or 0)
+                success = bool(step_session.get("success", False))
+                remaining = int(step_session.get("remaining", 0) or 0)
+
+                total_completed += completed
+                total_iterations += iterations
+
+                dump_name = "(failed)"
+                dump_error = ""
+                try:
+                    debug_for_dump = (
+                        "[LOCAL KERNEL BATCH SEQUENCE LOOP]\n"
+                        f"segment={segment_index}/{len(segments)} loop={loop_index}/{loops}\n"
+                        f"base_prompt={base_prompt}\n\n"
+                        + self._format_local_navigation_debug(
+                            run_result,
+                            header="[LOCAL KERNEL BATCH SEQUENCE RUN]",
+                        )
+                    )
+                    output_path = self._write_memory_bundle_to_file(
+                        force_full=True,
+                        debug_text_override=debug_for_dump,
+                    )
+                    dump_name = os.path.basename(output_path)
+                except Exception as exc:  # noqa: BLE001
+                    dump_failures += 1
+                    dump_error = str(exc)
+
+                batch_line = (
+                    f"segment={segment_index}/{len(segments)} segment_loops={loop_index}/{loops} "
+                    f"base_prompt={base_prompt!r} base_count={base_count} {random_info} "
+                    f"completed={completed}/{base_count} iterations={iterations} "
+                    f"success={success} remaining={remaining} full_dump={dump_name}"
+                )
+                if dump_error:
+                    batch_line += f" dump_error={dump_error}"
+                batch_lines.append(batch_line)
+
+        completion_label = "maze runs" if self._normalized_layout_mode() == "maze" else "target hits"
+        debug_text = (
+            "[LOCAL KERNEL BATCH SEQUENCE]\n"
+            f"segments: {len(segments)}\n"
+            f"total_segment_loops: {total_loops}\n"
+            f"total_requested: {total_requested}\n"
+            f"total_completed: {total_completed}\n"
+            f"total_iterations: {total_iterations}\n"
+            f"dump_failures: {dump_failures}\n"
+            "\n[BATCH DETAILS]\n"
+            + ("\n".join(batch_lines) if batch_lines else "(none)")
+        )
+
+        answer = (
+            f"Batch sequence complete. Executed {len(segments)} segment(s) across {total_loops} total batch loops, "
+            f"requested {total_requested} total {completion_label}, and completed {total_completed} in "
+            f"{total_iterations} step iterations. Automatic Random # and Full Log Dump executed after each batch loop"
+            + (" (some dumps failed)." if dump_failures else ".")
+        )
+
+        return {"debug_text": debug_text, "answer": answer}
 
     def _build_local_navigation_plan(self, prompt: str) -> dict:
         execution_count = self._extract_local_execution_count(prompt)
@@ -12825,6 +15684,30 @@ class AIAssistantApp:
     def _handle_local_navigation_request(self, prompt: str, assistant_instructions: str) -> None:
         result = self._execute_local_navigation_request(prompt, assistant_instructions)
         self._present_local_navigation_result(result)
+
+    def _write_memory_bundle_to_file(
+        self,
+        *,
+        force_full: bool = False,
+        debug_text_override: str | None = None,
+    ) -> str:
+        bundle = redact_secrets(
+            self._memory_export_text(
+                force_full=force_full,
+                debug_text_override=debug_text_override,
+            )
+        )
+        os.makedirs(self.log_dump_dir, exist_ok=True)
+        filename = self._log_dump_filename()
+        base_name, ext = os.path.splitext(filename)
+        output_path = os.path.join(self.log_dump_dir, filename)
+        suffix = 2
+        while os.path.exists(output_path):
+            output_path = os.path.join(self.log_dump_dir, f"{base_name}_{suffix}{ext}")
+            suffix += 1
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write(bundle)
+        return output_path
 
     def _shortest_path_moves_to_target(self) -> list[str]:
         return self._shortest_path_moves_between_cells(self.current_player_cell, self.current_target_cell)
@@ -13546,6 +16429,7 @@ class AIAssistantApp:
         self,
         forced_move: str,
         candidates: list[tuple[str, tuple[int, int]]],
+        margin_override: int | None = None,
     ) -> tuple[bool, str]:
         if not self.frontier_lock_force_score_guard_enable:
             return (True, "disabled")
@@ -13564,7 +16448,11 @@ class AIAssistantApp:
 
         best_move, best_score = scored[0]
         forced_score = int(next(score for move, score in scored if move == forced_move))
-        margin = int(self.frontier_lock_force_score_margin)
+        margin = int(
+            self.frontier_lock_force_score_margin
+            if margin_override is None
+            else max(0, int(margin_override))
+        )
         delta = forced_score - best_score
         if delta <= margin:
             return (
@@ -13798,7 +16686,7 @@ class AIAssistantApp:
             if (not ambiguous) and (not late_unresolved_commit) and (not contradiction_forced_verify):
                 continue
 
-            if self.terminal_end_hard_avoid and (
+            if self._terminal_hard_avoid_active() and (
                 self._is_move_visibly_terminal_dead_end(current, move)
                 or self._is_move_visibly_boxed_corridor_without_exit(current, move)
             ):
@@ -14267,7 +17155,19 @@ class AIAssistantApp:
                 endocrine=self.organism_endocrine_state,
                 control=self.organism_control_state,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            self._report_global_error(
+                module="organism_control",
+                code="ORGANISM_STEP_FAILED",
+                message=f"step_agent failed: {exc}",
+                category=GlobalErrorCategory.TRANSIENT,
+                handling_hint=ErrorHandlingHint.DEGRADE,
+                retryable=True,
+                details={
+                    "step": int(self.memory_step_index),
+                    "candidate_count": int(len(candidates)),
+                },
+            )
             return ""
 
         self.organism_memory_state = step_result.memory
@@ -14288,6 +17188,23 @@ class AIAssistantApp:
             f"loop_suspected={self.organism_control_state.loop_suspected}"
         )
         self._last_planner_choice_debug = f"source=organism_control {self.organism_last_step_debug}"
+        safety_flags = tuple(sorted(tag for tag in (event.tags or set()) if tag in {"visible_terminal", "boxed_corridor", "cycle_pair"}))
+        anomalies: tuple[str, ...] = ()
+        if step_result.loop_risk >= 0.8:
+            anomalies = ("high_loop_risk",)
+        self._record_action_outcome(
+            action_id=f"maze-step-{int(self.memory_step_index)}",
+            action_type=str(event.action),
+            parameters={"chosen_move": str(chosen_move), "policy": str(step_result.policy)},
+            context={
+                "loop_risk": float(step_result.loop_risk),
+                "frontier_strength": float(step_result.frontier_strength),
+                "terminal_filtered": int(terminal_filtered),
+            },
+            outcome="rewarded" if float(event.reward) > float(event.penalty) else "penalized",
+            safety_flags=safety_flags,
+            anomalies=anomalies,
+        )
         return chosen_move
 
     def _best_progress_move(self) -> str:
@@ -14306,6 +17223,7 @@ class AIAssistantApp:
 
     def _best_exploration_move(self) -> str:
         current = self.current_player_cell
+        self._terminal_hard_filter_applied_last = False
         breakdown_cache: dict[str, dict] = {}
         candidates: list[tuple[str, tuple[int, int]]] = []
         for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
@@ -14324,7 +17242,8 @@ class AIAssistantApp:
         frontier_lock_active = self._frontier_lock_active()
         frontier_lock_move = self._frontier_lock_step() if frontier_lock_active else ""
         frontier_lock_vetoed = False
-        hard_override_phase = int(self.hard_override_phase_level)
+        hard_override_phase = self._effective_hard_override_phase_level()
+        hard_override_phase_base = int(self.hard_override_phase_level)
         frontier_lock_override_allowed = not self._hard_override_phase_disables_frontier_lock()
         persistent_frontier_override_allowed = not self._hard_override_phase_disables_persistent_frontier()
         verification_priority_override_allowed = not self._hard_override_phase_disables_verification_priority()
@@ -14353,7 +17272,8 @@ class AIAssistantApp:
             if not frontier_lock_override_allowed:
                 self._last_planner_choice_debug = (
                     f"source=frontier_lock_phase_off selected={frontier_lock_move} "
-                    f"target={persistent_frontier_target} phase={hard_override_phase} -> continue=normal_scoring"
+                    f"target={persistent_frontier_target} phase={hard_override_phase} "
+                    f"base_phase={hard_override_phase_base} -> continue=normal_scoring"
                 )
             else:
                 should_veto_frontier_lock, veto_reason = self._should_veto_frontier_lock_move(frontier_lock_move, candidates)
@@ -14442,7 +17362,7 @@ class AIAssistantApp:
             )
 
         terminal_filtered = False
-        if self.terminal_end_hard_avoid:
+        if self._terminal_hard_avoid_active():
             non_terminal_candidates = [
                 (move, nxt)
                 for move, nxt in candidates
@@ -14454,6 +17374,7 @@ class AIAssistantApp:
             if non_terminal_candidates and len(non_terminal_candidates) < len(candidates):
                 candidates = non_terminal_candidates
                 terminal_filtered = True
+                self._terminal_hard_filter_applied_last = True
 
         verification_move = ""
         if verification_priority_override_allowed:
@@ -14515,17 +17436,17 @@ class AIAssistantApp:
             if soft_frontier_lock_move and any(move == soft_frontier_lock_move for move, _ in raw_scored):
                 score_delta_by_move[soft_frontier_lock_move] = (
                     score_delta_by_move.get(soft_frontier_lock_move, 0)
-                    + int(self.phase2_frontier_lock_influence)
+                    + self._effective_phase2_influence(self.phase2_frontier_lock_influence)
                 )
             if soft_persistent_frontier_move and any(move == soft_persistent_frontier_move for move, _ in raw_scored):
                 score_delta_by_move[soft_persistent_frontier_move] = (
                     score_delta_by_move.get(soft_persistent_frontier_move, 0)
-                    + int(self.phase2_persistent_frontier_influence)
+                    + self._effective_phase2_influence(self.phase2_persistent_frontier_influence)
                 )
             if soft_verification_move and any(move == soft_verification_move for move, _ in raw_scored):
                 score_delta_by_move[soft_verification_move] = (
                     score_delta_by_move.get(soft_verification_move, 0)
-                    + int(self.phase2_verification_influence)
+                    + self._effective_phase2_influence(self.phase2_verification_influence)
                 )
 
         scored: list[tuple[str, int]] = [
@@ -14629,6 +17550,11 @@ class AIAssistantApp:
             selected_move = noisy_pool[0][0]
             picked_random_tie = True
 
+        scored_breakdowns = {
+            move: self._exploration_move_breakdown_cached(move, breakdown_cache)
+            for move, _score in scored
+        }
+
         adaptive_policy_used = False
         adaptive_policy_note = ""
         if (
@@ -14638,10 +17564,6 @@ class AIAssistantApp:
             and (not force_score_fallback)
             and self.adaptive_controller.steps >= self.adaptive_policy_min_steps
         ):
-            scored_breakdowns = {
-                move: self._exploration_move_breakdown_cached(move, breakdown_cache)
-                for move, _score in scored
-            }
             adaptive_ranked: list[tuple[str, float, int]] = []
             for move, score in scored:
                 breakdown = scored_breakdowns.get(move, {})
@@ -14679,8 +17601,95 @@ class AIAssistantApp:
                     f"score_delta={score_delta} margin={self.adaptive_policy_score_margin}"
                 )
 
+        parallel_reasoning_used = False
+        parallel_reasoning_note = ""
+        if self.parallel_reasoning_enable and len(scored) > 1:
+            origin_frontier_distance = self._frontier_distance(self.current_player_cell, max_depth=6)
+            reasoning_candidates: list[dict[str, float | int | str]] = []
+            for move, score in scored:
+                breakdown = scored_breakdowns.get(move, {})
+                frontier_distance_effective = int(
+                    breakdown.get("frontier_distance_effective", breakdown.get("frontier_distance", origin_frontier_distance))
+                    or origin_frontier_distance
+                )
+                frontier_gain = max(0.0, min(1.0, (origin_frontier_distance - frontier_distance_effective + 2.0) / 4.0))
+                loop_pressure = (
+                    float(breakdown.get("transition_repeat_penalty", 0) or 0)
+                    + float(breakdown.get("cycle_pair_penalty", 0) or 0)
+                    + float(breakdown.get("loop_commitment_penalty", 0) or 0)
+                    + float(breakdown.get("immediate_backtrack_hard_penalty", 0) or 0)
+                    + float(breakdown.get("terminal_hard_veto_penalty", 0) or 0)
+                    + float(breakdown.get("dead_end_end_slap_penalty", 0) or 0)
+                    + float(breakdown.get("dead_end_tip_revisit_slap_penalty", 0) or 0)
+                )
+                hazard_pressure = (
+                    float(breakdown.get("hazard_preparedness_penalty", 0) or 0)
+                    + float(breakdown.get("long_trap_transition_penalty", 0) or 0)
+                    + float(breakdown.get("long_trap_cell_penalty", 0) or 0)
+                )
+                reasoning_candidates.append(
+                    {
+                        "move": move,
+                        "local_score": int(score),
+                        "adaptive_prediction": float(breakdown.get("adaptive_prediction", 0.0) or 0.0),
+                        "prediction_lookahead_bonus": float(breakdown.get("prediction_lookahead_bonus", 0.0) or 0.0),
+                        "unknown_neighbors": int(breakdown.get("unknown_neighbors", 0) or 0),
+                        "frontier_gain": frontier_gain,
+                        "loop_pressure_norm": max(0.0, min(1.0, loop_pressure / 260.0)),
+                        "hazard_pressure_norm": max(0.0, min(1.0, hazard_pressure / 220.0)),
+                        "contradiction_norm": max(
+                            0.0,
+                            min(1.0, float(breakdown.get("local_contradiction_debt", 0.0) or 0.0) / 3.0),
+                        ),
+                    }
+                )
+
+            parallel_reasoning_result = self.parallel_reasoning_engine.evaluate_candidates(
+                reasoning_candidates,
+                profile=self.parallel_reasoning_profile,
+                budget=self.parallel_reasoning_budget,
+            )
+            self.parallel_reasoning_last_result = dict(parallel_reasoning_result)
+            pruned_info = parallel_reasoning_result.get("pruned", {})
+            if isinstance(pruned_info, dict) and int(pruned_info.get("discarded", 0) or 0) > 0:
+                self._report_global_error(
+                    module="parallel_reasoning_engine",
+                    code="REASONING_BRANCHES_PRUNED",
+                    message="Reasoning candidates pruned by budget contract",
+                    category=GlobalErrorCategory.RESOURCE_EXHAUSTION,
+                    handling_hint=ErrorHandlingHint.DEGRADE,
+                    retryable=True,
+                    details={
+                        "discarded": int(pruned_info.get("discarded", 0) or 0),
+                        "profile": str(parallel_reasoning_result.get("reasoning_profile", "BALANCED")),
+                    },
+                )
+            reasoning_selected_move = str(parallel_reasoning_result.get("selected_move", "") or "")
+            if reasoning_selected_move and any(move == reasoning_selected_move for move, _score in scored):
+                selected_move = reasoning_selected_move
+                parallel_reasoning_used = True
+            parallel_reasoning_note = (
+                f"strategy={parallel_reasoning_result.get('strategy', 'unknown')} "
+                f"conf={parallel_reasoning_result.get('confidence', 0.0)} "
+                f"margin={parallel_reasoning_result.get('confidence_margin', 0.0)}"
+            )
+        else:
+            self.parallel_reasoning_last_result = {}
+
         near_best_compact = ",".join([f"{move}:{score}" for move, score in near_best])
-        if adaptive_policy_used:
+        if parallel_reasoning_used:
+            self._last_planner_choice_debug = (
+                f"source=parallel_reasoning selected={selected_move} best={best_score} tie_band={tie_band} "
+                f"force_score_fallback={1 if force_score_fallback else 0} "
+                f"stuck_softmax={1 if stuck_softmax_used else 0} "
+                f"terminal_filtered={terminal_filtered} "
+                f"randomize_ties={self.exploration_randomize_ties} picked_random_tie={picked_random_tie} "
+                f"near_best=[{near_best_compact}] "
+                f"adaptive_used={1 if adaptive_policy_used else 0} "
+                f"adaptive_note={adaptive_policy_note or '(none)'} "
+                f"{parallel_reasoning_note}{soft_note_suffix}"
+            )
+        elif adaptive_policy_used:
             self._last_planner_choice_debug = (
                 f"source=adaptive_policy selected={selected_move} best={best_score} tie_band={tie_band} "
                 f"force_score_fallback={1 if force_score_fallback else 0} "
@@ -14721,7 +17730,7 @@ class AIAssistantApp:
             )
         )
         fully_mapped_now = self._maze_episode_fully_mapped()
-        if int(self.objective_override_phase_level) >= 4 and (not fully_mapped_now) and (not target_known_visible):
+        if self._effective_objective_override_phase_level() >= 4 and (not fully_mapped_now) and (not target_known_visible):
             # Phase-4 policy: do not chase stale exit memory while unresolved uncertainty remains.
             # This prevents temporary exit sightings from pulling exploration back into loop corridors.
             ep_summary = self._episodic_memory_summary()
@@ -15049,10 +18058,12 @@ class AIAssistantApp:
     ) -> bool:
         if not self.adaptive_guard_enable:
             return True
-        if micro_frontier_stall_active:
+        if micro_frontier_stall_active and recent_penalty_sum <= -220.0:
             return True
         used, allowed = self._adaptive_guard_budget_snapshot()
         if used < allowed:
+            if micro_frontier_stall_active:
+                return self._adaptive_guard_strength() >= 0.8
             return True
         if recent_penalty_sum <= -260.0:
             return True
@@ -15221,6 +18232,10 @@ class AIAssistantApp:
             and runtime_micro_signature == disambiguation_signature
         )
         adaptive_guard_strength = self._adaptive_guard_strength()
+        adaptive_guard_strength = max(
+            0.05,
+            min(1.0, adaptive_guard_strength * self._effective_batch_micro_guard_strength_scale()),
+        )
         noncritical_override_allowed = self._adaptive_guard_noncritical_override_allowed(
             recent_penalty_sum=recent_penalty_sum,
             unresolved_signal=unresolved_signal,
@@ -15314,6 +18329,10 @@ class AIAssistantApp:
         micro_frontier_soft_escape_allowed = (
             (not disambiguation_same_signature_cooldown_active)
             or micro_frontier_emergency
+        )
+        micro_frontier_soft_phase_active = (
+            self._hard_override_phase_softens_micro_frontier()
+            and self.micro_frontier_stall_soft_enable
         )
         micro_frontier_disambiguation_applied = False
 
@@ -15471,28 +18490,106 @@ class AIAssistantApp:
                     or replacement_score <= selected_score
                 )
                 if replacement_move != selected_move and should_override:
-                    previous_move = selected_move
-                    selected_move = replacement_move
-                    guard_override = True
-                    fallback_used = True
-                    micro_frontier_disambiguation_applied = True
-                    self._runtime_micro_frontier_disambiguation_signature = runtime_micro_signature
-                    self._runtime_micro_frontier_disambiguation_cooldown_remaining = int(
-                        self.micro_frontier_stall_disambiguation_cooldown_steps
+                    disambiguation_soft_phase = (
+                        micro_frontier_soft_phase_active
+                        and (not micro_frontier_emergency)
                     )
-                    disambiguation_reason = (
-                        "[MICRO-FRONTIER-DISAMBIGUATION: "
-                        f"{previous_move}->{replacement_move} "
-                        f"no_progress={micro_frontier_no_progress_steps} "
-                        f"stall_streak={int(getattr(self, '_runtime_micro_frontier_stall_streak', 0) or 0)} "
-                        f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
-                        f"signal={0 if selected_has_signal else 1}->{replacement_signal_rank} "
-                        f"risk={selected_risky}->{replacement_risky} "
-                        f"score={selected_score}->{replacement_score} "
-                        f"signature={runtime_micro_signature} "
-                        f"cooldown={int(self.micro_frontier_stall_disambiguation_cooldown_steps)}]"
-                    )
-                    guard_reason = self._append_guard_reason(guard_reason, disambiguation_reason)
+                    if disambiguation_soft_phase:
+                        soft_repeat_boost = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_repeat_boost) * adaptive_guard_strength)),
+                        )
+                        soft_risk_boost = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_risk_boost) * adaptive_guard_strength)),
+                        )
+                        soft_signal_bonus = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_signal_bonus) * adaptive_guard_strength)),
+                        )
+                        soft_margin = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_margin) * adaptive_guard_strength)),
+                        )
+                        selected_adjusted = (
+                            selected_score
+                            + (selected_repeat_pressure * soft_repeat_boost)
+                            + (soft_risk_boost if selected_risky else 0)
+                            + (0 if selected_has_signal else soft_signal_bonus)
+                        )
+                        replacement_adjusted = (
+                            replacement_score
+                            + (replacement_repeat_pressure * soft_repeat_boost)
+                            + (soft_risk_boost if replacement_risky else 0)
+                            - (soft_signal_bonus if replacement_signal_rank == 0 else 0)
+                        )
+                        if replacement_adjusted <= selected_adjusted + soft_margin:
+                            previous_move = selected_move
+                            selected_move = replacement_move
+                            micro_frontier_disambiguation_applied = True
+                            self._runtime_micro_frontier_disambiguation_signature = runtime_micro_signature
+                            self._runtime_micro_frontier_disambiguation_cooldown_remaining = max(
+                                1,
+                                int(round(float(self.micro_frontier_stall_disambiguation_cooldown_steps) * 0.5)),
+                            )
+                            disambiguation_reason = (
+                                "[MICRO-FRONTIER-DISAMBIGUATION-INFLUENCE: "
+                                f"{previous_move}->{replacement_move} "
+                                f"adjusted={selected_adjusted}->{replacement_adjusted} "
+                                f"base={selected_score}->{replacement_score} "
+                                f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
+                                f"signal={0 if selected_has_signal else 1}->{replacement_signal_rank} "
+                                f"risk={selected_risky}->{replacement_risky} "
+                                f"margin={soft_margin} signature={runtime_micro_signature}]"
+                            )
+                            guard_reason = self._append_guard_reason(guard_reason, disambiguation_reason)
+                            disambiguation_learning_note = self._reinforce_long_loop_subtype_escape(
+                                origin=self.current_player_cell,
+                                source_move=previous_move,
+                                replacement_move=replacement_move,
+                                source_repeat_pressure=selected_repeat_pressure,
+                                replacement_repeat_pressure=replacement_repeat_pressure,
+                                unresolved_unknown=unresolved_unknown,
+                                unresolved_frontier=unresolved_frontier,
+                                mode_tag="micro_disambiguation_influence",
+                            )
+                            if disambiguation_learning_note:
+                                guard_reason = self._append_guard_reason(guard_reason, disambiguation_learning_note)
+                    else:
+                        previous_move = selected_move
+                        selected_move = replacement_move
+                        guard_override = True
+                        fallback_used = True
+                        micro_frontier_disambiguation_applied = True
+                        self._runtime_micro_frontier_disambiguation_signature = runtime_micro_signature
+                        self._runtime_micro_frontier_disambiguation_cooldown_remaining = int(
+                            self.micro_frontier_stall_disambiguation_cooldown_steps
+                        )
+                        disambiguation_reason = (
+                            "[MICRO-FRONTIER-DISAMBIGUATION: "
+                            f"{previous_move}->{replacement_move} "
+                            f"no_progress={micro_frontier_no_progress_steps} "
+                            f"stall_streak={int(getattr(self, '_runtime_micro_frontier_stall_streak', 0) or 0)} "
+                            f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure} "
+                            f"signal={0 if selected_has_signal else 1}->{replacement_signal_rank} "
+                            f"risk={selected_risky}->{replacement_risky} "
+                            f"score={selected_score}->{replacement_score} "
+                            f"signature={runtime_micro_signature} "
+                            f"cooldown={int(self.micro_frontier_stall_disambiguation_cooldown_steps)}]"
+                        )
+                        guard_reason = self._append_guard_reason(guard_reason, disambiguation_reason)
+                        disambiguation_learning_note = self._reinforce_long_loop_subtype_escape(
+                            origin=self.current_player_cell,
+                            source_move=previous_move,
+                            replacement_move=replacement_move,
+                            source_repeat_pressure=selected_repeat_pressure,
+                            replacement_repeat_pressure=replacement_repeat_pressure,
+                            unresolved_unknown=unresolved_unknown,
+                            unresolved_frontier=unresolved_frontier,
+                            mode_tag="micro_disambiguation_override",
+                        )
+                        if disambiguation_learning_note:
+                            guard_reason = self._append_guard_reason(guard_reason, disambiguation_learning_note)
 
         if (
             selected_move
@@ -15621,25 +18718,74 @@ class AIAssistantApp:
                         ),
                     )
                 if replacement_move != selected_move and should_override:
-                    previous_move = selected_move
-                    selected_move = replacement_move
-                    guard_override = True
-                    fallback_used = True
-                    micro_stall_escape_source_move = previous_move
-                    micro_stall_escape_applied = True
-                    self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
-                    stall_reason = (
-                        "Micro-frontier stall escape override: "
-                        f"replaced '{previous_move}' with '{replacement_move}' "
-                        f"(repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
-                        f"risk={selected_risky}->{replacement_risky}, "
-                        f"score={selected_score}->{replacement_score}, margin={stall_margin}, "
-                        f"no_progress={micro_frontier_no_progress_steps}, repeats={micro_frontier_repeat_count}, "
-                        f"unknown={unresolved_unknown}, frontier={unresolved_frontier})."
+                    stall_soft_phase = (
+                        micro_frontier_soft_phase_active
+                        and (not micro_emergency_mode)
                     )
-                    if micro_emergency_mode:
-                        stall_reason = f"{stall_reason} [emergency_mode=1]"
-                    guard_reason = self._append_guard_reason(guard_reason, stall_reason)
+                    if stall_soft_phase:
+                        soft_repeat_boost = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_repeat_boost) * adaptive_guard_strength)),
+                        )
+                        soft_risk_boost = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_risk_boost) * adaptive_guard_strength)),
+                        )
+                        soft_signal_bonus = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_signal_bonus) * adaptive_guard_strength)),
+                        )
+                        soft_margin = max(
+                            0,
+                            int(round(float(self.micro_frontier_stall_soft_margin) * adaptive_guard_strength)),
+                        )
+                        selected_adjusted = (
+                            selected_score
+                            + (selected_repeat_pressure * soft_repeat_boost)
+                            + (soft_risk_boost if selected_risky else 0)
+                            + (soft_signal_bonus if selected_novel_rank > 0 else 0)
+                        )
+                        replacement_adjusted = (
+                            replacement_score
+                            + (replacement_repeat_pressure * soft_repeat_boost)
+                            + (soft_risk_boost if replacement_risky else 0)
+                            - (soft_signal_bonus if replacement_novel_rank == 0 else 0)
+                        )
+                        if replacement_adjusted <= selected_adjusted + soft_margin:
+                            previous_move = selected_move
+                            selected_move = replacement_move
+                            micro_stall_escape_source_move = previous_move
+                            micro_stall_escape_applied = True
+                            self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
+                            stall_reason = (
+                                "Micro-frontier stall influence: "
+                                f"favored '{replacement_move}' over '{previous_move}' "
+                                f"(adjusted={selected_adjusted}->{replacement_adjusted}, "
+                                f"base={selected_score}->{replacement_score}, "
+                                f"repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
+                                f"risk={selected_risky}->{replacement_risky}, margin={soft_margin})."
+                            )
+                            guard_reason = self._append_guard_reason(guard_reason, stall_reason)
+                    else:
+                        previous_move = selected_move
+                        selected_move = replacement_move
+                        guard_override = True
+                        fallback_used = True
+                        micro_stall_escape_source_move = previous_move
+                        micro_stall_escape_applied = True
+                        self._set_adaptive_guard_escape_lock(replacement_move, replacement_repeat_pressure)
+                        stall_reason = (
+                            "Micro-frontier stall escape override: "
+                            f"replaced '{previous_move}' with '{replacement_move}' "
+                            f"(repeat={selected_repeat_pressure}->{replacement_repeat_pressure}, "
+                            f"risk={selected_risky}->{replacement_risky}, "
+                            f"score={selected_score}->{replacement_score}, margin={stall_margin}, "
+                            f"no_progress={micro_frontier_no_progress_steps}, repeats={micro_frontier_repeat_count}, "
+                            f"unknown={unresolved_unknown}, frontier={unresolved_frontier})."
+                        )
+                        if micro_emergency_mode:
+                            stall_reason = f"{stall_reason} [emergency_mode=1]"
+                        guard_reason = self._append_guard_reason(guard_reason, stall_reason)
 
         # Macro no-progress escape: when unresolved uncertainty is still broad
         # (outside tiny micro-frontier pockets), force a low-repeat exploratory
@@ -15755,6 +18901,18 @@ class AIAssistantApp:
                             f"unknown={unresolved_unknown}, frontier={unresolved_frontier})."
                         )
                         guard_reason = self._append_guard_reason(guard_reason, long_loop_reason)
+                        long_loop_learning_note = self._reinforce_long_loop_subtype_escape(
+                            origin=self.current_player_cell,
+                            source_move=previous_move,
+                            replacement_move=replacement_move,
+                            source_repeat_pressure=selected_repeat_pressure,
+                            replacement_repeat_pressure=replacement_repeat_pressure,
+                            unresolved_unknown=unresolved_unknown,
+                            unresolved_frontier=unresolved_frontier,
+                            mode_tag="long_loop_escape",
+                        )
+                        if long_loop_learning_note:
+                            guard_reason = self._append_guard_reason(guard_reason, long_loop_learning_note)
 
         # Anti-oscillation guard: avoid A-B-A-B ping-pong unless
         # immediate backtrack is the only legal traversal option.
@@ -15914,27 +19072,62 @@ class AIAssistantApp:
                     and replacement_move != selected_move
                     and should_override
                 ):
-                    selected_move = replacement_move
-                    guard_override = True
-                    fallback_used = True
-                    stuck_note = (
-                        f" [stuck_recovery cooldown={self._maze_reexplore_cooldown_remaining} "
-                        f"unknown={unresolved_unknown} frontier={unresolved_frontier}]"
-                        if stuck_frontier_recovery
-                        else ""
+                    phase_level = self._effective_training_phase_level()
+                    selected_adaptive_pred = float(selected_breakdown.get("adaptive_prediction", 0.0) or 0.0)
+                    replacement_breakdown = self._exploration_move_breakdown(replacement_move)
+                    replacement_adaptive_pred = float(replacement_breakdown.get("adaptive_prediction", 0.0) or 0.0)
+                    pred_gap = replacement_adaptive_pred - selected_adaptive_pred
+                    emergency_escape = bool(
+                        recent_penalty_sum <= -260.0
+                        or (
+                            int(selected_repeat_pressure) >= 3
+                            and int(replacement_repeat_pressure) + 1 < int(selected_repeat_pressure)
+                        )
                     )
-                    frontier_note = (
-                        f" [frontier_escape unknown={unresolved_unknown} frontier={unresolved_frontier} "
-                        f"penalty6={round(recent_penalty_sum, 1)}]"
-                        if anti_osc_frontier_escape
-                        else ""
+                    learned_gate_allows = bool(
+                        phase_level < 2
+                        or emergency_escape
+                        or pred_gap >= float(self.training_phase_override_min_pred_gap)
                     )
-                    oscillation_reason = (
-                        f"Anti-oscillation override: replaced immediate backtrack with '{replacement_move}' "
-                        f"(score={replacement_score} vs {selected_score}, margin={anti_osc_override_margin})."
-                        f"{stuck_note}{frontier_note}"
-                    )
-                    guard_reason = self._append_guard_reason(guard_reason, oscillation_reason)
+                    if not learned_gate_allows:
+                        guard_reason = self._append_guard_reason(
+                            guard_reason,
+                            (
+                                "[TRAINING-PHASE2-HOLD: anti-oscillation hard override held "
+                                f"phase={phase_level} pred_gap={round(pred_gap, 4)} "
+                                f"required={round(float(self.training_phase_override_min_pred_gap), 4)} "
+                                f"selected_pred={round(selected_adaptive_pred, 4)} "
+                                f"replacement_pred={round(replacement_adaptive_pred, 4)}]"
+                            ),
+                        )
+                    else:
+                        selected_move = replacement_move
+                        guard_override = True
+                        fallback_used = True
+                        stuck_note = (
+                            f" [stuck_recovery cooldown={self._maze_reexplore_cooldown_remaining} "
+                            f"unknown={unresolved_unknown} frontier={unresolved_frontier}]"
+                            if stuck_frontier_recovery
+                            else ""
+                        )
+                        frontier_note = (
+                            f" [frontier_escape unknown={unresolved_unknown} frontier={unresolved_frontier} "
+                            f"penalty6={round(recent_penalty_sum, 1)}]"
+                            if anti_osc_frontier_escape
+                            else ""
+                        )
+                        phase_note = (
+                            f" [phase={phase_level} pred_gap={round(pred_gap, 4)} "
+                            f"required={round(float(self.training_phase_override_min_pred_gap), 4)}]"
+                            if phase_level >= 2
+                            else ""
+                        )
+                        oscillation_reason = (
+                            f"Anti-oscillation override: replaced immediate backtrack with '{replacement_move}' "
+                            f"(score={replacement_score} vs {selected_score}, margin={anti_osc_override_margin})."
+                            f"{stuck_note}{frontier_note}{phase_note}"
+                        )
+                        guard_reason = self._append_guard_reason(guard_reason, oscillation_reason)
                 elif selected_next == self.prev_prev_player_cell:
                     _note_noncritical_hold()
 
@@ -15972,21 +19165,59 @@ class AIAssistantApp:
                 if alternatives:
                     alternatives.sort(key=lambda item: (item[1], tie_order.get(item[0], 9)))
                     replacement_move, replacement_score = alternatives[0]
+                    replacement_breakdown = self._exploration_move_breakdown(replacement_move)
+                    selected_adaptive_pred = float(selected_breakdown.get("adaptive_prediction", 0.0) or 0.0)
+                    replacement_adaptive_pred = float(replacement_breakdown.get("adaptive_prediction", 0.0) or 0.0)
+                    phase_level = self._effective_training_phase_level()
+                    learned_gate_blocks = bool(
+                        phase_level >= 3
+                        and (replacement_adaptive_pred - selected_adaptive_pred)
+                        < float(self.training_phase_override_min_pred_gap)
+                        and recent_penalty_sum > -220.0
+                    )
                     # Allow a modest score margin to escape loops without
                     # forcing obviously bad moves.
+                    cycle_margin_scale = max(
+                        0.1,
+                        min(
+                            1.0,
+                            float(getattr(self, "runtime_batch_micro_cycle_avoid_margin_scale", 1.0) or 1.0),
+                        ),
+                    )
+                    effective_cycle_guard_margin = max(
+                        0,
+                        int(
+                            round(
+                                float(self.cycle_guard_score_margin)
+                                * adaptive_guard_strength
+                                * cycle_margin_scale
+                            )
+                        ),
+                    )
                     if replacement_score <= selected_score + max(
                         0,
-                        int(round(float(self.cycle_guard_score_margin) * adaptive_guard_strength)),
-                    ):
+                        effective_cycle_guard_margin,
+                    ) and (not learned_gate_blocks):
                         selected_move = replacement_move
                         guard_override = True
                         fallback_used = True
                         cycle_reason = (
                             f"Cycle-avoid override: replaced loop-prone move with '{replacement_move}' "
                             f"(score={replacement_score} vs {selected_score}, "
-                            f"transition_counts={selected_forward_count}/{selected_reverse_count})."
+                            f"transition_counts={selected_forward_count}/{selected_reverse_count}, "
+                            f"margin={effective_cycle_guard_margin}, "
+                            f"margin_scale={round(cycle_margin_scale, 3)})."
                         )
                         guard_reason = self._append_guard_reason(guard_reason, cycle_reason)
+                    elif learned_gate_blocks:
+                        guard_reason = self._append_guard_reason(
+                            guard_reason,
+                            (
+                                "[TRAINING-PHASE3-HOLD: cycle-avoid hard override held "
+                                f"phase={phase_level} pred_gap={round(replacement_adaptive_pred - selected_adaptive_pred, 4)} "
+                                f"required={round(float(self.training_phase_override_min_pred_gap), 4)}]"
+                            ),
+                        )
         elif selected_move and self._is_valid_traversal_move(selected_move):
             _note_noncritical_hold()
 
@@ -16158,6 +19389,18 @@ class AIAssistantApp:
                             f"{frontier_hint_note}{hysteresis_note}"
                         )
                         guard_reason = self._append_guard_reason(guard_reason, deathloop_reason)
+                        deathloop_learning_note = self._reinforce_long_loop_subtype_escape(
+                            origin=origin,
+                            source_move=previous_move,
+                            replacement_move=replacement_move,
+                            source_repeat_pressure=selected_repeat_pressure,
+                            replacement_repeat_pressure=replacement_repeat_pressure,
+                            unresolved_unknown=unresolved_unknown,
+                            unresolved_frontier=unresolved_frontier,
+                            mode_tag="deathloop_escape",
+                        )
+                        if deathloop_learning_note:
+                            guard_reason = self._append_guard_reason(guard_reason, deathloop_learning_note)
 
         # Frontier-commit guard: while uncertainty remains, avoid orbiting
         # fully-known local loops when a nearby exploratory move exists.
@@ -16317,8 +19560,52 @@ class AIAssistantApp:
                             0,
                             int(round(float(self.terminal_end_guard_margin) * adaptive_guard_strength)),
                         )
-                        if replacement_score <= selected_score + terminal_margin:
-                            if _is_escape_source_replay(replacement_move):
+                        unresolved_terminal_context = bool(
+                            unresolved_unknown > 0 or unresolved_frontier > 0
+                        )
+                        if unresolved_terminal_context:
+                            terminal_margin = max(
+                                0,
+                                terminal_margin
+                                - int(self.terminal_override_unresolved_margin_reduction),
+                            )
+                        repeat_guard_blocked = bool(
+                            unresolved_terminal_context
+                            and self.terminal_override_require_repeat_improvement_unresolved
+                            and _replacement_repeat_pressure > selected_repeat_pressure
+                        )
+                        if repeat_guard_blocked:
+                            guard_reason = self._append_guard_reason(
+                                guard_reason,
+                                (
+                                    "[TERMINAL-OVERRIDE-REPEAT-GUARD: held replacement under unresolved context "
+                                    f"repeat={selected_repeat_pressure}->{_replacement_repeat_pressure} "
+                                    f"unknown={unresolved_unknown} frontier={unresolved_frontier}]"
+                                ),
+                            )
+                        elif replacement_score <= selected_score + terminal_margin:
+                            micro_frontier_corridor_commit_hold = bool(
+                                micro_frontier_stall_active
+                                and unresolved_unknown > 0
+                                and unresolved_unknown <= 1
+                                and unresolved_frontier <= 0
+                                and int(micro_frontier_no_progress_steps)
+                                >= int(self.micro_frontier_stall_disambiguation_no_progress_cap)
+                                and int(selected_breakdown.get("edge_clear_run", 0) or 0) >= 2
+                                and _replacement_repeat_pressure >= selected_repeat_pressure
+                            )
+                            if micro_frontier_corridor_commit_hold:
+                                guard_reason = self._append_guard_reason(
+                                    guard_reason,
+                                    (
+                                        "[MICRO-FRONTIER-CORRIDOR-COMMIT: held terminal/boxed override "
+                                        f"move='{selected_move}' replacement='{replacement_move}' "
+                                        f"repeat={selected_repeat_pressure}->{_replacement_repeat_pressure} "
+                                        f"clear_run={int(selected_breakdown.get('edge_clear_run', 0) or 0)} "
+                                        f"unknown={unresolved_unknown} frontier={unresolved_frontier}]"
+                                    ),
+                                )
+                            elif _is_escape_source_replay(replacement_move):
                                 guard_reason = self._append_guard_reason(
                                     guard_reason,
                                     (
@@ -16940,6 +20227,20 @@ class AIAssistantApp:
             self.taboo_transitions[(from_cell, to_cell)] = expiry
             self.taboo_transitions[(to_cell, from_cell)] = expiry
 
+        if self.loop_risk_mark_enable:
+            difficulty = self._normalized_maze_difficulty()
+            threshold_relax = 1 if difficulty in {"hard", "very hard"} else 0
+            repeat_threshold = max(1, int(self.loop_risk_mark_repeat_threshold) - threshold_relax)
+            forward_key = self._edge_key_from_transition(from_cell, to_cell)
+            reverse_marker_key = self._edge_key_from_transition(to_cell, from_cell)
+            if same_edge_count >= repeat_threshold and forward_key is not None:
+                self.loop_risk_opening_edges.add(forward_key)
+            if (same_edge_count + reverse_edge_count) >= repeat_threshold:
+                if forward_key is not None:
+                    self.loop_risk_opening_edges.add(forward_key)
+                if reverse_marker_key is not None:
+                    self.loop_risk_opening_edges.add(reverse_marker_key)
+
     def _traversable_neighbors(self, cell: tuple[int, int]) -> list[tuple[int, int]]:
         neighbors: list[tuple[int, int]] = []
         for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
@@ -17041,6 +20342,276 @@ class AIAssistantApp:
                 count += 1
         return count
 
+    def _opening_cell_fully_verified_empty(self, opening_cell: tuple[int, int]) -> bool:
+        """Return True when direct known-map evidence shows the opening leads nowhere.
+
+        This intentionally avoids prediction signals and only uses currently
+        observed occupancy/topology.
+        """
+        if opening_cell == self.current_target_cell:
+            return False
+        if opening_cell in self.blocked_cells:
+            return False
+        if opening_cell not in self.maze_known_cells:
+            return False
+        if not self._opening_cell_mark_ready(opening_cell):
+            return False
+        unknown_neighbors = self._unknown_neighbor_count(opening_cell)
+        open_degree = len(self._traversable_neighbors(opening_cell))
+        frontier_distance = self._frontier_distance(opening_cell)
+        potential_openings = self._potential_opening_count(opening_cell)
+        if unknown_neighbors == 0 and open_degree <= 1:
+            return True
+
+        # If currently known geometry shows a straight corridor that ends in a
+        # visible terminal cap (wall/bounds) with no side branch evidence,
+        # treat it as verified-empty even without heavy repeat pressure.
+        if (
+            open_degree <= 2
+            and potential_openings == 0
+            and frontier_distance >= 2
+            and self._opening_cell_has_known_terminal_vision_evidence(opening_cell)
+        ):
+            return True
+
+        # Repeat-pressure marking: require stronger local verification so side
+        # markers do not fire before a branch is sufficiently checked.
+        repeat_visits = int(self.episode_visited_cells.get(opening_cell, 0) or 0)
+        row, col = opening_cell
+        known_neighbor_count = 0
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr = row + dr
+            nc = col + dc
+            if nr < 0 or nr >= self.grid_cells or nc < 0 or nc >= self.grid_cells:
+                continue
+            if (nr, nc) in self.maze_known_cells:
+                known_neighbor_count += 1
+
+        neighbor_repeat_peak = 0
+        for neighbor in self._traversable_neighbors(opening_cell):
+            if neighbor in self.blocked_cells:
+                continue
+            neighbor_repeat_peak = max(
+                neighbor_repeat_peak,
+                int(self.episode_visited_cells.get(neighbor, 0) or 0),
+            )
+
+        difficulty = self._normalized_maze_difficulty()
+        marker_relax = 1 if difficulty in {"hard", "very hard"} else 0
+        repeat_visits_min = max(2, 4 - marker_relax)
+        frontier_distance_min = max(2, 4 - marker_relax)
+        known_neighbor_min = max(2, 3 - marker_relax)
+        neighbor_repeat_peak_min = max(1, 2 - marker_relax)
+
+        if (
+            repeat_visits >= repeat_visits_min
+            and unknown_neighbors == 0
+            and open_degree <= 2
+            and frontier_distance >= frontier_distance_min
+            and potential_openings == 0
+            and known_neighbor_count >= known_neighbor_min
+            and (open_degree <= 1 or neighbor_repeat_peak >= neighbor_repeat_peak_min)
+            and self._opening_cell_has_known_terminal_vision_evidence(opening_cell)
+        ):
+            return True
+        return False
+
+    def _opening_cell_mark_ready(self, opening_cell: tuple[int, int]) -> bool:
+        """Only mark after the opening has been entered/inspected and then exited.
+
+        Entry can be physical (visited) or strong terminal vision evidence.
+        Exit requires the opening not to be the current cell, and for vision-only
+        entries, also requires that the opening is no longer currently visible.
+        """
+        if opening_cell == self.current_target_cell:
+            return False
+        if opening_cell in self.blocked_cells or opening_cell not in self.maze_known_cells:
+            return False
+
+        physical_entry = int(self.episode_visited_cells.get(opening_cell, 0) or 0) > 0
+        vision_entry = self._opening_cell_has_known_terminal_vision_evidence(opening_cell)
+        if not (physical_entry or vision_entry):
+            return False
+
+        if self.current_player_cell == opening_cell:
+            return False
+
+        if (not physical_entry) and vision_entry:
+            player_row, player_col = self.current_player_cell
+            if self._is_local_cell_visible(
+                player_row,
+                player_col,
+                opening_cell[0],
+                opening_cell[1],
+                facing=self.player_facing,
+            ):
+                return False
+
+        return True
+
+    def _opening_cell_has_known_terminal_vision_evidence(self, opening_cell: tuple[int, int]) -> bool:
+        if opening_cell in self.blocked_cells or opening_cell not in self.maze_known_cells:
+            return False
+
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        max_depth = max(2, self.grid_cells)
+        for dr, dc in directions:
+            next_row = opening_cell[0] + dr
+            next_col = opening_cell[1] + dc
+            if next_row < 0 or next_row >= self.grid_cells or next_col < 0 or next_col >= self.grid_cells:
+                continue
+            if (next_row, next_col) in self.blocked_cells:
+                continue
+            if (next_row, next_col) not in self.maze_known_cells:
+                continue
+
+            row, col = opening_cell
+            clear_run = 0
+            unresolved = False
+            branch_seen = False
+            for _step in range(max_depth):
+                row += dr
+                col += dc
+
+                if row < 0 or row >= self.grid_cells or col < 0 or col >= self.grid_cells:
+                    if clear_run >= 1 and (not unresolved) and (not branch_seen):
+                        return True
+                    break
+                if (row, col) in self.blocked_cells:
+                    if clear_run >= 1 and (not unresolved) and (not branch_seen):
+                        return True
+                    break
+                if (row, col) not in self.maze_known_cells:
+                    unresolved = True
+                    break
+
+                clear_run += 1
+                if dr != 0:
+                    side_offsets = [(0, -1), (0, 1)]
+                else:
+                    side_offsets = [(-1, 0), (1, 0)]
+
+                for sr, sc in side_offsets:
+                    side_row = row + sr
+                    side_col = col + sc
+                    if side_row < 0 or side_row >= self.grid_cells or side_col < 0 or side_col >= self.grid_cells:
+                        continue
+                    if (side_row, side_col) in self.blocked_cells:
+                        continue
+                    if (side_row, side_col) not in self.maze_known_cells:
+                        unresolved = True
+                        break
+                    branch_seen = True
+                    break
+
+                if unresolved or branch_seen:
+                    break
+
+        return False
+
+    def _prune_verified_empty_opening_edges(self) -> None:
+        side_delta = {
+            "UP": (-1, 0),
+            "RIGHT": (0, 1),
+            "DOWN": (1, 0),
+            "LEFT": (0, -1),
+        }
+        for row, col, side in list(self.verified_empty_opening_edges):
+            delta = side_delta.get(side)
+            if delta is None:
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+            if row < 0 or row >= self.grid_cells or col < 0 or col >= self.grid_cells:
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+            if self._is_blocked_cell((row, col)):
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+
+            dr, dc = delta
+            side_cell = (row + dr, col + dc)
+            if not self._opening_cell_fully_verified_empty(side_cell):
+                self.verified_empty_opening_edges.discard((row, col, side))
+
+    def _loop_risk_edge_still_valid(self, row: int, col: int, side: str) -> bool:
+        side_delta = {
+            "UP": (-1, 0),
+            "RIGHT": (0, 1),
+            "DOWN": (1, 0),
+            "LEFT": (0, -1),
+        }
+        delta = side_delta.get(side)
+        if delta is None:
+            return False
+        if row < 0 or row >= self.grid_cells or col < 0 or col >= self.grid_cells:
+            return False
+        if self._is_blocked_cell((row, col)):
+            return False
+
+        dr, dc = delta
+        candidate = (row + dr, col + dc)
+        if candidate[0] < 0 or candidate[0] >= self.grid_cells or candidate[1] < 0 or candidate[1] >= self.grid_cells:
+            return False
+        if self._is_blocked_cell(candidate):
+            return False
+        if candidate == self.current_target_cell:
+            return False
+
+        difficulty = self._normalized_maze_difficulty()
+        threshold_relax = 1 if difficulty in {"hard", "very hard"} else 0
+        visits = int(self.episode_visited_cells.get(candidate, 0) or 0)
+        min_visits = max(1, int(self.loop_risk_mark_min_visits) - threshold_relax)
+        if visits < min_visits:
+            return False
+        unknown_max = max(0, int(self.loop_risk_mark_unknown_max) + threshold_relax)
+        if self._unknown_neighbor_count(candidate) > unknown_max:
+            return False
+
+        forward, reverse = self._recent_transition_counts((row, col), candidate)
+        repeat_pressure = int(forward) + int(reverse)
+        repeat_threshold = max(1, int(self.loop_risk_mark_repeat_threshold) - threshold_relax)
+        if repeat_pressure < repeat_threshold:
+            return False
+
+        origin_frontier = self._frontier_distance((row, col))
+        candidate_frontier = self._frontier_distance(candidate)
+        if candidate_frontier < origin_frontier:
+            # Keep loop-risk marks focused on replaying non-improving branches.
+            return False
+        return True
+
+    def _prune_loop_risk_opening_edges(self) -> None:
+        if not self.loop_risk_opening_edges:
+            return
+        for row, col, side in list(self.loop_risk_opening_edges):
+            if not self._loop_risk_edge_still_valid(row, col, side):
+                self.loop_risk_opening_edges.discard((row, col, side))
+
+    def _beam_progress_credit(
+        self,
+        frontier_distance: int,
+        edge_scan: dict[str, int | bool | str],
+    ) -> int:
+        """Beam visibility credit in one-to-one step equivalence.
+
+        A visible corridor run contributes the same step credit as physically
+        traversing that run length.
+        """
+        if not self.vision_progress_credit_enable:
+            return 0
+        clear_run = int(edge_scan.get("clear_run", 0) or 0)
+        if clear_run < self.vision_progress_credit_min_clear_run:
+            return 0
+        has_end_evidence = bool(
+            edge_scan.get("edge_detected", False)
+            or edge_scan.get("frontier_visible", False)
+            or edge_scan.get("junction_visible", False)
+            or edge_scan.get("exit_visible", False)
+        )
+        if not has_end_evidence:
+            return 0
+        return max(0, min(int(frontier_distance), clear_run))
+
     def _biological_navigation_signals(
         self,
         origin: tuple[int, int],
@@ -17068,6 +20639,9 @@ class AIAssistantApp:
         origin_unknown = self._unknown_neighbor_count(origin)
         origin_frontier_distance = self._frontier_distance(origin)
         opening_evidence = 0
+        verified_empty_opening_contacts = int(edge_scan.get("verified_empty_opening_contacts", 0) or 0)
+        wide_open_steps = int(edge_scan.get("wide_open_steps", 0) or 0)
+        max_open_width = int(edge_scan.get("max_open_width", 1) or 1)
         if bool(edge_scan.get("junction_visible", False)):
             opening_evidence += 1
         if bool(edge_scan.get("frontier_visible", False)):
@@ -17078,7 +20652,16 @@ class AIAssistantApp:
             opening_evidence += 1
         if int(edge_scan.get("inferred_diagonal_open_contacts", 0) or 0) > 0:
             opening_evidence += 1
-        opening_evidence += min(2, self._potential_opening_count(candidate))
+        if bool(edge_scan.get("wide_open_visible", False)):
+            opening_evidence += 1
+            opening_evidence += min(2, max(0, max_open_width - 3))
+        if wide_open_steps > 1:
+            opening_evidence += 1
+        potential_openings = self._potential_opening_count(candidate)
+        if verified_empty_opening_contacts > 0:
+            potential_openings = max(0, potential_openings - verified_empty_opening_contacts)
+            opening_evidence = max(0, opening_evidence - min(2, verified_empty_opening_contacts))
+        opening_evidence += min(2, potential_openings)
 
         bio_opening_bonus = 0
         if opening_evidence > 0:
@@ -17159,6 +20742,252 @@ class AIAssistantApp:
             elif frm == candidate and to == origin:
                 reverse += 1
         return (forward, reverse)
+
+    def _edge_key_from_transition(
+        self,
+        from_cell: tuple[int, int],
+        to_cell: tuple[int, int],
+    ) -> tuple[int, int, str] | None:
+        dr = int(to_cell[0]) - int(from_cell[0])
+        dc = int(to_cell[1]) - int(from_cell[1])
+        side = {
+            (-1, 0): "UP",
+            (1, 0): "DOWN",
+            (0, -1): "LEFT",
+            (0, 1): "RIGHT",
+        }.get((dr, dc))
+        if side is None:
+            return None
+        return (int(from_cell[0]), int(from_cell[1]), side)
+
+    def _long_loop_subtype_profile(
+        self,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+    ) -> tuple[float, float, float, int]:
+        if not self.long_loop_subtype_learning_enable:
+            return (0.0, 0.0, 0.0, 0)
+
+        entry = self.long_loop_subtype_memory.get((origin, candidate), {})
+        if not entry:
+            return (0.0, 0.0, 0.0, 0)
+
+        risk_ema = max(0.0, min(1.0, float(entry.get("risk_ema", 0.0) or 0.0)))
+        relief_ema = max(0.0, min(1.0, float(entry.get("relief_ema", 0.0) or 0.0)))
+        samples = max(0.0, float(entry.get("samples", 0.0) or 0.0))
+        last_step = int(entry.get("last_step", self.memory_step_index) or self.memory_step_index)
+        age_steps = max(0, int(self.memory_step_index) - last_step)
+        decay_steps = max(24, int(self.long_loop_subtype_decay_steps))
+        recency = math.exp(-float(age_steps) / float(decay_steps))
+        sample_conf = samples / (samples + 6.0)
+        confidence = max(0.0, min(1.0, sample_conf * recency))
+
+        # Opportunistically prune stale, low-signal entries to avoid map-to-map carryover.
+        if (
+            age_steps >= (decay_steps * 4)
+            and confidence < 0.02
+            and risk_ema < 0.05
+            and relief_ema < 0.05
+        ):
+            self.long_loop_subtype_memory.pop((origin, candidate), None)
+            return (0.0, 0.0, 0.0, age_steps)
+
+        return (risk_ema, relief_ema, confidence, age_steps)
+
+    def _update_long_loop_subtype_memory(
+        self,
+        origin: tuple[int, int] | None,
+        candidate: tuple[int, int] | None,
+        *,
+        signal: float,
+        repeat_pressure: int,
+        unresolved_unknown: int,
+        unresolved_frontier: int,
+    ) -> None:
+        if not self.long_loop_subtype_learning_enable:
+            return
+        if origin is None or candidate is None or origin == candidate:
+            return
+
+        key = (origin, candidate)
+        entry = self.long_loop_subtype_memory.setdefault(
+            key,
+            {
+                "risk_ema": 0.0,
+                "relief_ema": 0.0,
+                "samples": 0.0,
+                "last_step": float(self.memory_step_index),
+            },
+        )
+
+        learning_rate = max(0.02, min(0.9, float(self.long_loop_subtype_learning_rate)))
+        repeat_gain = 1.0 + min(0.45, max(0, int(repeat_pressure) - 1) * 0.12)
+        unresolved_gain = 1.18 if (int(unresolved_unknown) > 0 or int(unresolved_frontier) > 0) else 1.0
+        scaled_signal = max(-1.0, min(1.0, float(signal) * repeat_gain * unresolved_gain))
+
+        risk_ema = max(0.0, min(1.0, float(entry.get("risk_ema", 0.0) or 0.0)))
+        relief_ema = max(0.0, min(1.0, float(entry.get("relief_ema", 0.0) or 0.0)))
+        if scaled_signal >= 0.0:
+            risk_ema = ((1.0 - learning_rate) * risk_ema) + (learning_rate * scaled_signal)
+            relief_ema = (1.0 - (learning_rate * 0.45)) * relief_ema
+        else:
+            relief_target = abs(scaled_signal)
+            relief_ema = ((1.0 - learning_rate) * relief_ema) + (learning_rate * relief_target)
+            risk_ema = (1.0 - (learning_rate * 0.35)) * risk_ema
+
+        entry["risk_ema"] = max(0.0, min(1.0, risk_ema))
+        entry["relief_ema"] = max(0.0, min(1.0, relief_ema))
+        entry["samples"] = min(5000.0, float(entry.get("samples", 0.0) or 0.0) + 1.0)
+        entry["last_step"] = float(self.memory_step_index)
+
+    def _long_loop_subtype_penalty(
+        self,
+        *,
+        origin: tuple[int, int],
+        candidate: tuple[int, int],
+        repeat_pressure: int,
+        unresolved_unknown: int,
+        unresolved_frontier: int,
+        unknown_neighbors: int,
+        frontier_distance_effective: int,
+        origin_frontier_distance: int,
+    ) -> tuple[int, float, float, float]:
+        if not self.long_loop_subtype_learning_enable:
+            return (0, 0.0, 0.0, 0.0)
+        if self.long_loop_subtype_max_penalty <= 0 or self.long_loop_subtype_penalty_scale <= 0.0:
+            return (0, 0.0, 0.0, 0.0)
+        if repeat_pressure < int(self.long_loop_subtype_min_repeat_pressure):
+            return (0, 0.0, 0.0, 0.0)
+
+        risk_ema, relief_ema, confidence, _age_steps = self._long_loop_subtype_profile(origin, candidate)
+        if confidence <= 0.0 or risk_ema <= 0.0:
+            return (0, risk_ema, relief_ema, confidence)
+
+        effective_risk = max(0.0, risk_ema - (relief_ema * float(self.long_loop_subtype_relief_scale)))
+        if effective_risk <= 0.0:
+            return (0, risk_ema, relief_ema, confidence)
+
+        repeat_units = max(0, int(repeat_pressure) - int(self.long_loop_subtype_min_repeat_pressure) + 1)
+        repeat_scale = min(1.6, 0.8 + (0.2 * float(repeat_units)))
+        unresolved_scale = 1.0 if (int(unresolved_unknown) > 0 or int(unresolved_frontier) > 0) else 0.45
+        if int(frontier_distance_effective) < int(origin_frontier_distance):
+            unresolved_scale *= 0.75
+        novelty_relief = 0.6 if int(unknown_neighbors) > 0 else 1.0
+
+        raw_penalty = (
+            float(self.long_loop_subtype_max_penalty)
+            * float(self.long_loop_subtype_penalty_scale)
+            * effective_risk
+            * confidence
+            * repeat_scale
+            * unresolved_scale
+            * novelty_relief
+        )
+        penalty = min(
+            max(0, int(self.long_loop_subtype_max_penalty)),
+            max(0, int(round(raw_penalty))),
+        )
+        return (penalty, risk_ema, relief_ema, confidence)
+
+    def _reinforce_long_loop_subtype_escape(
+        self,
+        *,
+        origin: tuple[int, int],
+        source_move: str,
+        replacement_move: str,
+        source_repeat_pressure: int,
+        replacement_repeat_pressure: int,
+        unresolved_unknown: int,
+        unresolved_frontier: int,
+        mode_tag: str,
+    ) -> str:
+        if not self.long_loop_subtype_learning_enable:
+            return ""
+        if (
+            source_move not in {"UP", "DOWN", "LEFT", "RIGHT"}
+            or replacement_move not in {"UP", "DOWN", "LEFT", "RIGHT"}
+            or source_move == replacement_move
+        ):
+            return ""
+
+        source_cell = self._neighbor_for_move(origin, source_move)
+        replacement_cell = self._neighbor_for_move(origin, replacement_move)
+        if source_cell == origin or replacement_cell == origin:
+            return ""
+
+        self._update_long_loop_subtype_memory(
+            origin,
+            source_cell,
+            signal=1.0,
+            repeat_pressure=source_repeat_pressure,
+            unresolved_unknown=unresolved_unknown,
+            unresolved_frontier=unresolved_frontier,
+        )
+        replacement_relief_signal = -max(
+            0.2,
+            min(0.8, 0.35 + (0.08 * max(0, source_repeat_pressure - replacement_repeat_pressure))),
+        )
+        self._update_long_loop_subtype_memory(
+            origin,
+            replacement_cell,
+            signal=replacement_relief_signal,
+            repeat_pressure=max(1, replacement_repeat_pressure),
+            unresolved_unknown=unresolved_unknown,
+            unresolved_frontier=unresolved_frontier,
+        )
+
+        source_risk, _source_relief, source_conf, _source_age = self._long_loop_subtype_profile(origin, source_cell)
+        _replacement_risk, replacement_relief, replacement_conf, _replacement_age = self._long_loop_subtype_profile(
+            origin,
+            replacement_cell,
+        )
+        return (
+            "[LONG-LOOP-SUBTYPE-LEARN: "
+            f"mode={mode_tag} source={source_move} replacement={replacement_move} "
+            f"repeat={source_repeat_pressure}->{replacement_repeat_pressure} "
+            f"source_risk={round(source_risk, 3)} source_conf={round(source_conf, 3)} "
+            f"replacement_relief={round(replacement_relief, 3)} replacement_conf={round(replacement_conf, 3)}]"
+        )
+
+    def _loop_pattern_awareness_escalation(
+        self,
+        origin: tuple[int, int],
+    ) -> tuple[int, float, float]:
+        if not self.long_loop_subtype_learning_enable:
+            return (0, 0.0, 0.0)
+
+        best_awareness = 0.0
+        best_confidence = 0.0
+        for move in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            if not self._is_valid_traversal_move(move):
+                continue
+            candidate = self._neighbor_for_move(origin, move)
+            if candidate == origin:
+                continue
+            forward_count, reverse_count = self._recent_transition_counts(origin, candidate)
+            repeat_pressure = int(forward_count) + int(reverse_count)
+            if repeat_pressure <= 0:
+                continue
+
+            risk_ema, relief_ema, confidence, _age_steps = self._long_loop_subtype_profile(origin, candidate)
+            if confidence <= 0.0:
+                continue
+            effective_risk = max(0.0, risk_ema - (relief_ema * float(self.long_loop_subtype_relief_scale)))
+            if effective_risk <= 0.0:
+                continue
+
+            repeat_scale = min(1.8, 0.8 + (0.22 * max(0, repeat_pressure - 1)))
+            awareness = effective_risk * confidence * repeat_scale
+            if awareness > best_awareness:
+                best_awareness = awareness
+                best_confidence = confidence
+
+        escalation = 0
+        if best_awareness >= 0.62 and best_confidence >= 0.22:
+            escalation = 2
+        elif best_awareness >= 0.32 and best_confidence >= 0.14:
+            escalation = 1
+        return (escalation, best_awareness, best_confidence)
 
     def _long_trap_memory_penalties(
         self,
@@ -17277,6 +21106,19 @@ class AIAssistantApp:
         def _clip(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
             return max(lo, min(hi, float(value)))
 
+        projection_scale = self._training_projection_feature_scale() if self.training_phase_enable else 0.0
+        prediction_signal = _num("prediction_junction_bonus_raw") - _num("prediction_dead_end_penalty_raw")
+        projection_forward_signal = (
+            (24.0 * _num("projection_forward_progress_signal"))
+            + (14.0 * _num("projection_forward_novelty_signal"))
+            - (18.0 * _num("projection_forward_trap_signal"))
+        )
+        projection_loop_signal = (
+            (0.9 * _num("projection_backward_loop_pressure"))
+            - (0.45 * _num("projection_backward_seen_ratio"))
+            + (_num("projection_score_delta") / 24.0)
+        )
+
         features = [
             1.0,
             _clip(_num("visits") / 6.0),
@@ -17303,9 +21145,16 @@ class AIAssistantApp:
                 / 280.0
             ),
             _clip(_num("cause_effect_memory_reward") / 180.0),
-            _clip(_num("prediction_junction_bonus_raw") / 36.0),
-            _clip(_num("prediction_dead_end_penalty_raw") / 36.0),
-            _clip((0.72 * _num("mv_exit_progress_norm")) + (0.28 * _num("spatial_exit_progress_norm"))),
+            _clip((prediction_signal + (projection_scale * projection_forward_signal)) / 42.0),
+            _clip(
+                ((1.0 - projection_scale) * (_num("prediction_dead_end_penalty_raw") / 36.0))
+                + (projection_scale * projection_loop_signal)
+            ),
+            _clip(
+                (0.58 * _num("mv_exit_progress_norm"))
+                + (0.24 * _num("spatial_exit_progress_norm"))
+                + (0.18 * projection_scale * _num("projection_forward_progress_signal"))
+            ),
         ]
         return features
 
@@ -17515,6 +21364,7 @@ class AIAssistantApp:
             }
         origin = self.current_player_cell
         candidate = self._neighbor_for_move(origin, move)
+        terminal_trust_scale = self._terminal_risk_trust_scale()
         if candidate == origin or self._is_blocked_cell(candidate):
             return {
                 "score": 10_000,
@@ -17527,6 +21377,9 @@ class AIAssistantApp:
                 "unknown_neighbors": 0,
                 "open_degree": 0,
             }
+
+        if self.loop_risk_mark_enable:
+            self._prune_loop_risk_opening_edges()
 
         visits = self.episode_visited_cells.get(candidate, 0)
         personality = self.maze_personality or {}
@@ -17707,6 +21560,9 @@ class AIAssistantApp:
             )
         edge_scan = self._directional_edge_scan(origin[0], origin[1], move)
         straight_tunnel = 1 if (edge_scan["clear_run"] >= 3 and not edge_scan["edge_detected"]) else 0
+        wide_open_visible = bool(edge_scan.get("wide_open_visible", False))
+        wide_open_steps = int(edge_scan.get("wide_open_steps", 0) or 0)
+        max_open_width = int(edge_scan.get("max_open_width", 1) or 1)
         visible_open_decision = (
             1
             if (
@@ -17714,19 +21570,11 @@ class AIAssistantApp:
             )
             else 0
         )
-        visual_traversal_credit = 0
-        if self.vision_progress_credit_enable:
-            clear_run = int(edge_scan.get("clear_run", 0) or 0)
-            has_end_evidence = bool(
-                edge_scan.get("edge_detected", False)
-                or edge_scan.get("frontier_visible", False)
-                or edge_scan.get("junction_visible", False)
-                or edge_scan.get("exit_visible", False)
-            )
-            if clear_run >= self.vision_progress_credit_min_clear_run and has_end_evidence:
-                visual_traversal_credit = int(
-                    round(min(frontier_distance, clear_run) * self.vision_progress_credit_scale)
-                )
+        if wide_open_visible:
+            visible_open_decision += 1
+            if max_open_width >= 4:
+                visible_open_decision += 1
+        visual_traversal_credit = self._beam_progress_credit(frontier_distance, edge_scan)
         frontier_distance_effective = max(0, frontier_distance - visual_traversal_credit)
         visible_closed_structure = (
             1
@@ -17734,6 +21582,7 @@ class AIAssistantApp:
                 edge_scan["edge_type"] in {"blocked", "bounds", "occluded"}
                 and (not edge_scan["frontier_visible"])
                 and (not edge_scan["junction_visible"])
+                and (not wide_open_visible)
             )
             else 0
         )
@@ -17746,6 +21595,7 @@ class AIAssistantApp:
                 and unknown_neighbors == 0
                 and (not edge_scan["frontier_visible"])
                 and (not edge_scan["junction_visible"])
+                and (not wide_open_visible)
             )
             else 0
         )
@@ -17756,6 +21606,7 @@ class AIAssistantApp:
                 and edge_scan["edge_type"] in {"bounds", "blocked"}
                 and (not edge_scan["frontier_visible"])
                 and (not edge_scan["junction_visible"])
+                and (not wide_open_visible)
                 and (not edge_scan["exit_visible"])
             )
             else 0
@@ -17765,6 +21616,7 @@ class AIAssistantApp:
         pre_tip_dead_end_commit = (
             open_degree <= 1
             and unknown_neighbors <= 1
+            and (not wide_open_visible)
             and candidate != self.current_target_cell
         )
         visible_terminal_dead_end_commit = (
@@ -17790,6 +21642,9 @@ class AIAssistantApp:
                     * attempt_dead_end_scale
                 )
             )
+        if wide_open_visible:
+            # Open-room geometry is not a reliable terminal signal.
+            dead_end_end_slap_penalty = int(round(dead_end_end_slap_penalty * 0.45))
         dead_end_tip_revisit_slap_penalty = 0
         if (
             candidate != self.current_target_cell
@@ -17805,6 +21660,15 @@ class AIAssistantApp:
                     * attempt_dead_end_scale
                 )
             )
+        if wide_open_visible:
+            dead_end_tip_revisit_slap_penalty = int(round(dead_end_tip_revisit_slap_penalty * 0.55))
+            narrow_corridor_additive_penalty = int(round(narrow_corridor_additive_penalty * 0.35))
+        dead_end_end_slap_penalty_base = int(dead_end_end_slap_penalty)
+        dead_end_tip_revisit_slap_penalty_base = int(dead_end_tip_revisit_slap_penalty)
+        dead_end_end_slap_penalty = int(round(dead_end_end_slap_penalty_base * terminal_trust_scale))
+        dead_end_tip_revisit_slap_penalty = int(
+            round(dead_end_tip_revisit_slap_penalty_base * terminal_trust_scale)
+        )
         branch_diversity_penalty = 0
         origin_open_neighbors = self._traversable_neighbors(origin)
         forced_single_exit = len(origin_open_neighbors) <= 1
@@ -17838,6 +21702,19 @@ class AIAssistantApp:
         recent_transition_count, recent_reverse_transition_count = self._recent_transition_counts(origin, candidate)
         transition_repeat_penalty = int(round(recent_transition_count * self.cycle_transition_penalty_weight))
         cycle_pair_penalty = int(round(recent_reverse_transition_count * self.cycle_pair_penalty_weight))
+        origin_pattern_signature = self._canonical_pattern_signature(
+            self._current_pattern_signature(current_cell=origin)
+        )
+        pattern_uncertainty_state = self._pattern_uncertainty_state(origin_pattern_signature)
+        pattern_uncertainty_score = float(pattern_uncertainty_state.get("uncertainty_score", 0.0) or 0.0)
+        pattern_confidence_score = float(pattern_uncertainty_state.get("confidence_score", 1.0) or 1.0)
+        loop_risk_marked_edge_penalty = 0
+        loop_risk_marked_edge = False
+        if self.loop_risk_mark_enable:
+            edge_key = (int(origin[0]), int(origin[1]), str(move))
+            if edge_key in self.loop_risk_opening_edges:
+                loop_risk_marked_edge = True
+                loop_risk_marked_edge_penalty = max(0, int(self.loop_risk_mark_penalty))
         terminal_reentry_penalty = 0
         if (terminal_corridor or boxed_corridor_no_exit) and (recent_transition_count + recent_reverse_transition_count) > 0:
             repeat_units = min(4, recent_transition_count + recent_reverse_transition_count)
@@ -17897,6 +21774,29 @@ class AIAssistantApp:
                 long_trap_transition_hits,
                 long_trap_cell_hits,
             ) = self._long_trap_memory_penalties(origin, candidate)
+
+        long_loop_subtype_penalty = 0
+        long_loop_subtype_risk_ema = 0.0
+        long_loop_subtype_relief_ema = 0.0
+        long_loop_subtype_confidence = 0.0
+        runtime_no_progress_steps = max(0, int(getattr(self, "_runtime_no_progress_steps", 0) or 0))
+        repeat_pressure_for_subtype = recent_transition_count + recent_reverse_transition_count
+        if runtime_no_progress_steps >= int(self.long_loop_escape_no_progress_min):
+            (
+                long_loop_subtype_penalty,
+                long_loop_subtype_risk_ema,
+                long_loop_subtype_relief_ema,
+                long_loop_subtype_confidence,
+            ) = self._long_loop_subtype_penalty(
+                origin=origin,
+                candidate=candidate,
+                repeat_pressure=repeat_pressure_for_subtype,
+                unresolved_unknown=episodic_unknown_cells,
+                unresolved_frontier=episodic_frontier_cells,
+                unknown_neighbors=unknown_neighbors,
+                frontier_distance_effective=frontier_distance_effective,
+                origin_frontier_distance=origin_frontier_distance,
+            )
 
         post_reset_exhaustion_penalty = 0
         reset_failure_transition_penalty = 0
@@ -18201,6 +22101,8 @@ class AIAssistantApp:
                     break
             if has_non_terminal_alternative and (dead_end_risk_depth >= 1 or visits > 0):
                 terminal_hard_veto_penalty = max(0, int(self.terminal_corridor_hard_veto_penalty))
+        terminal_hard_veto_penalty_base = int(terminal_hard_veto_penalty)
+        terminal_hard_veto_penalty = int(round(terminal_hard_veto_penalty_base * terminal_trust_scale))
 
         branch_tightening_abort_penalty = 0
         branch_tightening_escape_bonus = 0
@@ -18221,19 +22123,7 @@ class AIAssistantApp:
                 alt_unknown = self._unknown_neighbor_count(alt_cell)
                 alt_frontier = self._frontier_distance(alt_cell)
                 alt_edge = self._directional_edge_scan(origin[0], origin[1], alt_move)
-                alt_visual_credit = 0
-                if self.vision_progress_credit_enable:
-                    alt_clear_run = int(alt_edge.get("clear_run", 0) or 0)
-                    alt_has_end_evidence = bool(
-                        alt_edge.get("edge_detected", False)
-                        or alt_edge.get("frontier_visible", False)
-                        or alt_edge.get("junction_visible", False)
-                        or alt_edge.get("exit_visible", False)
-                    )
-                    if alt_clear_run >= self.vision_progress_credit_min_clear_run and alt_has_end_evidence:
-                        alt_visual_credit = int(
-                            round(min(alt_frontier, alt_clear_run) * self.vision_progress_credit_scale)
-                        )
+                alt_visual_credit = self._beam_progress_credit(alt_frontier, alt_edge)
                 alt_frontier_effective = max(0, alt_frontier - alt_visual_credit)
                 alt_terminal = self._is_move_visibly_terminal_dead_end(origin, alt_move)
                 alt_boxed = self._is_move_visibly_boxed_corridor_without_exit(origin, alt_move)
@@ -18269,6 +22159,8 @@ class AIAssistantApp:
             cause_effect_reason_tags.append("cycle_pair")
         if transition_repeat_penalty > 0:
             cause_effect_reason_tags.append("transition_repeat")
+        if loop_risk_marked_edge_penalty > 0:
+            cause_effect_reason_tags.append("loop_marker")
         if immediate_backtrack_hard_penalty > 0:
             cause_effect_reason_tags.append("immediate_backtrack")
         if visible_open_decision > 0:
@@ -18382,9 +22274,11 @@ class AIAssistantApp:
         score += straight_tunnel * 10
         score += visible_closed_structure * 6
         score += boundary_hug * 12
-        visible_terminal_end_penalty = max(0, int(self.visible_terminal_end_penalty))
+        visible_terminal_end_penalty_base = max(0, int(self.visible_terminal_end_penalty))
+        visible_terminal_end_penalty = int(round(visible_terminal_end_penalty_base * terminal_trust_scale))
         score += terminal_corridor * visible_terminal_end_penalty
-        boxed_corridor_penalty = max(0, int(self.boxed_corridor_no_exit_penalty))
+        boxed_corridor_penalty_base = max(0, int(self.boxed_corridor_no_exit_penalty))
+        boxed_corridor_penalty = int(round(boxed_corridor_penalty_base * terminal_trust_scale))
         score += boxed_corridor_no_exit * boxed_corridor_penalty
         score += terminal_reentry_penalty
         score += branch_diversity_penalty
@@ -18393,6 +22287,7 @@ class AIAssistantApp:
         score += corridor_suppression_penalty
         score += transition_repeat_penalty
         score += cycle_pair_penalty
+        score += loop_risk_marked_edge_penalty
         score += stuck_transition_taboo_boost
         score += no_progress_repeat_penalty
         score += loop_commitment_penalty
@@ -18400,6 +22295,7 @@ class AIAssistantApp:
         score += transition_pressure_repeat_penalty
         score += long_trap_transition_penalty
         score += long_trap_cell_penalty
+        score += long_loop_subtype_penalty
         score += hazard_preparedness_penalty
         score += post_reset_exhaustion_penalty
         score += reset_failure_transition_penalty
@@ -18497,6 +22393,47 @@ class AIAssistantApp:
             if is_escape_move:
                 escape_bias_bonus = max(0, int(self.escape_bias_bonus)) + ((transition_pressure_bucket - 2) * 4)
                 score -= escape_bias_bonus
+        uncertainty_reverify_bonus = 0
+        uncertainty_mark_replay_penalty = 0
+        if self.kernel_uncertainty_enable and pattern_uncertainty_score >= 0.2:
+            reverify_candidate = (
+                unknown_neighbors > 0
+                or bool(edge_scan["frontier_visible"])
+                or bool(edge_scan["junction_visible"])
+            )
+            repeat_pressure = recent_transition_count + recent_reverse_transition_count
+            if reverify_candidate and (not loop_risk_marked_edge) and repeat_pressure <= 1:
+                uncertainty_units = min(1.0, max(0.0, pattern_uncertainty_score))
+                confidence_deficit = min(1.0, max(0.0, 1.0 - pattern_confidence_score))
+                raw_bonus = (
+                    float(self.kernel_uncertainty_reverify_bonus)
+                    * (0.55 + (0.45 * uncertainty_units))
+                    * (0.65 + (0.35 * confidence_deficit))
+                )
+                if visits <= 1:
+                    raw_bonus += 2.0
+                uncertainty_reverify_bonus = max(0, int(round(raw_bonus)))
+                score -= uncertainty_reverify_bonus
+            if loop_risk_marked_edge and repeat_pressure > 0:
+                uncertainty_mark_replay_penalty = max(
+                    0,
+                    int(
+                        round(
+                            float(self.kernel_uncertainty_mark_replay_penalty)
+                            * min(1.0, max(0.0, pattern_uncertainty_score))
+                        )
+                    ),
+                )
+                score += uncertainty_mark_replay_penalty
+        wide_open_escape_bonus = 0
+        if wide_open_visible and (
+            unknown_neighbors > 0
+            or bool(edge_scan["frontier_visible"])
+            or bool(edge_scan["junction_visible"])
+        ):
+            width_units = max(0, min(3, max_open_width - 2))
+            wide_open_escape_bonus = 6 + (width_units * 4) + min(6, wide_open_steps)
+            score -= wide_open_escape_bonus
         raw_prediction_junction_bonus = prediction_junction_bonus
         raw_prediction_dead_end_penalty = prediction_dead_end_penalty
         local_contradiction_debt = self._prediction_local_contradiction_debt(candidate)
@@ -18514,6 +22451,58 @@ class AIAssistantApp:
         if prediction_used and prediction_contradiction_scale < 1.0:
             prediction_lookahead_bonus = int(round(prediction_lookahead_bonus * prediction_contradiction_scale))
         score -= prediction_lookahead_bonus
+        projection_forward_bonus = 0
+        projection_backward_penalty = 0
+        projection_backward_escape_bonus = 0
+        projection_forward_path: tuple[tuple[int, int], ...] = ()
+        projection_forward_progress_signal = 0.0
+        projection_forward_novelty_signal = 0.0
+        projection_forward_trap_signal = 0.0
+        projection_backward_loop_pressure = 0.0
+        projection_backward_seen_ratio = 0.0
+        if self.maze_projection_module_enable:
+            projection = self.projection_module.evaluate(
+                origin=origin,
+                candidate=candidate,
+                origin_frontier_distance=origin_frontier_distance,
+                candidate_unknown_neighbors=unknown_neighbors,
+                candidate_frontier_distance=frontier_distance_effective,
+                recent_path=list(self.maze_recent_cells),
+                traversable_neighbors_fn=self._traversable_neighbors,
+                unknown_neighbor_count_fn=self._unknown_neighbor_count,
+                frontier_distance_fn=self._frontier_distance,
+                fully_known_fn=self._is_fully_known_current_maze_cell,
+            )
+            projection_forward_bonus = int(projection.forward_bonus)
+            projection_backward_penalty = int(projection.backward_penalty)
+            projection_backward_escape_bonus = int(projection.backward_escape_bonus)
+            projection_forward_path = tuple(projection.forward_path)
+            projection_forward_progress_signal = float(projection.forward_progress_signal)
+            projection_forward_novelty_signal = float(projection.forward_novelty_signal)
+            projection_forward_trap_signal = float(projection.forward_trap_signal)
+            projection_backward_loop_pressure = float(projection.backward_loop_pressure)
+            projection_backward_seen_ratio = float(projection.backward_seen_ratio)
+        projection_score_delta_raw = (
+            int(projection_backward_penalty)
+            - int(projection_forward_bonus)
+            - int(projection_backward_escape_bonus)
+        )
+        projection_trust_scale = self._projection_trust_scale()
+        projection_score_influence_scale_effective = (
+            float(self.maze_projection_score_influence_scale) * float(projection_trust_scale)
+        )
+        projection_score_delta_scaled = (
+            float(projection_score_delta_raw) * float(projection_score_influence_scale_effective)
+        )
+        projection_score_delta_unclipped = int(round(projection_score_delta_scaled))
+        projection_score_cap = max(0, int(self.maze_projection_score_influence_cap))
+        projection_score_delta = int(projection_score_delta_unclipped)
+        if projection_score_cap > 0:
+            projection_score_delta = int(
+                max(-projection_score_cap, min(projection_score_cap, projection_score_delta_unclipped))
+            )
+        score += projection_score_delta
+        projection_score_delta_clipped = int(projection_score_delta != projection_score_delta_unclipped)
         contradiction_probe_bonus = 0
         if local_contradiction_debt > 0.0 and (unknown_neighbors > 0 or frontier_distance_effective <= 1):
             contradiction_probe_bonus = min(18, int(round(local_contradiction_debt * 6.0)))
@@ -18618,6 +22607,12 @@ class AIAssistantApp:
                 "transition_pressure_bucket": transition_pressure_bucket,
                 "visible_open_decision": effective_visible_open_decision,
                 "visible_exit_corridor": visible_exit_corridor,
+                "pattern_uncertainty_score": pattern_uncertainty_score,
+                "pattern_confidence_score": pattern_confidence_score,
+                "loop_risk_marked_edge": 1 if loop_risk_marked_edge else 0,
+                "edge_wide_open_visible": 1 if wide_open_visible else 0,
+                "edge_wide_open_steps": wide_open_steps,
+                "edge_max_open_width": max_open_width,
                 "cause_effect_memory_penalty": cause_effect_memory_penalty,
                 "cause_effect_memory_reward": cause_effect_memory_reward,
                 "hazard_preparedness_penalty": hazard_preparedness_penalty,
@@ -18625,6 +22620,12 @@ class AIAssistantApp:
                 "prediction_junction_bonus_raw": raw_prediction_junction_bonus,
                 "prediction_dead_end_penalty_raw": raw_prediction_dead_end_penalty,
                 "mv_exit_progress_norm": mv_exit_progress_norm,
+                "projection_forward_progress_signal": projection_forward_progress_signal,
+                "projection_forward_novelty_signal": projection_forward_novelty_signal,
+                "projection_forward_trap_signal": projection_forward_trap_signal,
+                "projection_backward_loop_pressure": projection_backward_loop_pressure,
+                "projection_backward_seen_ratio": projection_backward_seen_ratio,
+                "projection_score_delta": projection_score_delta,
                 "spatial_transition_bonus": spatial_transition_bonus,
                 "spatial_transition_penalty": spatial_transition_penalty,
                 "spatial_branch_risk_penalty": spatial_branch_risk_penalty,
@@ -18660,7 +22661,9 @@ class AIAssistantApp:
             "short_dead_end_penalty": short_dead_end_penalty,
             "revisit_dead_end_entrance_penalty": revisit_dead_end_entrance_penalty,
             "dead_end_end_slap_penalty": dead_end_end_slap_penalty,
+            "dead_end_end_slap_penalty_base": dead_end_end_slap_penalty_base,
             "dead_end_tip_revisit_slap_penalty": dead_end_tip_revisit_slap_penalty,
+            "dead_end_tip_revisit_slap_penalty_base": dead_end_tip_revisit_slap_penalty_base,
             "narrow_corridor_additive_penalty": narrow_corridor_additive_penalty,
             "dead_end_learning_grace": dead_end_learning_grace,
             "dead_end_allowance_remaining": dead_end_allowance_remaining,
@@ -18672,12 +22675,19 @@ class AIAssistantApp:
             "edge_exit_visible": bool(edge_scan["exit_visible"]),
             "edge_side_open_steps": int(edge_scan.get("side_open_steps", 0) or 0),
             "edge_side_blocked_steps": int(edge_scan.get("side_blocked_steps", 0) or 0),
+            "edge_verified_empty_opening_steps": int(edge_scan.get("verified_empty_opening_steps", 0) or 0),
+            "edge_verified_empty_opening_contacts": int(edge_scan.get("verified_empty_opening_contacts", 0) or 0),
+            "edge_wide_open_visible": 1 if wide_open_visible else 0,
+            "edge_wide_open_steps": wide_open_steps,
+            "edge_max_open_width": max_open_width,
             "visible_open_decision": effective_visible_open_decision,
             "visible_closed_structure": visible_closed_structure,
             "boundary_hug": boundary_hug,
             "visible_terminal_end_penalty": visible_terminal_end_penalty,
+            "visible_terminal_end_penalty_base": visible_terminal_end_penalty_base,
             "boxed_corridor_no_exit": boxed_corridor_no_exit,
             "boxed_corridor_penalty": boxed_corridor_penalty,
+            "boxed_corridor_penalty_base": boxed_corridor_penalty_base,
             "terminal_reentry_penalty": terminal_reentry_penalty,
             "visible_exit_corridor": visible_exit_corridor,
             "visible_exit_reward": visible_exit_reward,
@@ -18699,6 +22709,10 @@ class AIAssistantApp:
             "recent_reverse_transition_count": recent_reverse_transition_count,
             "transition_repeat_penalty": transition_repeat_penalty,
             "cycle_pair_penalty": cycle_pair_penalty,
+            "loop_risk_marked_edge_penalty": loop_risk_marked_edge_penalty,
+            "loop_risk_marked_edge": 1 if loop_risk_marked_edge else 0,
+            "pattern_uncertainty_score": round(pattern_uncertainty_score, 3),
+            "pattern_confidence_score": round(pattern_confidence_score, 3),
             "stuck_transition_taboo_boost": stuck_transition_taboo_boost,
             "no_progress_repeat_penalty": no_progress_repeat_penalty,
             "loop_commitment_penalty": loop_commitment_penalty,
@@ -18708,6 +22722,11 @@ class AIAssistantApp:
             "long_trap_cell_penalty": long_trap_cell_penalty,
             "long_trap_transition_hits": long_trap_transition_hits,
             "long_trap_cell_hits": long_trap_cell_hits,
+            "long_loop_subtype_penalty": long_loop_subtype_penalty,
+            "long_loop_subtype_risk_ema": round(long_loop_subtype_risk_ema, 3),
+            "long_loop_subtype_relief_ema": round(long_loop_subtype_relief_ema, 3),
+            "long_loop_subtype_confidence": round(long_loop_subtype_confidence, 3),
+            "runtime_no_progress_steps": runtime_no_progress_steps,
             "hazard_preparedness_penalty": hazard_preparedness_penalty,
             "hazard_preparedness_relative_pressure": round(hazard_preparedness_relative_pressure, 3),
             "hazard_preparedness_move_pressure": round(hazard_preparedness_move_pressure, 3),
@@ -18731,6 +22750,10 @@ class AIAssistantApp:
             "structural_recall_key": structural_recall_key,
             "taboo_transition_penalty": taboo_transition_penalty,
             "terminal_hard_veto_penalty": terminal_hard_veto_penalty,
+            "terminal_hard_veto_penalty_base": terminal_hard_veto_penalty_base,
+            "terminal_trust_scale": round(terminal_trust_scale, 3),
+            "terminal_trust_score_ema": round(float(self.terminal_trust_score_ema), 3),
+            "terminal_hard_avoid_active": 1 if self._terminal_hard_avoid_active() else 0,
             "branch_tightening_score": branch_tightening_score,
             "branch_tightening_mode_active": 1 if branch_tightening_mode_active else 0,
             "branch_tightening_abort_penalty": branch_tightening_abort_penalty,
@@ -18738,6 +22761,9 @@ class AIAssistantApp:
             "recent_frontier_seen": 1 if recent_frontier_seen else 0,
             "high_risk_frontier_override_bonus": high_risk_frontier_override_bonus,
             "escape_bias_bonus": escape_bias_bonus,
+            "uncertainty_reverify_bonus": uncertainty_reverify_bonus,
+            "uncertainty_mark_replay_penalty": uncertainty_mark_replay_penalty,
+            "wide_open_escape_bonus": wide_open_escape_bonus,
             "bio_opening_bonus": effective_bio_opening_bonus,
             "bio_dead_end_escape_bonus": int(bio_nav["bio_dead_end_escape_bonus"]),
             "bio_novelty_bonus": effective_bio_novelty_bonus,
@@ -18815,6 +22841,24 @@ class AIAssistantApp:
             "prediction_context_trust": round(prediction_context_trust, 3),
             "prediction_effective_conf": round(prediction_effective_conf, 3),
             "prediction_lookahead_bonus": prediction_lookahead_bonus,
+            "projection_forward_bonus": projection_forward_bonus,
+            "projection_backward_penalty": projection_backward_penalty,
+            "projection_backward_escape_bonus": projection_backward_escape_bonus,
+            "projection_forward_path_len": len(projection_forward_path),
+            "projection_forward_path": projection_forward_path,
+            "projection_forward_progress_signal": round(projection_forward_progress_signal, 3),
+            "projection_forward_novelty_signal": round(projection_forward_novelty_signal, 3),
+            "projection_forward_trap_signal": round(projection_forward_trap_signal, 3),
+            "projection_backward_loop_pressure": round(projection_backward_loop_pressure, 3),
+            "projection_backward_seen_ratio": round(projection_backward_seen_ratio, 3),
+            "projection_score_delta_raw": projection_score_delta_raw,
+            "projection_score_delta_scaled": round(projection_score_delta_scaled, 3),
+            "projection_score_influence_scale": round(projection_score_influence_scale_effective, 3),
+            "projection_score_influence_scale_base": round(self.maze_projection_score_influence_scale, 3),
+            "projection_trust_scale": round(projection_trust_scale, 3),
+            "projection_trust_score_ema": round(float(self.projection_trust_score_ema), 3),
+            "projection_score_delta": projection_score_delta,
+            "projection_score_delta_clipped": projection_score_delta_clipped,
             "local_contradiction_debt": round(local_contradiction_debt, 3),
             "contradiction_probe_bonus": contradiction_probe_bonus,
             "stuck_frontier_seek_bonus": stuck_frontier_seek_bonus,
@@ -18904,6 +22948,11 @@ class AIAssistantApp:
             if not b["blocked"]
         ]
         valid_ranked.sort(key=lambda item: (item[1]["score"], tie_order.get(item[0], 9)))
+        (
+            loop_pattern_escalation,
+            loop_pattern_awareness,
+            loop_pattern_confidence,
+        ) = self._loop_pattern_awareness_escalation(self.current_player_cell)
 
         lines.append(
             (
@@ -18913,9 +22962,25 @@ class AIAssistantApp:
                 f"tie_band={self.exploration_tie_band} "
                 f"stuck_reexplore_cooldown={self._maze_reexplore_cooldown_remaining} "
                 f"stuck_reexplore_triggers={self._maze_stuck_trigger_count} "
-                f"model_assist_reliance={round(self.maze_model_assist_reliance, 3)} "
+                f"loop_pattern_awareness={round(loop_pattern_awareness, 3)} "
+                f"loop_pattern_conf={round(loop_pattern_confidence, 3)} "
+                f"loop_pattern_escalation={int(loop_pattern_escalation)} "
+                f"model_assist_reliance={round(self._effective_maze_model_assist_reliance(), 3)} "
+                f"model_assist_reliance_base={round(self.maze_model_assist_reliance, 3)} "
                 f"model_assist_calls={self._maze_model_assist_calls_used}/{self.maze_model_assist_max_calls_per_episode} "
                 f"model_assist_cooldown={self._maze_model_assist_cooldown_remaining} "
+                f"batch_micro_active={1 if self.runtime_batch_micro_progress_active else 0} "
+                f"batch_micro_progress={round(float(self.runtime_batch_micro_progress), 3)} "
+                f"batch_micro_ramp={round(float(self.runtime_batch_micro_ramp), 3)} "
+                f"batch_micro_series={self._micro_progress_series_label()} "
+                f"batch_micro_hard_bonus={int(self.runtime_batch_micro_hard_phase_bonus)} "
+                f"batch_micro_objective_bonus={int(self.runtime_batch_micro_objective_phase_bonus)} "
+                f"batch_micro_phase2_scale={round(float(self.runtime_batch_micro_phase2_scale), 3)} "
+                f"batch_micro_guard_scale={round(float(self._effective_batch_micro_guard_strength_scale()), 3)} "
+                f"batch_micro_stuck_no_progress_bonus={int(self.runtime_batch_micro_stuck_no_progress_bonus)} "
+                f"batch_micro_stuck_repeat_bonus={int(self.runtime_batch_micro_stuck_repeat_bonus)} "
+                f"training_phase={self._effective_training_phase_level()} "
+                f"projection_feature_scale={round(self._training_projection_feature_scale(), 3)} "
                 f"reset_epoch={self.reset_epoch} resets={self.step_limit_reset_count} "
                 f"same_maze_retries={self.same_maze_retry_count} active_retries={self._active_same_maze_retry_count()} "
                 f"steps_since_reset={max(0, self.memory_step_index - self._last_step_reset_memory_step)} "
@@ -18927,14 +22992,18 @@ class AIAssistantApp:
                 f"verification_mode={1 if self._verification_priority_active() else 0} "
                 f"verification_target={self._verification_probe_target} "
                 f"frontier_lock={1 if self._frontier_lock_active() else 0} "
-                f"hard_override_phase={int(self.hard_override_phase_level)} "
+                f"hard_override_phase={self._effective_hard_override_phase_level()} "
+                f"base_hard_override_phase={int(self.hard_override_phase_level)} "
                 f"move_entropy={self._recent_move_direction_entropy()} "
                 f"mv_preplan={self._mv_preplan_last_status} "
                 f"mv_enabled={1 if self._machine_vision_enabled() else 0} "
                 f"mv_route_mode={1 if self._mv_route_mode_active() else 0} "
                 f"local_map_authority_mode={self.local_map_authority_mode} "
                 f"blend={'continuous' if self.local_map_authority_mode == 'soft' else 'hard'} "
-                f"soft_scale={round(self.local_map_authority_soft_scale, 3)}"
+                f"soft_scale={round(self.local_map_authority_soft_scale, 3)} "
+                f"projection_module={1 if self.maze_projection_module_enable else 0} "
+                f"projection_forward_depth={self.maze_projection_forward_depth} "
+                f"projection_backtrace_window={self.maze_projection_backtrace_window}"
             )
         )
         if self.endocrine_enabled:
@@ -18955,12 +23024,42 @@ class AIAssistantApp:
                     f"mv_reliance={neural.get('mv_reliance', 0.0)} "
                     f"legacy_blend={round(self.hormone_legacy_weight_blend, 3)} "
                     f"legacy_batch_level={int(self.hormone_legacy_batch_level)} "
-                    f"objective_override_phase={int(self.objective_override_phase_level)} "
-                    f"hard_override_phase={int(self.hard_override_phase_level)} "
+                    f"objective_override_phase={self._effective_objective_override_phase_level()} "
+                    f"hard_override_phase={self._effective_hard_override_phase_level()} "
+                    f"base_objective_override_phase={int(self.objective_override_phase_level)} "
+                    f"base_hard_override_phase={int(self.hard_override_phase_level)} "
                     f"dynamic_legacy={1 if self.hormone_dynamic_legacy_enable else 0} "
                     f"loop_signal={round(self._hormone_loop_adaptation_signal(), 3)}"
                 )
             )
+            if self.learned_autonomy_subphase_enable:
+                autonomy_snapshot = self.learned_autonomy_controller.snapshot()
+                lines.append(
+                    (
+                        "learned_autonomy: "
+                        f"score={autonomy_snapshot.get('score_ema', 0.0)} "
+                        f"learned_only_ema={autonomy_snapshot.get('learned_only_ema', 0.0)} "
+                        f"hardcoded_only_ema={autonomy_snapshot.get('hardcoded_only_ema', 0.0)} "
+                        f"intervention_ema={autonomy_snapshot.get('intervention_ema', 0.0)} "
+                        f"unresolved_override_ema={autonomy_snapshot.get('unresolved_override_ema', 0.0)} "
+                        f"soft_scale={autonomy_snapshot.get('soft_influence_scale', 1.0)}"
+                    )
+                )
+            if self.parallel_reasoning_enable:
+                reasoning_snapshot = self._parallel_reasoning_snapshot()
+                lines.append(
+                    (
+                        "parallel_reasoning: "
+                        f"confidence={reasoning_snapshot.get('last_confidence', 0.0)} "
+                        f"confidence_margin={reasoning_snapshot.get('last_confidence_margin', 0.0)} "
+                        f"confidence_ema={reasoning_snapshot.get('confidence_ema', 0.0)} "
+                        f"utility_ema={reasoning_snapshot.get('utility_ema', 0.0)} "
+                        f"trust_local={reasoning_snapshot.get('plan_trust_local', 0.0)} "
+                        f"trust_adaptive={reasoning_snapshot.get('plan_trust_adaptive', 0.0)} "
+                        f"trust_deliberative={reasoning_snapshot.get('plan_trust_deliberative', 0.0)} "
+                        f"steps={reasoning_snapshot.get('step_count', 0)}"
+                    )
+                )
             if self.endocrine_event_log:
                 lines.append(f"endocrine_event_last: {self.endocrine_event_log[-1]}")
         if self.organism_control_enable:
@@ -19079,10 +23178,16 @@ class AIAssistantApp:
                         f"visible_terminal_end_penalty={b.get('visible_terminal_end_penalty', 0)} "
                         f"transition_repeat_penalty={b.get('transition_repeat_penalty', 0)} "
                         f"cycle_pair_penalty={b.get('cycle_pair_penalty', 0)} "
+                        f"loop_risk_marked_edge_penalty={b.get('loop_risk_marked_edge_penalty', 0)} "
                         f"no_progress_repeat_penalty={b.get('no_progress_repeat_penalty', 0)} "
                         f"loop_commitment_penalty={b.get('loop_commitment_penalty', 0)} "
                         f"immediate_backtrack_hard_penalty={b.get('immediate_backtrack_hard_penalty', 0)} "
                         f"transition_pressure_repeat_penalty={b.get('transition_pressure_repeat_penalty', 0)} "
+                        f"long_loop_subtype_penalty={b.get('long_loop_subtype_penalty', 0)} "
+                        f"long_loop_subtype_risk_ema={b.get('long_loop_subtype_risk_ema', 0.0)} "
+                        f"long_loop_subtype_relief_ema={b.get('long_loop_subtype_relief_ema', 0.0)} "
+                        f"long_loop_subtype_confidence={b.get('long_loop_subtype_confidence', 0.0)} "
+                        f"runtime_no_progress_steps={b.get('runtime_no_progress_steps', 0)} "
                         f"frontier_lock_active={b.get('frontier_lock_active', 0)} "
                         f"frontier_lock_progress_bonus={b.get('frontier_lock_progress_bonus', 0)} "
                         f"frontier_lock_loop_penalty={b.get('frontier_lock_loop_penalty', 0)} "
@@ -19124,6 +23229,36 @@ class AIAssistantApp:
                         f"mv_cellmap_neighbor_blocked_penalty={b.get('mv_cellmap_neighbor_blocked_penalty', 0)} "
                         f"mv_cellmap_neighbor_open={b.get('mv_cellmap_neighbor_open', 0)} "
                         f"mv_cellmap_neighbor_blocked={b.get('mv_cellmap_neighbor_blocked', 0)} "
+                        f"projection_forward_bonus={b.get('projection_forward_bonus', 0)} "
+                        f"projection_backward_penalty={b.get('projection_backward_penalty', 0)} "
+                        f"projection_backward_escape_bonus={b.get('projection_backward_escape_bonus', 0)} "
+                        f"projection_forward_path_len={b.get('projection_forward_path_len', 0)} "
+                        f"projection_forward_progress={b.get('projection_forward_progress_signal', 0.0)} "
+                        f"projection_forward_novelty={b.get('projection_forward_novelty_signal', 0.0)} "
+                        f"projection_forward_trap={b.get('projection_forward_trap_signal', 0.0)} "
+                        f"projection_back_loop_pressure={b.get('projection_backward_loop_pressure', 0.0)} "
+                        f"projection_back_seen_ratio={b.get('projection_backward_seen_ratio', 0.0)} "
+                        f"projection_score_delta_raw={b.get('projection_score_delta_raw', 0)} "
+                        f"projection_score_delta_scaled={b.get('projection_score_delta_scaled', 0.0)} "
+                        f"projection_score_scale_base={b.get('projection_score_influence_scale_base', 1.0)} "
+                        f"projection_score_scale={b.get('projection_score_influence_scale', 1.0)} "
+                        f"projection_trust_scale={b.get('projection_trust_scale', 1.0)} "
+                        f"projection_trust_ema={b.get('projection_trust_score_ema', 0.0)} "
+                        f"projection_score_delta={b.get('projection_score_delta', 0)} "
+                        f"projection_score_delta_clipped={b.get('projection_score_delta_clipped', 0)} "
+                        f"terminal_trust_scale={b.get('terminal_trust_scale', 1.0)} "
+                        f"terminal_trust_ema={b.get('terminal_trust_score_ema', 0.0)} "
+                        f"terminal_hard_avoid_active={b.get('terminal_hard_avoid_active', 0)} "
+                        f"terminal_veto_base={b.get('terminal_hard_veto_penalty_base', 0)} "
+                        f"terminal_veto={b.get('terminal_hard_veto_penalty', 0)} "
+                        f"dead_end_slap_base={b.get('dead_end_end_slap_penalty_base', 0)} "
+                        f"dead_end_slap={b.get('dead_end_end_slap_penalty', 0)} "
+                        f"dead_end_tip_base={b.get('dead_end_tip_revisit_slap_penalty_base', 0)} "
+                        f"dead_end_tip={b.get('dead_end_tip_revisit_slap_penalty', 0)} "
+                        f"terminal_end_base={b.get('visible_terminal_end_penalty_base', 0)} "
+                        f"terminal_end={b.get('visible_terminal_end_penalty', 0)} "
+                        f"boxed_penalty_base={b.get('boxed_corridor_penalty_base', 0)} "
+                        f"boxed_penalty={b.get('boxed_corridor_penalty', 0)} "
                         f"transition_count={b.get('recent_transition_count', 0)} "
                         f"reverse_transition_count={b.get('recent_reverse_transition_count', 0)} "
                         f"move_personality_bias={b.get('move_personality_bias', 0)} "
@@ -19566,6 +23701,7 @@ class AIAssistantApp:
 
         def run_preview(index: int) -> None:
             if index >= len(directions):
+                self._suppress_wm_snapshot_during_look_preview = False
                 self.player_facing = original_facing
                 self._refresh_game_state()
                 done.set()
@@ -19582,28 +23718,46 @@ class AIAssistantApp:
                 facing=self.player_facing,
             )
             look_spatial_index = self._spatial_master_index(current_cell=(look_row, look_col))
-            self.working_memory_active = {
-                "signature": look_signature,
-                "ascii": look_ascii,
-                "player_cell": str((look_row, look_col)),
-                "spatial_context_key": str(look_spatial_index.get("context_key", "") or ""),
-                "spatial_zone": str(look_spatial_index.get("zone", "z?") or "z?"),
-                "sequence_motif": str(look_spatial_index.get("sequence_motif", "none") or "none"),
-                "affect_valence_bucket": int(look_spatial_index.get("affect_valence_bucket", 1) or 1),
-                "affect_arousal_bucket": int(look_spatial_index.get("affect_arousal_bucket", 1) or 1),
-            }
-            self._capture_working_memory_look_snapshot(self.player_facing)
+            self._capture_working_memory_look_snapshot_payload(
+                facing=self.player_facing,
+                signature=look_signature,
+                ascii_pattern=look_ascii,
+                spatial_context_key=str(look_spatial_index.get("context_key", "") or ""),
+                spatial_zone=str(look_spatial_index.get("zone", "z?") or "z?"),
+                sequence_motif=str(look_spatial_index.get("sequence_motif", "none") or "none"),
+            )
             self._refresh_game_state()
             self.root.after(delay_ms, lambda: run_preview(index + 1))
 
+        self._suppress_wm_snapshot_during_look_preview = True
         self.root.after(0, lambda: run_preview(0))
         timeout_s = max(1.0, (len(directions) * max(20, delay_ms)) / 1000.0 + 0.5)
-        done.wait(timeout=timeout_s)
+        completed = done.wait(timeout=timeout_s)
+        if not completed:
+            self._suppress_wm_snapshot_during_look_preview = False
+            self.player_facing = original_facing
+            self._refresh_game_state()
 
     def _draw_fov_overlay(self, player_row: int, player_col: int) -> None:
         self._clear_fov_overlay()
         if self._normalized_layout_mode() != "maze":
             return
+
+        self._prune_verified_empty_opening_edges()
+        self._prune_loop_risk_opening_edges()
+
+        marked_off_edges = {
+            (row, col, side)
+            for row, col, side in self.verified_empty_opening_edges
+            if 0 <= row < self.grid_cells and 0 <= col < self.grid_cells
+        }
+        loop_marked_edges = {
+            (row, col, side)
+            for row, col, side in self.loop_risk_opening_edges
+            if 0 <= row < self.grid_cells and 0 <= col < self.grid_cells
+        }
+        marked_edge_keys = set(marked_off_edges)
+        loop_marked_edge_keys = set(loop_marked_edges)
 
         # Fill all currently visible cells in the active facing cone. Color
         # intensity reflects ray strength so around-corner grazes appear dimmer.
@@ -19671,6 +23825,8 @@ class AIAssistantApp:
 
         # Mark visible side edges along the projected beam corridor.
         for row, col, edge_move in self._visible_edge_opening_cells(player_row, player_col, self.player_facing):
+            if (row, col, edge_move) in marked_edge_keys or (row, col, edge_move) in loop_marked_edge_keys:
+                continue
             x1 = col * self.cell_size + inset
             y1 = row * self.cell_size + inset
             x2 = (col + 1) * self.cell_size - inset
@@ -19687,6 +23843,51 @@ class AIAssistantApp:
                 *line,
                 fill="#23a55a",
                 width=3,
+                capstyle=tk.ROUND,
+                tags="fov",
+            )
+
+        # Marked-off passages (verified empty) are shown as persistent
+        # per-side orange edge highlights so explored branches stay annotated.
+        for row, col, edge_move in sorted(marked_off_edges):
+            x1 = col * self.cell_size + inset
+            y1 = row * self.cell_size + inset
+            x2 = (col + 1) * self.cell_size - inset
+            y2 = (row + 1) * self.cell_size - inset
+            if edge_move == "UP":
+                line = (x1, y1, x2, y1)
+            elif edge_move == "DOWN":
+                line = (x1, y2, x2, y2)
+            elif edge_move == "LEFT":
+                line = (x1, y1, x1, y2)
+            else:
+                line = (x2, y1, x2, y2)
+            self.game_canvas.create_line(
+                *line,
+                fill="#ff9f1c",
+                width=4,
+                capstyle=tk.ROUND,
+                tags="fov",
+            )
+
+        # Loop-risk passages are shown as persistent red side-edge highlights.
+        for row, col, edge_move in sorted(loop_marked_edges):
+            x1 = col * self.cell_size + inset
+            y1 = row * self.cell_size + inset
+            x2 = (col + 1) * self.cell_size - inset
+            y2 = (row + 1) * self.cell_size - inset
+            if edge_move == "UP":
+                line = (x1, y1, x2, y1)
+            elif edge_move == "DOWN":
+                line = (x1, y2, x2, y2)
+            elif edge_move == "LEFT":
+                line = (x1, y1, x1, y2)
+            else:
+                line = (x2, y1, x2, y2)
+            self.game_canvas.create_line(
+                *line,
+                fill="#ff4d4f",
+                width=4,
                 capstyle=tk.ROUND,
                 tags="fov",
             )
@@ -20376,14 +24577,72 @@ class AIAssistantApp:
                     and self._is_local_cell_visible(player_row, player_col, side_row, side_col, facing=facing)
                 )
                 side_blocked = (not side_in_bounds) or self._is_blocked_cell((side_row, side_col))
+                edge = (row, col, side_name)
                 # Record both visible lateral openings and blocked lateral boundaries.
                 if side_visible or side_blocked:
-                    edge = (row, col, side_name)
                     if edge not in seen_edges:
                         seen_edges.add(edge)
                         edges.append(edge)
 
         return edges
+
+    def _visible_verified_empty_opening_edges(
+        self,
+        player_row: int,
+        player_col: int,
+        facing: str,
+    ) -> list[tuple[int, int, str]]:
+        side_delta = {
+            "UP": (-1, 0),
+            "RIGHT": (0, 1),
+            "DOWN": (1, 0),
+            "LEFT": (0, -1),
+        }
+        visible: list[tuple[int, int, str]] = []
+        for row, col, side in list(self.verified_empty_opening_edges):
+            if side not in side_delta:
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+            if row < 0 or row >= self.grid_cells or col < 0 or col >= self.grid_cells:
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+            if self._is_blocked_cell((row, col)):
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+            if not self._is_local_cell_visible(player_row, player_col, row, col, facing=facing):
+                continue
+
+            dr, dc = side_delta[side]
+            side_cell = (row + dr, col + dc)
+            if not self._opening_cell_fully_verified_empty(side_cell):
+                self.verified_empty_opening_edges.discard((row, col, side))
+                continue
+            visible.append((row, col, side))
+
+        visible.sort(key=lambda item: (item[0], item[1], item[2]))
+        return visible
+
+    def _visible_loop_risk_opening_edges(
+        self,
+        player_row: int,
+        player_col: int,
+        facing: str,
+    ) -> list[tuple[int, int, str]]:
+        self._prune_loop_risk_opening_edges()
+        visible: list[tuple[int, int, str]] = []
+        for row, col, side in list(self.loop_risk_opening_edges):
+            if row < 0 or row >= self.grid_cells or col < 0 or col >= self.grid_cells:
+                self.loop_risk_opening_edges.discard((row, col, side))
+                continue
+            if self._is_blocked_cell((row, col)):
+                self.loop_risk_opening_edges.discard((row, col, side))
+                continue
+            if not self._is_local_cell_visible(player_row, player_col, row, col, facing=facing):
+                continue
+            visible.append((row, col, side))
+
+        visible.sort(key=lambda item: (item[0], item[1], item[2]))
+        return visible
 
     def _half_visible_triangle_points(
         self,
@@ -20429,7 +24688,7 @@ class AIAssistantApp:
 
     def _normalized_maze_difficulty(self) -> str:
         difficulty = (self.maze_difficulty.get() or "medium").strip().lower()
-        if difficulty not in {"easy", "medium", "hard"}:
+        if difficulty not in {"easy", "medium", "hard", "very hard"}:
             difficulty = "medium"
             self.maze_difficulty.set(difficulty)
         return difficulty
@@ -20441,7 +24700,7 @@ class AIAssistantApp:
         return max(0, int(self.layout_generation_index) - 1)
 
     def _maze_start_anchor_cell(self, map_id: int, difficulty: str) -> tuple[int, int]:
-        diff_offset = {"easy": 10, "medium": 20, "hard": 30}.get(difficulty, 20)
+        diff_offset = {"easy": 10, "medium": 20, "hard": 30, "very hard": 40}.get(difficulty, 20)
         seed = self.maze_seed_base + 700_000 + (int(map_id) * 37) + diff_offset
         rng = random.Random(seed)
         return (rng.randrange(self.grid_cells), rng.randrange(self.grid_cells))
@@ -20449,7 +24708,7 @@ class AIAssistantApp:
     def _maze_layout_rng(self, advance: bool = True) -> random.Random:
         mode_offset = 1000 if self._normalized_layout_mode() == "maze" else 0
         diff = self._normalized_maze_difficulty()
-        diff_offset = {"easy": 10, "medium": 20, "hard": 30}.get(diff, 20)
+        diff_offset = {"easy": 10, "medium": 20, "hard": 30, "very hard": 40}.get(diff, 20)
         map_id = self._maze_map_id_for_generation(advance)
         seed = self.maze_seed_base + map_id + mode_offset + diff_offset
         if advance:
@@ -20459,7 +24718,7 @@ class AIAssistantApp:
     def _event_rng(self) -> random.Random:
         mode_offset = 1000 if self._normalized_layout_mode() == "maze" else 0
         diff = self._normalized_maze_difficulty()
-        diff_offset = {"easy": 10, "medium": 20, "hard": 30}.get(diff, 20)
+        diff_offset = {"easy": 10, "medium": 20, "hard": 30, "very hard": 40}.get(diff, 20)
         seed = self.maze_seed_base + 100_000 + self.layout_event_index + mode_offset + diff_offset
         self.layout_event_index += 1
         return random.Random(seed)
@@ -20566,10 +24825,16 @@ class AIAssistantApp:
             difficulty = self._normalized_maze_difficulty()
             map_id = self._maze_map_id_for_generation(advance_maze_sequence)
             start_anchor = self._maze_start_anchor_cell(map_id, difficulty)
+            layout_rng = self._maze_layout_rng(advance=advance_maze_sequence)
             self._generate_maze_blockers(
                 start_anchor,
                 difficulty,
-                self._maze_layout_rng(advance=advance_maze_sequence),
+                layout_rng,
+            )
+            start_anchor = self._select_start_anchor_in_largest_open_component(
+                start_anchor,
+                difficulty,
+                layout_rng,
             )
             # Episode id should identify the current maze layout, not target respawns.
             self.current_maze_episode_id = self._current_maze_map_id()
@@ -20756,6 +25021,14 @@ class AIAssistantApp:
         self.agent_move_animation_active = False
         mode = self._normalized_layout_mode()
         difficulty = self._normalized_maze_difficulty()
+        if (
+            mode == "maze"
+            and self.challenge_mode_enabled
+            and self.challenge_mode_force_hard_difficulty
+            and difficulty != "hard"
+        ):
+            self.maze_difficulty.set("hard")
+            difficulty = "hard"
         self._generate_layout(protected_cell=self._player_cell())
         self.game_canvas.config(width=self.canvas_width, height=self.canvas_height)
         self._draw_blockers()
@@ -20785,6 +25058,158 @@ class AIAssistantApp:
             self._mv_preplan_last_status = "disabled:mv-master-off"
         elif self._mv_preplan_last_status == "disabled:mv-master-off":
             self._mv_preplan_last_status = "idle"
+
+    def _detect_fast_mode_active(self) -> bool:
+        if self.move_delay_ms > self.fast_mode_move_delay_ms:
+            return False
+        if self.look_preview_delay_ms > self.fast_mode_look_preview_delay_ms:
+            return False
+        if self.fast_mode_disable_sleep_after_maze_completion and self.sleep_cycle_auto_after_maze_completion:
+            return False
+        if self.fast_mode_disable_sleep_after_log_dump and self.sleep_cycle_auto_after_log_dump:
+            return False
+        if self.fast_mode_disable_adaptive_progress_report and self.adaptive_progress_report_enable:
+            return False
+        if self.fast_mode_disable_adaptive_progress_auto_tune and self.adaptive_progress_auto_tune:
+            return False
+        return True
+
+    def _apply_fast_mode_profile(self, enabled: bool, *, sync_var: bool = True, persist: bool = True) -> None:
+        enabled_flag = bool(enabled)
+        if enabled_flag:
+            self.move_delay_ms = self.fast_mode_move_delay_ms
+            self.look_preview_delay_ms = self.fast_mode_look_preview_delay_ms
+            if self.fast_mode_disable_sleep_after_maze_completion:
+                self.sleep_cycle_auto_after_maze_completion = False
+            if self.fast_mode_disable_sleep_after_log_dump:
+                self.sleep_cycle_auto_after_log_dump = False
+            if self.fast_mode_disable_adaptive_progress_report:
+                self.adaptive_progress_report_enable = False
+            if self.fast_mode_disable_adaptive_progress_auto_tune:
+                self.adaptive_progress_auto_tune = False
+        else:
+            self.move_delay_ms = self.normal_mode_move_delay_ms
+            self.look_preview_delay_ms = self.normal_mode_look_preview_delay_ms
+            self.sleep_cycle_auto_after_maze_completion = self.normal_mode_sleep_after_maze_completion
+            self.sleep_cycle_auto_after_log_dump = self.normal_mode_sleep_after_log_dump
+            self.adaptive_progress_report_enable = self.normal_mode_adaptive_progress_report
+            self.adaptive_progress_auto_tune = self.normal_mode_adaptive_progress_auto_tune
+
+        self.fast_mode_enabled = enabled_flag
+        if sync_var and hasattr(self, "fast_mode_enabled_var"):
+            if bool(self.fast_mode_enabled_var.get()) != enabled_flag:
+                self.fast_mode_enabled_var.set(enabled_flag)
+        if persist:
+            self._save_window_geometry()
+
+    def _on_fast_mode_toggled(self) -> None:
+        enabled = bool(self.fast_mode_enabled_var.get())
+        self._apply_fast_mode_profile(enabled, sync_var=False, persist=True)
+        if enabled:
+            self.status_var.set(
+                "Fast mode enabled (lower UI delay + reduced sleep-cycle and telemetry overhead)"
+            )
+        else:
+            self.status_var.set(
+                "Fast mode disabled (restored normal timing, sleep-cycle, and telemetry behavior)"
+            )
+
+    def _challenge_prompt_text(self) -> str:
+        run_length = max(
+            1,
+            min(self.max_repeat_executions, int(getattr(self, "challenge_mode_run_length", 25))),
+        )
+        maze_label = "mazes" if run_length != 1 else "maze"
+        return f"solve {run_length} {maze_label}"
+
+    def _sync_prompt_for_challenge_mode(self, enabled: bool) -> None:
+        if not hasattr(self, "prompt_input"):
+            return
+        current_text = self.prompt_input.get("1.0", tk.END).strip()
+        default_text = str(getattr(self, "default_prompt_text", "") or "").strip()
+        challenge_text = self._challenge_prompt_text()
+
+        if enabled:
+            if (not current_text) or (default_text and current_text.lower() == default_text.lower()):
+                self.prompt_input.delete("1.0", tk.END)
+                self.prompt_input.insert("1.0", challenge_text)
+                self.prompt_input.mark_set(tk.INSERT, tk.END)
+            return
+
+        if challenge_text and current_text.lower() == challenge_text.lower() and default_text:
+            self.prompt_input.delete("1.0", tk.END)
+            self.prompt_input.insert("1.0", default_text)
+            self.prompt_input.mark_set(tk.INSERT, tk.END)
+
+    def _apply_challenge_mode_profile(
+        self,
+        enabled: bool,
+        *,
+        sync_var: bool = True,
+        persist: bool = True,
+        randomize_on_enable: bool = True,
+    ) -> None:
+        enabled_flag = bool(enabled)
+        was_enabled = bool(getattr(self, "challenge_mode_enabled", False))
+        layout_changed = False
+        difficulty_changed = False
+
+        if enabled_flag and not was_enabled:
+            self.challenge_mode_previous_difficulty = self._normalized_maze_difficulty()
+
+        if enabled_flag:
+            if self._normalized_layout_mode() != "maze":
+                self.layout_mode.set("maze")
+                layout_changed = True
+            if self.challenge_mode_force_hard_difficulty and self._normalized_maze_difficulty() != "hard":
+                self.maze_difficulty.set("hard")
+                difficulty_changed = True
+        elif was_enabled and self.challenge_mode_force_hard_difficulty:
+            restore_difficulty = str(getattr(self, "challenge_mode_previous_difficulty", "medium") or "medium").strip().lower()
+            if restore_difficulty not in {"easy", "medium", "hard", "very hard"}:
+                restore_difficulty = "medium"
+            if self._normalized_maze_difficulty() != restore_difficulty:
+                self.maze_difficulty.set(restore_difficulty)
+                difficulty_changed = True
+
+        self.challenge_mode_enabled = enabled_flag
+        if sync_var and hasattr(self, "challenge_mode_enabled_var"):
+            if bool(self.challenge_mode_enabled_var.get()) != enabled_flag:
+                self.challenge_mode_enabled_var.set(enabled_flag)
+
+        if layout_changed or difficulty_changed:
+            self._on_layout_settings_changed()
+
+        transitioned_on = enabled_flag and not was_enabled
+        if (
+            transitioned_on
+            and randomize_on_enable
+            and self.challenge_mode_randomize_start_on_enable
+            and self._normalized_layout_mode() == "maze"
+        ):
+            self._randomize_maze_start_number()
+
+        self._sync_prompt_for_challenge_mode(enabled_flag)
+
+        if persist:
+            self._save_window_geometry()
+
+    def _on_challenge_mode_toggled(self) -> None:
+        enabled = bool(self.challenge_mode_enabled_var.get())
+        self._apply_challenge_mode_profile(
+            enabled,
+            sync_var=False,
+            persist=True,
+            randomize_on_enable=True,
+        )
+        if enabled:
+            self.status_var.set(
+                "Challenge mode enabled (maze forced to hard difficulty with a fresh start seed)"
+            )
+        else:
+            self.status_var.set(
+                "Challenge mode disabled (restored prior difficulty and standard run prompt)"
+            )
 
     def _on_machine_vision_master_toggled(self) -> None:
         enabled = bool(self.machine_vision_master_enable_var.get())
@@ -20891,6 +25316,7 @@ class AIAssistantApp:
         safety_margin = self._maze_safety_margin() if self._normalized_layout_mode() == "maze" else 8
         self.episode_step_limit = self.episode_optimal_steps + safety_margin
         self.episode_steps = 0
+        self.episode_started_monotonic = time.perf_counter()
         self.episode_revisit_steps = 0
         self.episode_backtracks = 0
         self.episode_dead_end_learn_events = 0
@@ -20913,6 +25339,9 @@ class AIAssistantApp:
         self.taboo_transitions.clear()
         self.trap_transition_memory.clear()
         self.trap_cell_memory.clear()
+        self.long_loop_subtype_memory.clear()
+        self.verified_empty_opening_edges.clear()
+        self.loop_risk_opening_edges.clear()
         self._clear_spatial_memory_runtime()
         self.episode_visited_cells = {(player_row, player_col): 1}
         self.prev_player_cell = (player_row, player_col)
@@ -20983,6 +25412,7 @@ class AIAssistantApp:
         if new_x1 != x1 or new_y1 != y1:
             self.episode_steps += 1
             self.memory_step_index += 1
+            self._maybe_run_step_hygiene()
             self._maybe_run_sleep_cycle()
             if dy < 0:
                 self._set_player_facing_from_move("UP")
@@ -21092,6 +25522,8 @@ class AIAssistantApp:
                     self.taboo_transitions.clear()
                     self.trap_transition_memory.clear()
                     self.trap_cell_memory.clear()
+                    self.long_loop_subtype_memory.clear()
+                    self.loop_risk_opening_edges.clear()
                     self._clear_spatial_memory_runtime()
                 self.episode_steps = 0
                 self.episode_revisit_steps = 0
@@ -21142,6 +25574,7 @@ class AIAssistantApp:
         if overlap:
             self.targets_reached += 1
             self.last_maze_solve_attempts = self.episode_maze_attempt_count
+            solve_elapsed_seconds = max(0.0, time.perf_counter() - float(self.episode_started_monotonic))
             if self._normalized_layout_mode() == "maze":
                 # Persist complete deterministic layout at solve time so exact-map
                 # revisits can hydrate a full known map immediately.
@@ -21155,18 +25588,48 @@ class AIAssistantApp:
                 self.episode_revisit_steps * self.revisit_penalty_weight
                 + self.episode_backtracks * self.backtrack_penalty_weight
             )
-            reward = round(max(0.0, base_reward - repeat_penalty), 2)
+            fast_treat_bonus = 0.0
+            fast_treat_target_seconds = 0.0
+            fast_treat_efficiency = 0.0
+            if self._normalized_layout_mode() == "maze" and self.maze_fast_solve_treat_enable:
+                # Calibrate quick-solve target to expected movement cadence and optimal distance.
+                base_step_seconds = max(0.12, float(self.move_delay_ms) / 1000.0)
+                fast_treat_target_seconds = max(
+                    float(self.maze_fast_solve_treat_min_target_seconds),
+                    float(self.episode_optimal_steps) * base_step_seconds * float(self.maze_fast_solve_treat_target_multiplier),
+                )
+                # Grade solve speed with the same capped-ratio shape used by optimal-step efficiency:
+                # full credit at/under target time, proportional decay above target.
+                fast_treat_efficiency = min(
+                    1.0,
+                    float(fast_treat_target_seconds) / max(1e-6, float(solve_elapsed_seconds)),
+                )
+                fast_treat_bonus = max(0.0, float(self.maze_fast_solve_treat_max_bonus) * fast_treat_efficiency)
+
+            reward = round(max(0.0, base_reward - repeat_penalty + fast_treat_bonus), 2)
+            fast_treat_bonus = round(float(fast_treat_bonus), 2)
+            fast_treat_target_seconds = round(float(fast_treat_target_seconds), 2)
+            self.last_maze_solve_seconds = round(float(solve_elapsed_seconds), 2)
+            self.last_maze_fast_treat_bonus = fast_treat_bonus
+            self.last_maze_fast_treat_target_seconds = fast_treat_target_seconds
             self.total_reward += reward
+            capture_tags = ["target_capture", "efficiency_reward"]
+            if fast_treat_bonus > 0.0:
+                capture_tags.append("fast_solve_treat")
             self._record_action_outcome_memory(
                 action_taken="CAPTURE_TARGET",
                 outcome_value=float(reward),
                 reward_signal=float(reward),
                 penalty_signal=0.0,
-                reason_tags=["target_capture", "efficiency_reward"],
+                reason_tags=capture_tags,
                 details={
                     "reward": reward,
                     "base_reward": round(base_reward, 2),
                     "repeat_penalty": round(repeat_penalty, 2),
+                    "fast_treat_bonus": fast_treat_bonus,
+                    "fast_treat_efficiency": round(float(fast_treat_efficiency), 4),
+                    "solve_elapsed_seconds": round(float(solve_elapsed_seconds), 2),
+                    "fast_treat_target_seconds": fast_treat_target_seconds,
                     "episode_steps": self.episode_steps,
                     "episode_optimal_steps": self.episode_optimal_steps,
                 },
@@ -21202,21 +25665,32 @@ class AIAssistantApp:
                 )
 
             if self.goal_session_active and remaining > 0:
+                solve_detail = f"{self.last_maze_solve_seconds}s"
+                if self.last_maze_fast_treat_bonus > 0.0:
+                    solve_detail += f", treat +{self.last_maze_fast_treat_bonus}"
                 self.status_var.set(
                     "Auto-run: "
                     f"{remaining} target hits remaining "
                     f"(completed {completed}/{self.goal_session_target_hits}, "
-                    f"last maze attempts={self.last_maze_solve_attempts})"
+                    f"last maze attempts={self.last_maze_solve_attempts}, "
+                    f"last solve={solve_detail})"
                     f"{sleep_cycle_suffix}"
                 )
             elif self.goal_session_active and remaining == 0:
+                solve_detail = f"{self.last_maze_solve_seconds}s"
+                if self.last_maze_fast_treat_bonus > 0.0:
+                    solve_detail += f", treat +{self.last_maze_fast_treat_bonus}"
                 self.status_var.set(
-                    f"Auto-run complete (last maze attempts={self.last_maze_solve_attempts})"
+                    "Auto-run complete "
+                    f"(last maze attempts={self.last_maze_solve_attempts}, last solve={solve_detail})"
                     f"{sleep_cycle_suffix}"
                 )
             else:
+                solve_detail = f"{self.last_maze_solve_seconds}s"
+                if self.last_maze_fast_treat_bonus > 0.0:
+                    solve_detail += f", treat +{self.last_maze_fast_treat_bonus}"
                 self.status_var.set(
-                    f"Maze solved in {self.last_maze_solve_attempts} attempt(s){sleep_cycle_suffix}"
+                    f"Maze solved in {self.last_maze_solve_attempts} attempt(s) [{solve_detail}]{sleep_cycle_suffix}"
                 )
             return True
         return False
@@ -21248,6 +25722,7 @@ class AIAssistantApp:
 
         assistant_instructions = self.instructions_input.get("1.0", tk.END).strip()
 
+        self._exit_power_save_mode()
         self.send_btn.config(state=tk.DISABLED, text="Sending...")
         self.status_var.set("Waiting for model response...")
 
@@ -21256,13 +25731,38 @@ class AIAssistantApp:
 
     def _request_response(self, prompt: str, assistant_instructions: str) -> None:
         try:
-            local_navigation_request = self.local_navigation_kernel and self._is_local_navigation_request(prompt)
+            sequence_segments = self._extract_maze_batch_sequence_segments(prompt)
+            if sequence_segments:
+                local_navigation_request = self.local_navigation_kernel and self._is_local_navigation_request(prompt)
+                if local_navigation_request:
+                    sequence_result = self._execute_local_navigation_batch_sequence_runs(
+                        sequence_segments,
+                        assistant_instructions,
+                    )
+                    self.root.after(0, self._set_debug_text, sequence_result["debug_text"])
+                    self.root.after(0, self._set_response, sequence_result["answer"])
+                    return
+
+            batch_multiplier = self._extract_maze_batch_multiplier(prompt)
+            normalized_prompt = self._strip_maze_batch_multiplier(prompt) if batch_multiplier > 1 else prompt
+
+            local_navigation_request = self.local_navigation_kernel and self._is_local_navigation_request(normalized_prompt)
             local_navigation_result: dict | None = None
             local_navigation_debug = ""
             local_navigation_remaining = 0
 
+            if local_navigation_request and batch_multiplier > 1:
+                batch_result = self._execute_local_navigation_batch_runs(
+                    normalized_prompt,
+                    assistant_instructions,
+                    batch_multiplier,
+                )
+                self.root.after(0, self._set_debug_text, batch_result["debug_text"])
+                self.root.after(0, self._set_response, batch_result["answer"])
+                return
+
             if local_navigation_request:
-                local_navigation_result = self._execute_local_navigation_request(prompt, assistant_instructions)
+                local_navigation_result = self._execute_local_navigation_request(normalized_prompt, assistant_instructions)
                 local_navigation_remaining = int(local_navigation_result["remaining"])
                 if (
                     local_navigation_result["step_session"]["success"]
@@ -21282,7 +25782,7 @@ class AIAssistantApp:
                 raise RuntimeError("Missing OPENAI_API_KEY in .env or .env.secret")
 
             self.root.after(0, lambda: self.status_var.set("Logic model: interpreting request..."))
-            plan = self._build_logic_plan(prompt, assistant_instructions)
+            plan = self._build_logic_plan(normalized_prompt, assistant_instructions)
             if plan["normalized_goal"]:
                 self.last_normalized_goal = plan["normalized_goal"]
 
@@ -21293,7 +25793,7 @@ class AIAssistantApp:
                 "reason": "Repetition resolver disabled; using planner repetition fields.",
             }
             if self.enable_logic_repetition_resolver:
-                repetition = self._logic_resolve_repetition(prompt, plan, assistant_instructions)
+                repetition = self._logic_resolve_repetition(normalized_prompt, plan, assistant_instructions)
             if repetition["confidence"] >= self.repeat_confidence_threshold:
                 plan["is_repeat_goal"] = repetition["is_repeat_goal"]
                 plan["execution_count"] = repetition["execution_count"]
@@ -21311,7 +25811,7 @@ class AIAssistantApp:
                         f"{local_navigation_result['step_session']['completed']} hit(s) already completed."
                     ).strip()
 
-            game_navigation_request = self._is_game_navigation_request(prompt, plan)
+            game_navigation_request = self._is_game_navigation_request(normalized_prompt, plan)
             low_confidence = plan["confidence"] < self.logic_confidence_threshold
             requested_count = self._extract_execution_count(plan)
 
@@ -21362,7 +25862,7 @@ class AIAssistantApp:
             }
             agent_output = "Stepwise mode active: single-move proposals + logic move evaluation per step."
             if game_navigation_request:
-                step_session = self._run_stepwise_goal_session(prompt, plan, assistant_instructions)
+                step_session = self._run_stepwise_goal_session(normalized_prompt, plan, assistant_instructions)
                 self._record_last_navigation_session(
                     requested_count,
                     int(step_session.get("completed", 0) or 0),
@@ -21422,7 +25922,7 @@ class AIAssistantApp:
                         f"in {step_session['iterations']} step iterations; {step_session['remaining']} remaining."
                     )
             else:
-                answer = self._logic_finalize(prompt, plan, agent_output, assistant_instructions)
+                answer = self._logic_finalize(normalized_prompt, plan, agent_output, assistant_instructions)
             self.root.after(0, self._set_response, answer)
         except Exception as exc:  # noqa: BLE001
             self.root.after(0, self._set_error, redact_secrets(f"Request failed: {exc}"))
