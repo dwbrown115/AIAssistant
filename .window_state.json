@@ -1,13 +1,1 @@
-{
-    "geometry": "1800x1098+0+39",
-    "layout_mode": "maze",
-    "maze_difficulty": "hard",
-    "mv_route_planning_mode_enable": false,
-    "machine_vision_master_enable": false,
-    "fast_mode_enabled": true,
-    "challenge_mode_enabled": false,
-    "micro_progress_persisted_series_value": 9.0,
-    "micro_progress_batch_quality_ema": 0.783333,
-    "micro_progress_regression_fail_streak": 0,
-    "pane_sash_x": 540
-}
+{"geometry": "1800x1098+0+39", "layout_mode": "maze", "maze_difficulty": "hard", "mv_route_planning_mode_enable": false, "machine_vision_master_enable": false, "fast_mode_enabled": true, "challenge_mode_enabled": false, "micro_progress_persisted_series_value": 9.0, "micro_progress_batch_quality_ema": 1.0, "micro_progress_regression_fail_streak": 0, "pane_sash_x": 590}
