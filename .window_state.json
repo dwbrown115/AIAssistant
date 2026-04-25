@@ -1,1 +1,13 @@
-{"geometry": "1800x1098+0+39", "layout_mode": "maze", "maze_difficulty": "hard", "mv_route_planning_mode_enable": false, "machine_vision_master_enable": false, "fast_mode_enabled": true, "long_run_mode_enabled": false, "challenge_mode_enabled": false, "kernel_phase_disabled": [], "kernel_phase_program_state": {"completed_micro_total": 15, "active_target": null, "adaptive_weights": {"train": 0.1833, "integrate": 0.0625, "stability": 0.0226, "transfer": 0.5363, "safety": 0.02, "introspection": 0.1753}, "phases": [{"phase_id": "phase_1_envelope_shadow", "label": "Envelope + Shadow", "enabled": 1, "completed": 1, "micro_index": 2, "current_stage_id": "p1.m3", "observations": 0, "score_ema": 0.483, "promotion_target": 0.7444, "train_ema": 0.7381, "integrate_ema": 0.6881, "stability_ema": 0.7261, "transfer_ema": 0.443, "safety_ema": 1.0, "introspection_ema": 0.175}, {"phase_id": "phase_2_low_influence_blend", "label": "Low-Influence Blend", "enabled": 1, "completed": 1, "micro_index": 2, "current_stage_id": "p2.m3", "observations": 0, "score_ema": 0.0, "promotion_target": 0.62, "train_ema": 0.0, "integrate_ema": 0.0, "stability_ema": 0.0, "transfer_ema": 0.0, "safety_ema": 0.0, "introspection_ema": 0.0}, {"phase_id": "phase_3_hybrid_arbitration", "label": "Hybrid Arbitration", "enabled": 1, "completed": 1, "micro_index": 2, "current_stage_id": "p3.m3", "observations": 0, "score_ema": 0.0, "promotion_target": 0.62, "train_ema": 0.0, "integrate_ema": 0.0, "stability_ema": 0.0, "transfer_ema": 0.0, "safety_ema": 0.0, "introspection_ema": 0.0}, {"phase_id": "phase_4_auto_anneal_rollback", "label": "Auto-Anneal + Rollback", "enabled": 1, "completed": 1, "micro_index": 2, "current_stage_id": "p4.m3", "observations": 0, "score_ema": 0.0, "promotion_target": 0.62, "train_ema": 0.0, "integrate_ema": 0.0, "stability_ema": 0.0, "transfer_ema": 0.0, "safety_ema": 0.0, "introspection_ema": 0.0}, {"phase_id": "phase_5_legacy_prune", "label": "Legacy Prune", "enabled": 1, "completed": 1, "micro_index": 2, "current_stage_id": "p5.m3", "observations": 0, "score_ema": 0.0, "promotion_target": 0.62, "train_ema": 0.0, "integrate_ema": 0.0, "stability_ema": 0.0, "transfer_ema": 0.0, "safety_ema": 0.0, "introspection_ema": 0.0}]}, "micro_progress_persisted_series_value": 9.0, "micro_progress_batch_quality_ema": 1.0, "micro_progress_regression_fail_streak": 0, "pane_sash_x": 682}
+{
+    "geometry": "1800x1098+0+39",
+    "layout_mode": "maze",
+    "maze_difficulty": "hard",
+    "mv_route_planning_mode_enable": false,
+    "machine_vision_master_enable": false,
+    "fast_mode_enabled": true,
+    "challenge_mode_enabled": false,
+    "micro_progress_persisted_series_value": 9.0,
+    "micro_progress_batch_quality_ema": 0.783333,
+    "micro_progress_regression_fail_streak": 0,
+    "pane_sash_x": 540
+}
