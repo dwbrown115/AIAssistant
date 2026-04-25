@@ -1,15 +1,14 @@
-"""Deprecated legacy hormone blending helpers.
+"""Archived Phase 1 legacy hormone compatibility helpers.
 
-This module isolates transition-era legacy blend behavior so the core app
-logic can move toward hormone-native control without carrying compatibility
-implementation details in the main app file.
+Phase 1 extraction moved these transition-era blend utilities out of the
+active runtime path for Phase 6 cleanup.
 """
 
 from __future__ import annotations
 
 
 class LegacyHormoneCompatMixin:
-    """Compatibility helpers for legacy endocrine blend migration."""
+    """Compatibility helpers used during Phase 1 migration."""
 
     def _hormone_blended_weight(
         self,
@@ -24,19 +23,15 @@ class LegacyHormoneCompatMixin:
         return ((1.0 - legacy_blend) * float(modern_value)) + (legacy_blend * float(legacy_value))
 
     def _legacy_batch_1_low_impact_disabled(self) -> bool:
-        # Least impact: remove legacy confidence/momentum shaping first.
         return int(self.hormone_legacy_batch_level) >= 1
 
     def _legacy_batch_2_repeat_pressure_disabled(self) -> bool:
-        # Next: remove legacy repeat/fatigue pressure coupling.
         return int(self.hormone_legacy_batch_level) >= 2
 
     def _legacy_batch_3_exploration_bias_disabled(self) -> bool:
-        # Then: remove legacy curiosity-novelty exploration weighting.
         return int(self.hormone_legacy_batch_level) >= 3
 
     def _legacy_batch_4_risk_guard_disabled(self) -> bool:
-        # Highest impact: remove legacy caution/risk weighting.
         return int(self.hormone_legacy_batch_level) >= 4
 
     def _legacy_weight_disabled_for_channel(self, channel: str) -> bool:
@@ -58,7 +53,7 @@ class LegacyHormoneCompatMixin:
             return 0.0
         try:
             hormone = self.endocrine.state()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return 0.0
 
         H_caution = float(hormone.get("H_caution", 0.0) or 0.0)

@@ -79,6 +79,20 @@ class GovernanceOrchestrator:
             }
         )
 
+    def record_runtime_event(self, *, kind: str, payload: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+        event_kind = str(kind or "runtime_event").strip() or "runtime_event"
+        self.audit_log.append(
+            {
+                "ts": time.time(),
+                "kind": event_kind,
+                "policy_version": self.policy_version,
+                "stage": self.development_stage.value,
+                "payload": dict(payload or {}),
+            }
+        )
+
     def introspection_snapshot(self, *, autonomy: dict[str, Any], reasoning: dict[str, Any]) -> dict[str, Any]:
         recent = self.audit_log[-20:]
         return {

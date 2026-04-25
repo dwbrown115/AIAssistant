@@ -70,7 +70,6 @@ MAZE_BATCH_MICRO_PROGRESSION_START_RATIO=0.2
 MAZE_BATCH_MICRO_PROGRESSION_CURVE=1.15
 MAZE_BATCH_MICRO_PROGRESSION_MAX_HARD_PHASE_BONUS=1
 MAZE_BATCH_MICRO_PROGRESSION_MAX_OBJECTIVE_PHASE_BONUS=1
-MAZE_BATCH_MICRO_PROGRESSION_PHASE2_REDUCTION=0.35
 MAZE_BATCH_MICRO_PROGRESSION_ASSIST_RELIANCE_FLOOR=0.08
 # Optional: additional late-batch attenuation of guard intensity and delayed stuck-reexplore triggers.
 MAZE_BATCH_MICRO_PROGRESSION_GUARD_STRENGTH_REDUCTION=0.22
@@ -112,6 +111,13 @@ LOGIC_CONFIDENCE_THRESHOLD=0.55
 REPEAT_CONFIDENCE_THRESHOLD=0.6
 # Optional: max repeat-goal execution count parsed from prompts/plans.
 MAX_REPEAT_EXECUTIONS=25
+# Optional: reinforcement-first training mode. When enabled, step outcomes stop
+# using penalty-based scoring and convert non-optimal decisions into bounded
+# positive learning credit.
+CONSTRUCTIVE_REINFORCEMENT_ONLY=1
+CONSTRUCTIVE_LEARNING_CREDIT_SCALE=0.08
+CONSTRUCTIVE_LEARNING_CREDIT_CAP=12.0
+CONSTRUCTIVE_STAGNATION_CREDIT=0.25
 # Optional: default maze-run count prefilled in the Enter text box as "solve X mazes".
 DEFAULT_MAZE_RUN_LENGTH=10
 # Optional: challenge profile toggle defaults and behavior.
@@ -333,41 +339,22 @@ HORMONE_BOREDOM_REPEAT_WEIGHT=10.0
 HORMONE_CONFIDENCE_RISK_BONUS=8.0
 HORMONE_MOMENTUM_BONUS_WEIGHT=6.0
 HORMONE_MV_TRUST_BONUS_WEIGHT=9.0
-# Bridge from legacy endocrine levers to hormone-native tuning (0.0=new only, 1.0=legacy only)
-HORMONE_LEGACY_WEIGHT_BLEND=0.35
-# Optional staged legacy shutoff (least impact -> highest impact):
-# 0=all legacy blend groups allowed
-# 1=disable legacy confidence+momentum group
-# 2=also disable legacy boredom/repeat-pressure group
-# 3=also disable legacy curiosity/exploration group
-# 4=also disable legacy caution/risk group (full hormone-native weights)
-# Objective-override weakening follows the same batch ramp:
-# batch 1->3 progressively suppress unresolved exit-lock overrides.
-# batch 4 fully suppresses unresolved objective overrides until uncertainty clears.
-HORMONE_LEGACY_BATCH_LEVEL=3
-# Optional: objective override weakening phase (0..4), decoupled from legacy hormone batch.
-OBJECTIVE_OVERRIDE_PHASE_LEVEL=4
+# Phase 1-4 deprecation channels are retired in the live runtime path.
+# Archived phase plans and transition helpers are in deprecated/.
 # Optional: additional safety gate for objective override forcing; while unresolved uncertainty
 # exceeds these caps, objective forcing stays disabled even if exit was recently visible.
 OBJECTIVE_OVERRIDE_SAFE_MAX_UNKNOWN=1
 OBJECTIVE_OVERRIDE_SAFE_MAX_FRONTIER=1
-# Optional: staged attenuation for hardcoded planner override channels (0..4).
-# 0=legacy behavior; 1=disable frontier-lock forced routing;
-# 2=also disable persistent-frontier forced routing;
-# 3=also disable verification-priority forced routing;
-# 4=also disable plan-hold override (accept valid model candidate).
-HARD_OVERRIDE_PHASE_LEVEL=1
-# Optional: consolidated override phase (0..4). When set, this single value
-# drives both OBJECTIVE_OVERRIDE_PHASE_LEVEL and HARD_OVERRIDE_PHASE_LEVEL.
-CONSOLIDATED_OVERRIDE_PHASE_LEVEL=2
-# Optional: Phase-2 soft migration switch. When enabled, frontier-lock,
-# persistent-frontier, verification-priority, and plan-hold channels
-# contribute weighted score influence instead of hard forced-routing returns.
-PHASE2_SOFT_OVERRIDE_ENABLE=1
-PHASE2_FRONTIER_LOCK_INFLUENCE=22
-PHASE2_PERSISTENT_FRONTIER_INFLUENCE=16
-PHASE2_VERIFICATION_INFLUENCE=14
-PHASE2_PLAN_HOLD_INFLUENCE=12
+# Optional: adaptive objective-drive layer (soft replacement pressure for hard objective override).
+# Think of this as temporary "objective excitement" when exit evidence appears.
+OBJECTIVE_EXCITEMENT_ENABLE=1
+OBJECTIVE_EXCITEMENT_DECAY=0.88
+OBJECTIVE_EXCITEMENT_EXIT_BOOST=0.7
+OBJECTIVE_EXCITEMENT_PATH_BOOST=0.18
+OBJECTIVE_EXCITEMENT_MAX=2.5
+OBJECTIVE_EXCITEMENT_SCORE_WEIGHT=24.0
+OBJECTIVE_EXCITEMENT_PROGRESS_WEIGHT=16.0
+OBJECTIVE_EXCITEMENT_CONFIDENCE_BLEND=0.35
 # Optional: learned-autonomy subphase (runtime learner that attenuates hardcoded override
 # channels as learned-only behavior and utility improve, and tightens unresolved objective
 # override suppression when needed).
@@ -410,12 +397,6 @@ MAZE_FAST_SOLVE_TREAT_ENABLE=1
 MAZE_FAST_SOLVE_TREAT_MAX_BONUS=24.0
 MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER=1.85
 MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS=8.0
-# Optional: hormone-driven automatic suppression of legacy batch-1/2 channels
-# (confidence+momentum and boredom/repeat-pressure) under loop-pressure states.
-HORMONE_DYNAMIC_LEGACY_ENABLE=1
-HORMONE_DYNAMIC_LEGACY_LOOP_CENTER=0.10
-HORMONE_DYNAMIC_LEGACY_LOOP_GAIN=2.8
-HORMONE_DYNAMIC_LEGACY_BATCH12_SUPPRESSION_MAX=1.0
 # Deprecated legacy endocrine decays (kept for transition)
 HORMONE_STRESS_DECAY=0.90
 HORMONE_CURIOSITY_DECAY=0.97
@@ -526,6 +507,18 @@ STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS=6
 STRUCTURAL_MEMORY_MAX_ROWS=12000
 # Optional: minimum movement-step gap for automatic Memory Viewer refreshes.
 MEMORY_VIEWER_REFRESH_INTERVAL_STEPS=8
+# Optional: long-run efficiency profile (non-kernel cadence tuning only).
+# `LONG_RUN_MODE_DEFAULT_ON=1` starts app with Long-Run Mode enabled.
+LONG_RUN_MODE_DEFAULT_ON=0
+LONG_RUN_MEMORY_VIEWER_REFRESH_INTERVAL_STEPS=20
+LONG_RUN_STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS=14
+LONG_RUN_LAYOUT_CELL_SNAPSHOT_INTERVAL_STEPS=24
+LONG_RUN_ADAPTIVE_SAVE_INTERVAL_STEPS=240
+LONG_RUN_ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS=600
+LONG_RUN_STEP_HYGIENE_INTERVAL_STEPS=36
+LONG_RUN_STEP_HYGIENE_FULL_GC_INTERVAL_STEPS=300
+LONG_RUN_STM_PRUNING_INTERVAL_STEPS=8
+LONG_RUN_CAUSE_EFFECT_PRUNING_INTERVAL_STEPS=16
 # Optional: sleep-cycle maintenance for long runs (prune/compress + usage reinforcement).
 SLEEP_CYCLE_ENABLE=1
 # Optional: run automatic sleep cycle every N movement steps (0 disables periodic auto cycle).
@@ -788,6 +781,7 @@ This opens a dedicated app window.
 
 UI quality-of-life:
 - Window size and position are persisted between launches.
+- Kernel phase-program progression state (active micro/phase, EMA metrics, and completed status) is persisted between launches.
 - Use `Copy Output` to copy prompt + response + pipeline debug to clipboard.
 
 Ambiguity tuning:
@@ -804,6 +798,7 @@ Game controls:
 - In maze mode, use `Difficulty` (`easy`/`medium`/`hard`/`very hard`) for predictable algorithmic layouts.
 - Use `MV Enable` to turn machine vision on/off at runtime (disables MV localization/hints/preplan/overlays/routing when off, and clears MV Route Mode).
 - Use `Fast Mode` to temporarily speed up run throughput (lower move/look delays and reduced telemetry/auto-maintenance overhead) and toggle back to restore normal timing/maintenance behavior.
+- Use `Long-Run Mode` to reduce long-session overhead by slowing non-kernel maintenance/telemetry/storage cadence while preserving planner/kernel behavior.
 - Challenge profile behavior can be configured via `.env` (`CHALLENGE_MODE_*` settings).
 - Intra-batch micro progression can be configured via `.env` (`MAZE_BATCH_MICRO_PROGRESSION_*` settings) to gradually tighten challenge within a single run set; optional persistence/quality gates (`MAZE_MICRO_PROGRESSION_PERSIST_*`) can require stricter whole-batch quality before promotion, and regression controls (`MAZE_MICRO_PROGRESSION_REGRESSION_*`) can step progression down after repeated underperformance (for example `6.0 -> 5.9`).
 - Mode and Difficulty switching is app-based and persisted between launches.
@@ -911,14 +906,13 @@ Then open `http://127.0.0.1:5050`.
 - Structural loop-break env vars: `ESCAPE_BIAS_BONUS`, `FORCED_CORRIDOR_REENTRY_PENALTY`, `TRAP_CAUSE_EFFECT_PENALTY_SCALE`, `CYCLE_TABOO_THRESHOLD`, `CYCLE_TABOO_DURATION_STEPS`, `TERMINAL_CORRIDOR_HARD_VETO_PENALTY`, `HIGH_RISK_FRONTIER_OVERRIDE_BONUS` (shift from additive-only penalties toward taboo/veto and escape-favoring behavior in repeated trap contexts).
 - Branch-abandon mode env vars: `BRANCH_TIGHTENING_ABORT_THRESHOLD`, `BRANCH_TIGHTENING_ABORT_PENALTY`, `BRANCH_TIGHTENING_ESCAPE_BONUS`, `BRANCH_RECENT_FRONTIER_WINDOW`, `BRANCH_RECENT_FRONTIER_MAX_DISTANCE` (trigger a mode switch when a corridor is tightening and a recent nearby frontier memory exists, then penalize continued commitment and reward escape branches).
 - Biological interpretation env vars: `BIO_NAV_ENABLE`, `BIO_NAV_OPENING_WEIGHT`, `BIO_NAV_DEAD_END_ESCAPE_WEIGHT`, `BIO_NAV_NOVELTY_SCALE`, `BIO_NAV_CORRIDOR_FLOW_WEIGHT`, `BIO_NAV_DEAD_END_PREDICTIVE_PENALTY`, `BIO_NAV_LOOP_RISK_PENALTY` (translate raw local geometry into structural signals: opening evidence, corridor flow, predictive dead-end suppression, and loop-risk modulation).
-- Endocrine modulation env vars now use biologically-inspired hormone primitives (`H_curiosity`, `H_caution`, `H_persistence`, `H_mv_trust`, `H_boredom`, `H_confidence`) configured via `H_*_DECAY`, `HORMONE_*` weights, `HORMONE_LEGACY_WEIGHT_BLEND`, and staged shutoff `HORMONE_LEGACY_BATCH_LEVEL` (batch order: confidence+momentum -> boredom/repeat pressure -> curiosity/exploration -> caution/risk); legacy `ENDOCRINE_*` / `HORMONE_STRESS|FATIGUE|REWARD_*` knobs remain available as deprecated bridge inputs during migration.
-- Hardcoded override attenuation env var: `HARD_OVERRIDE_PHASE_LEVEL` (0..4 staged suppression of forced planner override channels: frontier-lock -> persistent-frontier -> verification-priority -> plan-hold override), designed for progressive reduction of hardcoded routing influence during loop tuning.
+- Endocrine modulation env vars use biologically-inspired hormone primitives (`H_curiosity`, `H_caution`, `H_persistence`, `H_mv_trust`, `H_boredom`, `H_confidence`) configured via `H_*_DECAY` and `HORMONE_*` weights; legacy `ENDOCRINE_*` / `HORMONE_STRESS|FATIGUE|REWARD_*` knobs remain available as deprecated bridge inputs.
+- Objective excitement env vars: `OBJECTIVE_EXCITEMENT_ENABLE`, `OBJECTIVE_EXCITEMENT_DECAY`, `OBJECTIVE_EXCITEMENT_EXIT_BOOST`, `OBJECTIVE_EXCITEMENT_PATH_BOOST`, `OBJECTIVE_EXCITEMENT_MAX`, `OBJECTIVE_EXCITEMENT_SCORE_WEIGHT`, `OBJECTIVE_EXCITEMENT_PROGRESS_WEIGHT`, `OBJECTIVE_EXCITEMENT_CONFIDENCE_BLEND` (adds adaptive soft capture pressure when exit evidence appears, so objective pursuit can ramp quickly without relying on hard objective override forcing).
 - Learned-autonomy subphase env vars: `LEARNED_AUTONOMY_SUBPHASE_ENABLE`, `LEARNED_AUTONOMY_WARMUP_STEPS`, `LEARNED_AUTONOMY_EMA_DECAY`, `LEARNED_AUTONOMY_PHASE1_SCORE`, `LEARNED_AUTONOMY_PHASE2_SCORE`, `LEARNED_AUTONOMY_UNRESOLVED_TARGET` (adds a runtime telemetry learner that now drives a formal autonomy lifecycle state machine: `MANUAL`, `ASSISTED`, `CONSTRAINED_AUTONOMY`, `SUPERVISED_AUTONOMY`, `SUSPENDED`; transitions are justification-tagged and can be externally overridden for governance/audit).
 - Phase-training scaffold env vars: `TRAINING_PHASE_ENABLE`, `TRAINING_PHASE_LEVEL`, `TRAINING_PHASE_AUTO_ADVANCE`, `TRAINING_PHASE2_MIN_STEPS`, `TRAINING_PHASE3_MIN_STEPS`, `TRAINING_PHASE1_PROJECTION_SCALE`, `TRAINING_PHASE2_PROJECTION_SCALE`, `TRAINING_PHASE3_PROJECTION_SCALE`, `TRAINING_PHASE_OVERRIDE_MIN_PRED_GAP` (sets up a 1->3 staged training path where projection features are blended into adaptive learning first, then learned gating progressively replaces anti-oscillation and cycle-avoid hard overrides).
 - Parallel reasoning engine env vars: `PARALLEL_REASONING_ENGINE_ENABLE`, `PARALLEL_REASONING_EMA_DECAY`, `PARALLEL_REASONING_WARMUP_STEPS`, `PARALLEL_REASONING_MIN_CONFIDENCE`, `PARALLEL_REASONING_LOCAL_WEIGHT`, `PARALLEL_REASONING_ADAPTIVE_WEIGHT`, `PARALLEL_REASONING_DELIBERATIVE_WEIGHT`, `PARALLEL_REASONING_DELIB_UNKNOWN_WEIGHT`, `PARALLEL_REASONING_DELIB_FRONTIER_WEIGHT`, `PARALLEL_REASONING_DELIB_LOOKAHEAD_WEIGHT`, `PARALLEL_REASONING_DELIB_LOOP_PENALTY_WEIGHT`, `PARALLEL_REASONING_DELIB_HAZARD_PENALTY_WEIGHT`, `PARALLEL_REASONING_DELIB_CONTRADICTION_PENALTY_WEIGHT`, `PARALLEL_REASONING_PROFILE`, `PARALLEL_REASONING_MAX_BRANCHES`, `PARALLEL_REASONING_MAX_DEPTH`, `PARALLEL_REASONING_TIME_BUDGET_MS`, `PARALLEL_REASONING_TOKEN_BUDGET` (evaluates local/adaptive/deliberative signals in parallel under an explicit reasoning-budget contract; branch pruning is surfaced in telemetry so resource tradeoffs are auditable).
 - Governance and contracts: shared controller contracts now define global error taxonomy (`TRANSIENT`, `PERMANENT`, `SAFETY_CRITICAL`, `POLICY_VIOLATION`, `RESOURCE_EXHAUSTION`), structured action-outcome events, autonomy transition events, module capability descriptors, developmental stages (`INFANT_KERNEL`, `JUVENILE_KERNEL`, `MATURE_KERNEL`, `RESEARCH_MODE`), and reasoning profiles (`FAST_APPROX`, `BALANCED`, `DEEP_AUDIT`). The Governance Orchestrator (`GOVERNANCE_ORCHESTRATOR_ENABLE`, `GOVERNANCE_POLICY_VERSION`, `KERNEL_DEVELOPMENT_STAGE`) collects these events into a unified introspection/audit stream.
 - Fast-solve treat env vars: `MAZE_FAST_SOLVE_TREAT_ENABLE`, `MAZE_FAST_SOLVE_TREAT_MAX_BONUS`, `MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER`, `MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS` (tracks wall-clock solve time for each maze episode and grants a metaphorical reward bonus when completion beats a dynamic target time derived from optimal path length and move cadence).
-- Dynamic legacy attenuation env vars: `HORMONE_DYNAMIC_LEGACY_ENABLE`, `HORMONE_DYNAMIC_LEGACY_LOOP_CENTER`, `HORMONE_DYNAMIC_LEGACY_LOOP_GAIN`, `HORMONE_DYNAMIC_LEGACY_BATCH12_SUPPRESSION_MAX` (when enabled, loop-pressure hormone state automatically suppresses legacy blend for the batch-1/2 channels, so repeat-loop reduction does not require fixed batch toggles).
 - Adaptive telemetry env vars: `ADAPTIVE_PROGRESS_REPORT_ENABLE`, `ADAPTIVE_PROGRESS_REPORT_MODEL`, `ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS`, `ADAPTIVE_PROGRESS_AUTO_TUNE`, `ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS` (occasionally sends adaptive weight snapshots + kernel progress to a GPT reviewer and can softly auto-tune legacy blend drift over time).
 - Organism control env vars: `ORGANISM_CONTROL_ENABLE`, `ORGANISM_RECENT_WINDOW` (routes live maze move arbitration through `step_agent(...)` and `CandidateProjection` with policy switching, explicit `ESCAPE_LOOP` inhibition under loop pressure, and a catastrophic trap veto that removes cycle+terminal+boxed corridor moves from selection when alternatives exist).
 - Modular maze-agent env vars: `MAZE_AGENT_ENABLE`, `MAZE_AGENT_CYCLE_TABOO_DURATION`, `MAZE_AGENT_CORRIDOR_ESCAPE_THRESHOLD`, `MAZE_AGENT_ESCAPE_TIMEOUT`, `MAZE_AGENT_ESCAPE_EXIT_PRESSURE`, `MAZE_AGENT_CORRIDOR_OVERUSE_THRESHOLD`, `MAZE_AGENT_NOVELTY_WEIGHT`, `MAZE_AGENT_FRONTIER_WEIGHT`, `MAZE_AGENT_JUNCTION_BONUS`, `MAZE_AGENT_CORRIDOR_OVERUSE_PENALTY`, `MAZE_AGENT_DEAD_END_PENALTY`, `MAZE_AGENT_MOTIF_WEIGHT`, `MAZE_AGENT_LOOP_RISK_WEIGHT`, `MAZE_AGENT_CORRIDOR_FORWARD_BIAS`, `MAZE_AGENT_SIDE_OPEN_BIAS` (enables transition-level cycle vetoes plus corridor/side-wall structural biasing in the modular controller stack).
@@ -945,6 +939,7 @@ Then open `http://127.0.0.1:5050`.
 - Local map authority env vars: `LOCAL_MAP_AUTHORITY_MODE`, `LOCAL_MAP_AUTHORITY_SOFT_SCALE`, `STRICT_AUTHORITY_RISK_MEMORY_MIN_SCALE` (`strict`=local episodic truth fully overrides cross-maze reward carryover on fully known cells except a configurable minimum carryover for high-risk contexts; `soft`=apply partial override using the soft scale).
 - Local navigation env vars: `LOCAL_NAVIGATION_KERNEL`, `LOCAL_NAVIGATION_API_FALLBACK` (`LOCAL_NAVIGATION_KERNEL=1` makes navigation local-first, and `LOCAL_NAVIGATION_API_FALLBACK=1` lets OpenAI step in if the local kernel stalls or cannot finish cleanly).
 - Low-reliance routing env vars: `ENABLE_LOGIC_REPETITION_RESOLVER`, `ENABLE_LOGIC_FINALIZER_FOR_NAVIGATION`, `MAZE_STEP_MODEL_HINTS`, `MAZE_TARGETED_MODEL_ASSIST_ENABLE`, `MAZE_MODEL_ASSIST_RELIANCE`, `MAZE_MODEL_ASSIST_MAX_CALLS_PER_EPISODE`, `MAZE_MODEL_ASSIST_COOLDOWN_STEPS` (keep normal navigation local-first, optionally allow full per-step hints, or add targeted OpenAI arbitration only during contradiction/stuck/map-doubt states; `MAZE_MODEL_ASSIST_RELIANCE` scales how eagerly those targeted calls trigger and how much override margin they get).
+- Constructive reinforcement env vars: `CONSTRUCTIVE_REINFORCEMENT_ONLY`, `CONSTRUCTIVE_LEARNING_CREDIT_SCALE`, `CONSTRUCTIVE_LEARNING_CREDIT_CAP`, `CONSTRUCTIVE_STAGNATION_CREDIT` (switches maze step feedback away from penalty-based outcome scoring; non-optimal moves contribute bounded positive learning credit and all outcome traces remain constructive for reinforcement).
 - Prediction-memory env vars: `PREDICTION_PRIOR_BLEND`, `PREDICTION_REWARD_CORRECT`, `PREDICTION_WRONG_LEARNING_REWARD`, `PREDICTION_WRONG_LEARNING_CREDIT_SCALE`, `PREDICTION_WRONG_OCCUPANCY_PENALTY`, `PREDICTION_WRONG_SHAPE_PENALTY`, `PREDICTION_CONFIDENT_WRONG_PENALTY`, `PREDICTION_CONFIDENT_THRESHOLD`, `PREDICTION_CONFIDENCE_BUCKETS`, `PREDICTION_CONTEXT_CONFIDENCE_BLEND`, `PREDICTION_OCCUPANCY_SCORE_WEIGHT`, `PREDICTION_SHAPE_SCORE_WEIGHT` (wrong predictions no longer stay net-positive by default; these knobs control how much informational credit remains versus how strongly wrong occupancy/shape guesses are penalized).
 - Prediction-to-planning bias env vars: `PREDICTION_JUNCTION_BIAS_WEIGHT`, `PREDICTION_DEAD_END_BIAS_WEIGHT`, `PREDICTION_PLANNING_MIN_CONF`, `PREDICTION_CONTEXT_TRUST_LOW_SHAPE_ACC`, `PREDICTION_CONTEXT_TRUST_HIGH_SHAPE_ACC` (active shape predictions are context-trust weighted before influencing move scoring; low-trust contexts collapse toward occupancy-only behavior; using `0.08` as baseline enables gentle prediction influence instead of waiting for rare high-confidence spikes).
 - Shape observability, lookahead, and projection env vars: `PREDICTION_SHAPE_REQUIRE_OBSERVABILITY`, `PREDICTION_SHAPE_OBSERVABILITY_MIN_NEIGHBORS`, `PREDICTION_LOOKAHEAD_ENABLE`, `PREDICTION_LOOKAHEAD_DISCOUNT`, `PREDICTION_LOOKAHEAD_WEIGHT`, `MAZE_PROJECTION_MODULE_ENABLE`, `MAZE_PROJECTION_FORWARD_DEPTH`, `MAZE_PROJECTION_FORWARD_WEIGHT`, `MAZE_PROJECTION_BACKTRACE_WINDOW`, `MAZE_PROJECTION_BACKTRACE_PENALTY_WEIGHT`, `MAZE_PROJECTION_BACKTRACE_ESCAPE_WEIGHT`, `MAZE_PROJECTION_SCORE_INFLUENCE_CAP`, `MAZE_PROJECTION_SCORE_INFLUENCE_SCALE`, `PROJECTION_TRUST_ADAPT_ENABLE`, `PROJECTION_TRUST_EMA_DECAY`, `PROJECTION_TRUST_MIN_SCALE`, `PROJECTION_TRUST_MAX_SCALE`, `PROJECTION_TRUST_WARMUP_STEPS`, `KERNEL_PROJECTION_REWARD_ENABLE`, `KERNEL_PROJECTION_REWARD_SCALE`, `KERNEL_PROJECTION_REWARD_MAX` (shape calibration updates can be gated until topology is observable; prediction lookahead adds lightweight 2-step rollout signal; projection adds a separate non-core overlay for forward imagined traces and backward trail replay suppression, then contributes as bounded score shaping rather than a hard override path, and can add a small planning feedback reward when projection guidance is net-positive; trust gating further attenuates projection influence dynamically when utility drifts).
