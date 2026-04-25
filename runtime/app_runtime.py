@@ -300,6 +300,7 @@ class AIAssistantApp:
         self.root.title('AI Assistant')
         self.default_geometry = '820x620'
         self.window_state_path = os.path.join(BASE_DIR, '.window_state.json')
+        self.phase_progress_state_path = os.path.join(BASE_DIR, '.phase_progress_state.json')
         self._geometry_save_after_id = None
         self._saved_sash_x = None
         self.memory_db_path = os.path.join(BASE_DIR, 'maze_memory.sqlite3')
@@ -6287,12 +6288,177 @@ class AIAssistantApp:
     def _refresh_hormone_panel(self) -> None:
         return ui_refresh_hormone_panel_runtime(self)
 
+    @staticmethod
+    def _coerce_optional_float(value: object) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _coerce_optional_int(value: object) -> int | None:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(float(value.strip()))
+            except Exception:
+                return None
+        return None
+
+    def _load_phase_progress_payload(self) -> dict[str, object]:
+        try:
+            if not os.path.exists(self.phase_progress_state_path):
+                return {}
+            with open(self.phase_progress_state_path, 'r', encoding='utf-8') as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return {}
+        return {}
+
+    def _phase_snapshot_row_rank(self, row: dict[str, object]) -> tuple[int, int, int, float]:
+        completed_flag = 1 if bool(row.get('completed', 0)) else 0
+        micro_index = self._coerce_optional_int(row.get('micro_index'))
+        if micro_index is None:
+            micro_index = 0
+        observations = self._coerce_optional_int(row.get('observations'))
+        if observations is None:
+            observations = 0
+        score_ema = self._coerce_optional_float(row.get('score_ema'))
+        if score_ema is None:
+            score_ema = 0.0
+        return (completed_flag, max(0, int(micro_index)), max(0, int(observations)), float(score_ema))
+
+    def _merge_kernel_phase_program_state_snapshots(self, baseline: object, candidate: object) -> dict[str, object] | None:
+        baseline_dict = baseline if isinstance(baseline, dict) else None
+        candidate_dict = candidate if isinstance(candidate, dict) else None
+        if baseline_dict is None and candidate_dict is None:
+            return None
+        if baseline_dict is None:
+            return candidate_dict
+        if candidate_dict is None:
+            return baseline_dict
+
+        baseline_phases = baseline_dict.get('phases')
+        candidate_phases = candidate_dict.get('phases')
+        if not isinstance(baseline_phases, list) and not isinstance(candidate_phases, list):
+            return candidate_dict
+
+        phase_ids = []
+        if self.kernel_phase_program is not None:
+            phase_ids = list(getattr(self.kernel_phase_program, 'phase_order', []))
+        if not phase_ids:
+            phase_ids = [str(spec.phase_id) for spec in self.kernel_phase_specs]
+
+        baseline_map: dict[str, dict[str, object]] = {}
+        candidate_map: dict[str, dict[str, object]] = {}
+        if isinstance(baseline_phases, list):
+            for row in baseline_phases:
+                if isinstance(row, dict):
+                    phase_id = str(row.get('phase_id', '')).strip()
+                    if phase_id:
+                        baseline_map[phase_id] = row
+        if isinstance(candidate_phases, list):
+            for row in candidate_phases:
+                if isinstance(row, dict):
+                    phase_id = str(row.get('phase_id', '')).strip()
+                    if phase_id:
+                        candidate_map[phase_id] = row
+
+        merged_phases: list[dict[str, object]] = []
+        for phase_id in phase_ids:
+            baseline_row = baseline_map.get(phase_id)
+            candidate_row = candidate_map.get(phase_id)
+            if baseline_row is None and candidate_row is None:
+                continue
+            if baseline_row is None:
+                merged_phases.append(candidate_row)
+                continue
+            if candidate_row is None:
+                merged_phases.append(baseline_row)
+                continue
+            baseline_rank = self._phase_snapshot_row_rank(baseline_row)
+            candidate_rank = self._phase_snapshot_row_rank(candidate_row)
+            merged_phases.append(candidate_row if candidate_rank >= baseline_rank else baseline_row)
+
+        if not merged_phases:
+            return candidate_dict
+
+        baseline_weight_source = baseline_dict
+        candidate_weight_source = candidate_dict
+        baseline_progress_score = 0
+        candidate_progress_score = 0
+        for row in merged_phases:
+            if not isinstance(row, dict):
+                continue
+            rank = self._phase_snapshot_row_rank(row)
+            baseline_row = baseline_map.get(str(row.get('phase_id', '')).strip())
+            if baseline_row is not None and baseline_row is row:
+                baseline_progress_score += rank[0] * 10000 + rank[1] * 100 + rank[2]
+            else:
+                candidate_progress_score += rank[0] * 10000 + rank[1] * 100 + rank[2]
+
+        weights = baseline_weight_source.get('adaptive_weights') if baseline_progress_score >= candidate_progress_score else candidate_weight_source.get('adaptive_weights')
+        merged: dict[str, object] = {
+            'phases': merged_phases,
+        }
+        if isinstance(weights, dict):
+            merged['adaptive_weights'] = weights
+        return merged
+
+    def _save_phase_progress_state(self) -> None:
+        if (not self.kernel_phase_program_enable) and (not self.maze_micro_progression_persist_enable):
+            return
+        try:
+            existing_payload = self._load_phase_progress_payload()
+            payload: dict[str, object] = {}
+
+            if self.kernel_phase_program_enable and self.kernel_phase_program is not None:
+                current_snapshot = self.kernel_phase_program.snapshot()
+                merged_snapshot = self._merge_kernel_phase_program_state_snapshots(existing_payload.get('kernel_phase_program_state'), current_snapshot)
+                if isinstance(merged_snapshot, dict):
+                    payload['kernel_phase_program_state'] = merged_snapshot
+
+            if self.maze_micro_progression_persist_enable:
+                existing_micro = self._coerce_optional_float(existing_payload.get('micro_progress_persisted_series_value'))
+                current_micro = float(self.micro_progress_persisted_series_value)
+                if existing_micro is not None:
+                    current_micro = max(float(existing_micro), current_micro)
+                payload['micro_progress_persisted_series_value'] = round(float(current_micro), 6)
+
+                existing_quality = self._coerce_optional_float(existing_payload.get('micro_progress_batch_quality_ema'))
+                current_quality = max(0.0, min(1.0, float(getattr(self, 'micro_progress_batch_quality_ema', 1.0) or 1.0)))
+                if existing_quality is not None:
+                    current_quality = max(float(existing_quality), current_quality)
+                payload['micro_progress_batch_quality_ema'] = round(float(current_quality), 6)
+
+                existing_fail_streak = self._coerce_optional_int(existing_payload.get('micro_progress_regression_fail_streak'))
+                current_fail_streak = max(0, int(getattr(self, 'micro_progress_regression_fail_streak', 0) or 0))
+                if existing_fail_streak is not None and existing_fail_streak > current_fail_streak:
+                    current_fail_streak = int(existing_fail_streak)
+                payload['micro_progress_regression_fail_streak'] = int(current_fail_streak)
+
+            if payload:
+                with open(self.phase_progress_state_path, 'w', encoding='utf-8') as handle:
+                    json.dump(payload, handle)
+        except Exception:
+            return
+
     def _restore_window_geometry(self) -> None:
         try:
-            if not os.path.exists(self.window_state_path):
-                return
-            with open(self.window_state_path, 'r', encoding='utf-8') as handle:
-                payload = json.load(handle)
+            payload: dict[str, object] = {}
+            if os.path.exists(self.window_state_path):
+                with open(self.window_state_path, 'r', encoding='utf-8') as handle:
+                    loaded_payload = json.load(handle)
+                if isinstance(loaded_payload, dict):
+                    payload = loaded_payload
+            phase_payload = self._load_phase_progress_payload()
             geometry = payload.get('geometry', '').strip()
             if geometry:
                 self.root.geometry(geometry)
@@ -6377,8 +6543,10 @@ class AIAssistantApp:
                 self._apply_kernel_phase_disable_list(tuple(parsed_kernel_phase_disabled), persist=False, refresh_controls=True)
             if self.kernel_phase_program_enable and self.kernel_phase_program is not None:
                 saved_kernel_phase_state = payload.get('kernel_phase_program_state')
-                if isinstance(saved_kernel_phase_state, dict):
-                    restored = self.kernel_phase_program.restore_snapshot(saved_kernel_phase_state)
+                persisted_kernel_phase_state = phase_payload.get('kernel_phase_program_state')
+                merged_kernel_phase_state = self._merge_kernel_phase_program_state_snapshots(saved_kernel_phase_state, persisted_kernel_phase_state)
+                if isinstance(merged_kernel_phase_state, dict):
+                    restored = self.kernel_phase_program.restore_snapshot(merged_kernel_phase_state)
                     if restored:
                         self._schedule_kernel_phase_controls_refresh()
                         self._schedule_micro_progress_header_update(announce_transition=False)
@@ -6389,15 +6557,15 @@ class AIAssistantApp:
                 self._saved_sash_x = saved_sash
                 self.root.after(50, self._restore_pane_sash)
             saved_micro_progress = payload.get('micro_progress_persisted_series_value')
+            persisted_micro_progress = phase_payload.get('micro_progress_persisted_series_value')
             if self.maze_micro_progression_persist_enable:
-                parsed_micro_progress: float | None = None
-                if isinstance(saved_micro_progress, (int, float)):
-                    parsed_micro_progress = float(saved_micro_progress)
-                elif isinstance(saved_micro_progress, str):
-                    try:
-                        parsed_micro_progress = float(saved_micro_progress.strip())
-                    except Exception:
-                        parsed_micro_progress = None
+                parsed_micro_progress = self._coerce_optional_float(saved_micro_progress)
+                persisted_micro_progress_value = self._coerce_optional_float(persisted_micro_progress)
+                if persisted_micro_progress_value is not None:
+                    if parsed_micro_progress is None:
+                        parsed_micro_progress = float(persisted_micro_progress_value)
+                    else:
+                        parsed_micro_progress = max(float(parsed_micro_progress), float(persisted_micro_progress_value))
                 if parsed_micro_progress is not None:
                     self.micro_progress_persisted_series_value = max(float(self.micro_progress_series_base), parsed_micro_progress)
                     self.runtime_micro_progress_series_anchor = float(self.micro_progress_persisted_series_value)
@@ -6405,27 +6573,20 @@ class AIAssistantApp:
                     self.runtime_micro_progress_stage_index = 0
                     self._schedule_micro_progress_header_update(announce_transition=False)
                 saved_quality_ema = payload.get('micro_progress_batch_quality_ema')
-                parsed_quality_ema: float | None = None
-                if isinstance(saved_quality_ema, (int, float)):
-                    parsed_quality_ema = float(saved_quality_ema)
-                elif isinstance(saved_quality_ema, str):
-                    try:
-                        parsed_quality_ema = float(saved_quality_ema.strip())
-                    except Exception:
-                        parsed_quality_ema = None
+                persisted_quality_ema = phase_payload.get('micro_progress_batch_quality_ema')
+                parsed_quality_ema = self._coerce_optional_float(persisted_quality_ema)
+                if parsed_quality_ema is None:
+                    parsed_quality_ema = self._coerce_optional_float(saved_quality_ema)
                 if parsed_quality_ema is not None:
                     self.micro_progress_batch_quality_ema = max(0.0, min(1.0, parsed_quality_ema))
                 saved_fail_streak = payload.get('micro_progress_regression_fail_streak')
-                parsed_fail_streak: int | None = None
-                if isinstance(saved_fail_streak, (int, float)):
-                    parsed_fail_streak = int(saved_fail_streak)
-                elif isinstance(saved_fail_streak, str):
-                    try:
-                        parsed_fail_streak = int(float(saved_fail_streak.strip()))
-                    except Exception:
-                        parsed_fail_streak = None
+                persisted_fail_streak = phase_payload.get('micro_progress_regression_fail_streak')
+                parsed_fail_streak = self._coerce_optional_int(persisted_fail_streak)
+                if parsed_fail_streak is None:
+                    parsed_fail_streak = self._coerce_optional_int(saved_fail_streak)
                 if parsed_fail_streak is not None:
                     self.micro_progress_regression_fail_streak = max(0, parsed_fail_streak)
+            self._save_phase_progress_state()
         except Exception:
             return
 
@@ -6470,6 +6631,7 @@ class AIAssistantApp:
                 payload['pane_sash_x'] = int(sash_x)
             with open(self.window_state_path, 'w', encoding='utf-8') as handle:
                 json.dump(payload, handle)
+            self._save_phase_progress_state()
         except Exception:
             return
 
