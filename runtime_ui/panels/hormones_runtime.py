@@ -65,6 +65,26 @@ def hormone_monitor_text(app: object) -> str:
         else:
             lines.append("learned_autonomy_subphase: disabled")
 
+        if getattr(app, "kernel_phase_program_enable", False) and getattr(
+            app, "kernel_phase_program", None
+        ) is not None:
+            phase_snapshot = app.kernel_phase_program.snapshot()
+            active_target = phase_snapshot.get("active_target")
+            if isinstance(active_target, (tuple, list)) and len(active_target) == 2:
+                target_text = f"{active_target[0]}::{active_target[1]}"
+            else:
+                target_text = "complete"
+            lines.append(
+                (
+                    "adaptive_phase_program: "
+                    f"target={target_text} "
+                    f"completed_micro_total={phase_snapshot.get('completed_micro_total', 0)} "
+                    f"disabled={','.join(getattr(app, 'kernel_phase_disable_list', ()))}"
+                )
+            )
+        else:
+            lines.append("adaptive_phase_program: disabled")
+
         if app.parallel_reasoning_enable:
             reasoning_snapshot = app._parallel_reasoning_snapshot()
             lines.append(

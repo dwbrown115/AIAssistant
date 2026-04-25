@@ -18,6 +18,7 @@ from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
 from adaptive_controller import AdaptiveNeuralController
+from adaptive_phase_program import AdaptiveKernelPhaseProgram, build_default_kernel_phase_specs
 from governance_orchestrator import GovernanceOrchestrator
 from kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
 from learned_autonomy_controller import LearnedAutonomyController
@@ -367,6 +368,15 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
+        self.kernel_phase_program_status_var = tk.StringVar(value='Kernel phase program: disabled')
+        self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
+        self.kernel_phase_toggle_vars: dict[str, tk.BooleanVar] = {}
+        self.kernel_phase_toggle_buttons: dict[str, tk.Checkbutton] = {}
+        self.kernel_phase_advance_micro_button = None
+        self.kernel_phase_regress_micro_button = None
+        self.kernel_phase_advance_phase_button = None
+        self.kernel_phase_regress_phase_button = None
+        self._kernel_phase_controls_refresh_after_id = None
         self.targets_reached = 0
         self.total_reward = 0.0
         self.episode_steps = 0
@@ -687,6 +697,14 @@ class AIAssistantApp:
         self.learned_autonomy_hard_phase_bonus = 0
         self.learned_autonomy_objective_phase_bonus = 0
         self.learned_autonomy_soft_override_scale = 1.0
+        self.kernel_phase_program_enable = os.getenv('KERNEL_PHASE_PROGRAM_ENABLE', '1') == '1'
+        self.kernel_phase_specs = build_default_kernel_phase_specs() if self.kernel_phase_program_enable else ()
+        self.kernel_phase_program = AdaptiveKernelPhaseProgram(phase_specs=self.kernel_phase_specs, ema_decay=max(0.5, min(0.999, float(os.getenv('KERNEL_PHASE_EMA_DECAY', '0.93')))), base_promotion_target=max(0.45, min(0.9, float(os.getenv('KERNEL_PHASE_BASE_PROMOTION_TARGET', '0.62')))), target_adapt_rate=max(0.001, min(0.25, float(os.getenv('KERNEL_PHASE_TARGET_ADAPT_RATE', '0.08')))), weight_adapt_rate=max(0.001, min(0.25, float(os.getenv('KERNEL_PHASE_WEIGHT_ADAPT_RATE', '0.06'))))) if self.kernel_phase_program_enable else None
+        _phase_disable_tokens = [token.strip() for token in str(os.getenv('KERNEL_PHASE_DISABLE_LIST', '')).split(',') if token.strip()]
+        self.kernel_phase_disable_list = tuple(dict.fromkeys(_phase_disable_tokens))
+        if self.kernel_phase_program is not None and self.kernel_phase_disable_list:
+            self.kernel_phase_program.set_disabled_phase_ids(self.kernel_phase_disable_list)
+        self.kernel_phase_last_target = ''
         self.parallel_reasoning_enable = os.getenv('PARALLEL_REASONING_ENGINE_ENABLE', '1') == '1'
         self.parallel_reasoning_ema_decay = max(0.5, min(0.999, float(os.getenv('PARALLEL_REASONING_EMA_DECAY', '0.965'))))
         self.parallel_reasoning_warmup_steps = max(24, int(os.getenv('PARALLEL_REASONING_WARMUP_STEPS', '140')))
@@ -716,6 +734,9 @@ class AIAssistantApp:
         self.governance_orchestrator.register_module(ModuleCapabilityDescriptor(module_id='learned_autonomy_controller', module_version='2.0', supported_features=('state_machine', 'continuous_modulation', 'external_override'), known_limitations=('ema_warmup_dependency',), safety_guarantees=('supports_suspended_state',)))
         self.governance_orchestrator.register_module(ModuleCapabilityDescriptor(module_id='organism_control', module_version='1.0', supported_features=('reflex_policy', 'trap_veto', 'loop_escape'), known_limitations=('local_signal_only',), safety_guarantees=('catastrophic_trap_filter',)))
         self.governance_orchestrator.register_module(ModuleCapabilityDescriptor(module_id='parallel_reasoning_engine', module_version='2.0', supported_features=('multi_plan_ranking', 'budget_pruning', 'confidence_report'), known_limitations=('no_long_horizon_tree_search',), safety_guarantees=('min_confidence_probe_mode',)))
+        if self.kernel_phase_program is not None:
+            for phase_spec in self.kernel_phase_specs:
+                self.governance_orchestrator.register_module(ModuleCapabilityDescriptor(module_id=phase_spec.module_id, module_version='0.1', supported_features=('adaptive_micro_progression', 'phase_disable_resume', 'kernel_introspection'), known_limitations=('shadow_training_bootstrap',), safety_guarantees=('bounded_promotion_target',)))
         self.hormone_caution_danger_weight = float(os.getenv('HORMONE_CAUTION_DANGER_WEIGHT', '18.0'))
         self.hormone_curiosity_novelty_weight = float(os.getenv('HORMONE_CURIOSITY_NOVELTY_WEIGHT', os.getenv('HORMONE_CURIOUSITY_NOVELTY_WEIGHT', '14.0')))
         self.hormone_boredom_repeat_weight = float(os.getenv('HORMONE_BOREDOM_REPEAT_WEIGHT', '10.0'))
@@ -1062,8 +1083,31 @@ class AIAssistantApp:
         self.fast_mode_disable_sleep_after_log_dump = os.getenv('FAST_MODE_DISABLE_SLEEP_AFTER_LOG_DUMP', '1') == '1'
         self.fast_mode_disable_adaptive_progress_report = os.getenv('FAST_MODE_DISABLE_ADAPTIVE_PROGRESS_REPORT', '1') == '1'
         self.fast_mode_disable_adaptive_progress_auto_tune = os.getenv('FAST_MODE_DISABLE_ADAPTIVE_PROGRESS_AUTO_TUNE', '1') == '1'
+        self.normal_mode_memory_viewer_refresh_interval_steps = max(1, int(self.memory_viewer_refresh_interval_steps))
+        self.normal_mode_structural_memory_snapshot_interval_steps = max(1, int(self.structural_memory_snapshot_interval_steps))
+        self.normal_mode_layout_cell_snapshot_interval_steps = max(1, int(self.layout_cell_snapshot_interval_steps))
+        self.normal_mode_adaptive_save_interval_steps = max(20, int(self.adaptive_save_interval_steps))
+        self.normal_mode_adaptive_progress_report_interval_steps = max(30, int(self.adaptive_progress_report_interval_steps))
+        self.normal_mode_step_hygiene_interval_steps = max(0, int(self.step_hygiene_interval_steps))
+        self.normal_mode_step_hygiene_full_gc_interval_steps = max(0, int(self.step_hygiene_full_gc_interval_steps))
+        self.normal_mode_stm_pruning_interval_steps = max(1, int(self.stm_pruning_interval_steps))
+        self.normal_mode_cause_effect_pruning_interval_steps = max(1, int(self.cause_effect_pruning_interval_steps))
+        self.long_run_mode_default_on = os.getenv('LONG_RUN_MODE_DEFAULT_ON', '0') == '1'
+        self.long_run_memory_viewer_refresh_interval_steps = max(self.normal_mode_memory_viewer_refresh_interval_steps, int(os.getenv('LONG_RUN_MEMORY_VIEWER_REFRESH_INTERVAL_STEPS', '20')))
+        self.long_run_structural_memory_snapshot_interval_steps = max(self.normal_mode_structural_memory_snapshot_interval_steps, int(os.getenv('LONG_RUN_STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS', '14')))
+        self.long_run_layout_cell_snapshot_interval_steps = max(self.normal_mode_layout_cell_snapshot_interval_steps, int(os.getenv('LONG_RUN_LAYOUT_CELL_SNAPSHOT_INTERVAL_STEPS', '24')))
+        self.long_run_adaptive_save_interval_steps = max(self.normal_mode_adaptive_save_interval_steps, int(os.getenv('LONG_RUN_ADAPTIVE_SAVE_INTERVAL_STEPS', '240')))
+        self.long_run_adaptive_progress_report_interval_steps = max(self.normal_mode_adaptive_progress_report_interval_steps, int(os.getenv('LONG_RUN_ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS', '600')))
+        self.long_run_step_hygiene_interval_steps = max(self.normal_mode_step_hygiene_interval_steps, int(os.getenv('LONG_RUN_STEP_HYGIENE_INTERVAL_STEPS', '36')))
+        self.long_run_step_hygiene_full_gc_interval_steps = max(self.normal_mode_step_hygiene_full_gc_interval_steps, int(os.getenv('LONG_RUN_STEP_HYGIENE_FULL_GC_INTERVAL_STEPS', '300')))
+        self.long_run_stm_pruning_interval_steps = max(self.normal_mode_stm_pruning_interval_steps, int(os.getenv('LONG_RUN_STM_PRUNING_INTERVAL_STEPS', '8')))
+        self.long_run_cause_effect_pruning_interval_steps = max(self.normal_mode_cause_effect_pruning_interval_steps, int(os.getenv('LONG_RUN_CAUSE_EFFECT_PRUNING_INTERVAL_STEPS', '16')))
         self.fast_mode_enabled = self._detect_fast_mode_active()
         self.fast_mode_enabled_var = tk.BooleanVar(value=self.fast_mode_enabled)
+        self.long_run_mode_enabled = self.long_run_mode_default_on
+        self.long_run_mode_enabled_var = tk.BooleanVar(value=self.long_run_mode_enabled)
+        if self.long_run_mode_enabled:
+            self._apply_long_run_mode_profile(True, sync_var=True, persist=False)
         self.player_x = (self.cell_size - self.player_size) // 2
         self.player_y = (self.cell_size - self.player_size) // 2
         self.movement_rules = 'Movement rules: The player is a square. Valid moves are UP, DOWN, LEFT, RIGHT. Each move shifts exactly one grid cell and cannot leave canvas bounds. Blocked cells are impassable and cannot be entered. Mode GRID uses low-noise random blockers. Mode MAZE uses deterministic maze algorithms with difficulty levels (easy/medium/hard). Goal: touch the blue target circle. Reward objective: maximize efficiency by using the shortest path.'
@@ -1519,6 +1563,9 @@ class AIAssistantApp:
         batch_total = max(1, int(self.batch_progress_total))
         micro_total = max(1, int(self.micro_progress_total))
         header_text = f'Batch {batch_idx}/{batch_total} | Micro {micro_idx}/{micro_total}'
+        kernel_phase_token = self._kernel_phase_program_header_token()
+        if kernel_phase_token:
+            header_text += f' | {kernel_phase_token}'
         requested = max(0, int(getattr(self, 'runtime_batch_requested_count', 0) or 0))
         completed = max(0, int(getattr(self, 'runtime_batch_completed_count', 0) or 0))
         if requested > 0:
@@ -1529,6 +1576,271 @@ class AIAssistantApp:
         if not hasattr(self, 'root'):
             return
         self.root.after(0, lambda: self._update_micro_progress_header(announce_transition=announce_transition))
+
+    def _kernel_phase_program_header_token(self) -> str:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return ''
+        snapshot = self.kernel_phase_program.snapshot()
+        phases = snapshot.get('phases', [])
+        if not isinstance(phases, list) or not phases:
+            return ''
+        total = len(phases)
+        completed = sum((1 for phase in phases if bool(phase.get('completed', 0))))
+        active_target = snapshot.get('active_target')
+        active_phase_id = ''
+        if isinstance(active_target, (tuple, list)) and len(active_target) >= 1:
+            active_phase_id = str(active_target[0] or '').strip()
+        active_index = 0
+        if active_phase_id:
+            for idx, phase in enumerate(phases, start=1):
+                if str(phase.get('phase_id', '')).strip() == active_phase_id:
+                    active_index = idx
+                    break
+        disabled_count = sum((1 for phase in phases if not bool(phase.get('enabled', 1))))
+        if active_index > 0:
+            token = f'KPhase {active_index}/{total}'
+        else:
+            token = f'KPhase {completed}/{total}'
+        if disabled_count > 0:
+            token += f' off={disabled_count}'
+        return token
+
+    def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
+        if not hasattr(self, 'kernel_phase_program_status_var'):
+            return
+        panel = tk.LabelFrame(parent, text='Phase Progression', padx=6, pady=4)
+        panel.pack(fill=tk.X, pady=(0, 6))
+        self.kernel_phase_program_panel = panel
+        tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
+        tk.Label(panel, textvariable=self.kernel_phase_program_current_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
+        controls_row = tk.Frame(panel)
+        controls_row.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(controls_row, text='Manual').pack(side=tk.LEFT)
+        self.kernel_phase_regress_phase_button = tk.Button(controls_row, text='Phase -', command=self._on_kernel_phase_regress_phase)
+        self.kernel_phase_regress_phase_button.pack(side=tk.LEFT, padx=(8, 4))
+        self.kernel_phase_advance_phase_button = tk.Button(controls_row, text='Phase +', command=self._on_kernel_phase_advance_phase)
+        self.kernel_phase_advance_phase_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.kernel_phase_regress_micro_button = tk.Button(controls_row, text='Micro -', command=self._on_kernel_phase_regress_micro)
+        self.kernel_phase_regress_micro_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.kernel_phase_advance_micro_button = tk.Button(controls_row, text='Micro +', command=self._on_kernel_phase_advance_micro)
+        self.kernel_phase_advance_micro_button.pack(side=tk.LEFT)
+        toggle_grid = tk.Frame(panel)
+        toggle_grid.pack(fill=tk.X)
+        self.kernel_phase_toggle_vars = {}
+        self.kernel_phase_toggle_buttons = {}
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            tk.Label(toggle_grid, text='Kernel phase program disabled').pack(anchor='w')
+            self.kernel_phase_program_status_var.set('Kernel phase program: disabled')
+            self.kernel_phase_program_current_var.set('Current: --')
+            return
+        for idx, spec in enumerate(self.kernel_phase_specs):
+            phase_id = str(spec.phase_id)
+            is_enabled = phase_id not in set(self.kernel_phase_disable_list)
+            var = tk.BooleanVar(value=is_enabled)
+            self.kernel_phase_toggle_vars[phase_id] = var
+            button = tk.Checkbutton(toggle_grid, text=str(spec.label), variable=var, anchor='w', command=lambda pid=phase_id: self._on_kernel_phase_toggle(pid))
+            row = idx // 3
+            col = idx % 3
+            button.grid(row=row, column=col, sticky='w', padx=(0, 12), pady=(0, 2))
+            self.kernel_phase_toggle_buttons[phase_id] = button
+        self._refresh_kernel_phase_toggle_controls()
+
+    def _apply_kernel_phase_disable_list(self, phase_ids: tuple[str, ...], *, persist: bool=False, refresh_controls: bool=True) -> None:
+        order = [str(spec.phase_id) for spec in self.kernel_phase_specs]
+        disabled_input = {str(phase_id).strip() for phase_id in phase_ids if str(phase_id).strip()}
+        ordered_disabled = tuple((phase_id for phase_id in order if phase_id in disabled_input))
+        self.kernel_phase_disable_list = ordered_disabled
+        if self.kernel_phase_program is not None:
+            self.kernel_phase_program.set_disabled_phase_ids(self.kernel_phase_disable_list)
+        if refresh_controls:
+            self._schedule_kernel_phase_controls_refresh()
+            self._schedule_micro_progress_header_update(announce_transition=False)
+        if persist:
+            self._save_window_geometry()
+
+    def _refresh_kernel_phase_toggle_controls(self) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            self.kernel_phase_program_status_var.set('Kernel phase program: disabled')
+            self.kernel_phase_program_current_var.set('Current: --')
+            return
+        snapshot = self.kernel_phase_program.snapshot()
+        phases = snapshot.get('phases', [])
+        if not isinstance(phases, list) or not phases:
+            self.kernel_phase_program_status_var.set('Kernel phase program: no phases loaded')
+            self.kernel_phase_program_current_var.set('Current: --')
+            return
+        phase_map = {str(phase.get('phase_id', '')): phase for phase in phases}
+        spec_map = {str(spec.phase_id): spec for spec in self.kernel_phase_specs}
+        active_target = snapshot.get('active_target')
+        active_phase_id = ''
+        active_micro_id = ''
+        if isinstance(active_target, (tuple, list)) and len(active_target) >= 1:
+            active_phase_id = str(active_target[0] or '').strip()
+        if isinstance(active_target, (tuple, list)) and len(active_target) >= 2:
+            active_micro_id = str(active_target[1] or '').strip()
+        completed_count = 0
+        total_count = len(phases)
+        active_index = 0
+        if active_phase_id:
+            for idx, spec in enumerate(self.kernel_phase_specs, start=1):
+                if str(spec.phase_id) == active_phase_id:
+                    active_index = idx
+                    break
+        for idx, spec in enumerate(self.kernel_phase_specs, start=1):
+            phase_id = str(spec.phase_id)
+            phase_state = phase_map.get(phase_id, {})
+            is_completed = bool(phase_state.get('completed', 0))
+            if is_completed:
+                completed_count += 1
+            is_active = phase_id == active_phase_id
+            is_reached = bool(is_completed or is_active or (active_index > 0 and idx < active_index) or (active_index <= 0 and completed_count >= idx))
+            is_enabled = bool(phase_state.get('enabled', 1))
+            label = str(spec.label)
+            if is_active:
+                label = f'{label} (active)'
+            elif is_completed:
+                label = f'{label} (integrated)'
+            elif not is_reached:
+                label = f'{label} (pending)'
+            button = self.kernel_phase_toggle_buttons.get(phase_id)
+            var = self.kernel_phase_toggle_vars.get(phase_id)
+            if var is not None:
+                var.set(is_enabled)
+            if button is not None:
+                button.config(text=label, state=(tk.NORMAL if is_reached else tk.DISABLED))
+        disabled_count = sum((1 for phase in phases if not bool(phase.get('enabled', 1))))
+        target_text = 'complete'
+        if isinstance(active_target, (tuple, list)) and len(active_target) == 2:
+            target_text = f'{active_target[0]}::{active_target[1]}'
+        self.kernel_phase_program_status_var.set(f'Kernel phase progression: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        if active_phase_id and active_micro_id and active_phase_id in spec_map:
+            active_spec = spec_map[active_phase_id]
+            micro_label = active_micro_id
+            micro_position = '--/--'
+            for micro_idx, micro_spec in enumerate(active_spec.micro_stages, start=1):
+                if str(micro_spec.stage_id) == active_micro_id:
+                    micro_label = str(micro_spec.label)
+                    micro_position = f'{micro_idx}/{len(active_spec.micro_stages)}'
+                    break
+            self.kernel_phase_program_current_var.set(f'Current: {active_spec.label} | {micro_label} ({micro_position})')
+        else:
+            self.kernel_phase_program_current_var.set('Current: complete')
+
+        can_advance_phase = bool(active_phase_id)
+        can_regress_phase = False
+        can_advance_micro = bool(active_phase_id)
+        can_regress_micro = False
+        if active_phase_id and active_phase_id in spec_map:
+            active_spec = spec_map[active_phase_id]
+            active_state = phase_map.get(active_phase_id, {})
+            active_phase_order_index = 0
+            for phase_idx, spec in enumerate(self.kernel_phase_specs):
+                if str(spec.phase_id) == active_phase_id:
+                    active_phase_order_index = phase_idx
+                    break
+            can_regress_phase = active_phase_order_index > 0
+            active_micro_index = int(active_state.get('micro_index', 0) or 0)
+            is_completed = bool(active_state.get('completed', 0))
+            can_regress_micro = bool(is_completed or active_micro_index > 0)
+            can_advance_micro = bool((not is_completed) and active_micro_index <= (len(active_spec.micro_stages) - 1))
+            can_advance_phase = not is_completed
+        if self.kernel_phase_advance_micro_button is not None:
+            self.kernel_phase_advance_micro_button.config(state=(tk.NORMAL if can_advance_micro else tk.DISABLED))
+        if self.kernel_phase_regress_micro_button is not None:
+            self.kernel_phase_regress_micro_button.config(state=(tk.NORMAL if can_regress_micro else tk.DISABLED))
+        if self.kernel_phase_advance_phase_button is not None:
+            self.kernel_phase_advance_phase_button.config(state=(tk.NORMAL if can_advance_phase else tk.DISABLED))
+        if self.kernel_phase_regress_phase_button is not None:
+            self.kernel_phase_regress_phase_button.config(state=(tk.NORMAL if can_regress_phase else tk.DISABLED))
+
+    def _schedule_kernel_phase_controls_refresh(self) -> None:
+        if not hasattr(self, 'root'):
+            return
+        if self._kernel_phase_controls_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._kernel_phase_controls_refresh_after_id)
+            except Exception:
+                pass
+        self._kernel_phase_controls_refresh_after_id = self.root.after(0, self._run_kernel_phase_controls_refresh)
+
+    def _run_kernel_phase_controls_refresh(self) -> None:
+        self._kernel_phase_controls_refresh_after_id = None
+        self._refresh_kernel_phase_toggle_controls()
+
+    def _on_kernel_phase_toggle(self, phase_id: str) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        phase_key = str(phase_id or '').strip()
+        if not phase_key:
+            return
+        var = self.kernel_phase_toggle_vars.get(phase_key)
+        if var is None:
+            return
+        should_enable = bool(var.get())
+        disabled = set(self.kernel_phase_disable_list)
+        if should_enable:
+            disabled.discard(phase_key)
+        else:
+            disabled.add(phase_key)
+        self._apply_kernel_phase_disable_list(tuple(disabled), persist=True, refresh_controls=True)
+        if hasattr(self, 'governance_orchestrator'):
+            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_toggle', payload={'phase_id': phase_key, 'enabled': int(should_enable), 'disabled_phases': list(self.kernel_phase_disable_list)})
+        state_text = 'enabled' if should_enable else 'disabled'
+        self.status_var.set(f'Kernel phase {phase_key} {state_text}')
+
+    def _handle_kernel_phase_manual_transition(self, *, action: str, transition: object | None) -> None:
+        self._schedule_kernel_phase_controls_refresh()
+        self._schedule_micro_progress_header_update(announce_transition=False)
+        if transition is None:
+            self.status_var.set('Kernel phase manual control: no change')
+            return
+        self._save_window_geometry()
+        if hasattr(self, 'governance_orchestrator'):
+            try:
+                self.governance_orchestrator.record_runtime_event(
+                    kind='adaptive_phase_manual_transition',
+                    payload={
+                        'action': str(action),
+                        'phase_id': str(getattr(transition, 'phase_id', '') or ''),
+                        'from_micro': int(getattr(transition, 'from_micro', 0) or 0),
+                        'to_micro': int(getattr(transition, 'to_micro', 0) or 0),
+                        'completed_phase': int(getattr(transition, 'completed_phase', 0) or 0),
+                        'reason': str(getattr(transition, 'reason', '') or ''),
+                        'disabled_phases': list(self.kernel_phase_disable_list),
+                    },
+                )
+            except Exception:
+                pass
+        phase_id = str(getattr(transition, 'phase_id', '') or '')
+        from_micro = int(getattr(transition, 'from_micro', 0) or 0)
+        to_micro = int(getattr(transition, 'to_micro', 0) or 0)
+        completed_phase = bool(getattr(transition, 'completed_phase', 0))
+        completion_suffix = ' (phase complete)' if completed_phase else ''
+        self.status_var.set(f'Kernel phase {action}: {phase_id} {from_micro}->{to_micro}{completion_suffix}')
+
+    def _on_kernel_phase_advance_micro(self) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        transition = self.kernel_phase_program.manual_advance_micro()
+        self._handle_kernel_phase_manual_transition(action='advance_micro', transition=transition)
+
+    def _on_kernel_phase_regress_micro(self) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        transition = self.kernel_phase_program.manual_regress_micro()
+        self._handle_kernel_phase_manual_transition(action='regress_micro', transition=transition)
+
+    def _on_kernel_phase_advance_phase(self) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        transition = self.kernel_phase_program.manual_advance_phase()
+        self._handle_kernel_phase_manual_transition(action='advance_phase', transition=transition)
+
+    def _on_kernel_phase_regress_phase(self) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        transition = self.kernel_phase_program.manual_regress_phase()
+        self._handle_kernel_phase_manual_transition(action='regress_phase', transition=transition)
 
     def _effective_training_phase_level(self) -> int:
         if not self.training_phase_enable:
@@ -1782,13 +2094,59 @@ class AIAssistantApp:
         self.runtime_batch_micro_label = f'progress={round(progress, 3)} ramp={round(ramp, 3)} micro={self._micro_progress_series_label()} hard_bonus={self.runtime_batch_micro_hard_phase_bonus} objective_bonus={self.runtime_batch_micro_objective_phase_bonus} assist={round(effective_reliance, 3)} guard_scale={round(guard_strength_scale, 3)} stuck_np+={self.runtime_batch_micro_stuck_no_progress_bonus} stuck_r+={self.runtime_batch_micro_stuck_repeat_bonus} objective_unresolved+={self.runtime_batch_micro_objective_unresolved_bonus} cycle_margin_scale={round(cycle_avoid_margin_scale, 3)}'
         self._schedule_micro_progress_header_update(announce_transition=stage_changed)
 
-    def _observe_learned_autonomy_step(self, *, telemetry_channel: str, intervention_types: list[str], unresolved_objective_override: bool) -> None:
-        if not self.learned_autonomy_subphase_enable:
+    def _observe_learned_autonomy_step(self, *, telemetry_channel: str, intervention_types: list[str], unresolved_objective_override: bool, progress_delta: int=0, reward_signal: float=0.0, penalty_signal: float=0.0) -> None:
+        if self.learned_autonomy_subphase_enable:
+            transition_event = self.learned_autonomy_controller.observe_step(telemetry_channel=str(telemetry_channel or 'unknown'), intervention_applied=bool(intervention_types), utility_anchor=float(self.guard_utility_ema), unresolved_objective_override=bool(unresolved_objective_override))
+            self._refresh_learned_autonomy_subphase_state()
+            if transition_event is not None:
+                self.governance_orchestrator.record_autonomy_transition(transition_event)
+        self._observe_kernel_phase_program_step(telemetry_channel=str(telemetry_channel or 'unknown'), intervention_types=list(intervention_types or ()), unresolved_objective_override=bool(unresolved_objective_override), progress_delta=int(progress_delta), reward_signal=float(reward_signal), penalty_signal=float(penalty_signal))
+
+    def _observe_kernel_phase_program_step(self, *, telemetry_channel: str, intervention_types: list[str], unresolved_objective_override: bool, progress_delta: int, reward_signal: float, penalty_signal: float) -> None:
+        if not self.kernel_phase_program_enable:
             return
-        transition_event = self.learned_autonomy_controller.observe_step(telemetry_channel=str(telemetry_channel or 'unknown'), intervention_applied=bool(intervention_types), utility_anchor=float(self.guard_utility_ema), unresolved_objective_override=bool(unresolved_objective_override))
-        self._refresh_learned_autonomy_subphase_state()
-        if transition_event is not None:
-            self.governance_orchestrator.record_autonomy_transition(transition_event)
+        if self.kernel_phase_program is None:
+            return
+        active_target = self.kernel_phase_program.current_active_target()
+        if active_target is None:
+            return
+        phase_id, _ = active_target
+        autonomy_snapshot = self.learned_autonomy_controller.snapshot() if self.learned_autonomy_subphase_enable else {}
+        reasoning_snapshot = self._parallel_reasoning_snapshot() if self.parallel_reasoning_enable else {}
+        utility_anchor = max(0.0, min(1.0, float(getattr(self, 'guard_utility_ema', 0.5) or 0.5)))
+        intervention_ema = max(0.0, min(1.0, float(getattr(self, 'guard_intervention_ema', 0.0) or 0.0)))
+        learned_score = max(0.0, min(1.0, float(autonomy_snapshot.get('score_ema', utility_anchor))))
+        learned_only = max(0.0, min(1.0, float(autonomy_snapshot.get('learned_only_ema', learned_score))))
+        channel_signal = {'learned_only': 1.0, 'mixed': 0.66, 'hardcoded_only': 0.34}.get(str(telemetry_channel or 'unknown'), 0.5)
+        progress_norm = max(-1.0, min(1.0, float(progress_delta)))
+        progress_signal = max(0.0, min(1.0, 0.5 + (0.5 * progress_norm)))
+        reward_norm = max(0.0, min(1.0, float(reward_signal) / 200.0))
+        penalty_norm = max(0.0, min(1.0, float(penalty_signal) / 260.0))
+        unresolved_signal = 1.0 if unresolved_objective_override else 0.0
+        intervention_flag = 1.0 if intervention_types else 0.0
+        reasoning_conf = max(0.0, min(1.0, float(reasoning_snapshot.get('last_confidence', 0.0))))
+        reasoning_margin = max(0.0, min(1.0, 0.5 + (0.5 * float(reasoning_snapshot.get('last_confidence_margin', 0.0)))))
+
+        train_quality = max(0.0, min(1.0, (0.55 * learned_score) + (0.25 * learned_only) + (0.20 * progress_signal)))
+        integration_quality = max(0.0, min(1.0, (0.60 * utility_anchor) + (0.25 * (1.0 - intervention_ema)) + (0.15 * channel_signal)))
+        stability = max(0.0, min(1.0, (0.55 * utility_anchor) + (0.30 * (1.0 - penalty_norm)) + (0.15 * (1.0 - unresolved_signal))))
+        transfer = max(0.0, min(1.0, (0.55 * progress_signal) + (0.25 * reward_norm) + (0.20 * channel_signal)))
+        safety = max(0.0, min(1.0, (0.65 * (1.0 - penalty_norm)) + (0.20 * (1.0 - unresolved_signal)) + (0.15 * (1.0 - intervention_flag))))
+        introspection_gain = max(0.0, min(1.0, (0.65 * reasoning_conf) + (0.35 * reasoning_margin)))
+
+        transition = self.kernel_phase_program.observe_micro_metrics(phase_id, train_quality=train_quality, integration_quality=integration_quality, stability=stability, transfer=transfer, safety=safety, introspection_gain=introspection_gain)
+        current_target = self.kernel_phase_program.current_active_target()
+        target_label = f'{current_target[0]}::{current_target[1]}' if current_target else 'complete'
+        if target_label != self.kernel_phase_last_target:
+            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_target', payload={'target': target_label, 'disabled_phases': list(self.kernel_phase_disable_list), 'completed_micro_total': int(self.kernel_phase_program.snapshot().get('completed_micro_total', 0))})
+            self.kernel_phase_last_target = target_label
+            self._schedule_kernel_phase_controls_refresh()
+            self._schedule_micro_progress_header_update(announce_transition=False)
+        if transition is not None:
+            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_transition', payload={'phase_id': transition.phase_id, 'from_micro': int(transition.from_micro), 'to_micro': int(transition.to_micro), 'completed_phase': int(transition.completed_phase), 'reason': transition.reason})
+            self._schedule_kernel_phase_controls_refresh()
+            self._schedule_micro_progress_header_update(announce_transition=True)
+            self._save_window_geometry()
 
     def _parallel_reasoning_snapshot(self) -> dict[str, float | int]:
         if not self.parallel_reasoning_enable:
@@ -1804,6 +2162,10 @@ class AIAssistantApp:
 
     def _unified_introspection_snapshot(self) -> dict[str, object]:
         autonomy = self.learned_autonomy_controller.snapshot() if self.learned_autonomy_subphase_enable else {}
+        if self.kernel_phase_program_enable and self.kernel_phase_program is not None:
+            autonomy = dict(autonomy)
+            autonomy['adaptive_phase_program'] = self.kernel_phase_program.snapshot()
+            autonomy['adaptive_phase_disabled'] = list(self.kernel_phase_disable_list)
         reasoning = self._parallel_reasoning_snapshot() if self.parallel_reasoning_enable else {}
         return self.governance_orchestrator.introspection_snapshot(autonomy=autonomy, reasoning=reasoning)
 
@@ -5871,7 +6233,7 @@ class AIAssistantApp:
             step_telemetry_channel = _phase1_channel(step_memory_event, step_intervention_types)
             unresolved_objective_override_active = bool(maze_mode and 'objective_override' in step_intervention_types and (locals().get('_unknown_now', 0) > 0 or locals().get('_frontier_now', 0) > 0))
             self._update_adaptive_guard_learning(guard_override=guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
-            self._observe_learned_autonomy_step(telemetry_channel=step_telemetry_channel, intervention_types=step_intervention_types, unresolved_objective_override=unresolved_objective_override_active)
+            self._observe_learned_autonomy_step(telemetry_channel=step_telemetry_channel, intervention_types=step_intervention_types, unresolved_objective_override=unresolved_objective_override_active, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
             step_logs.append(f"step={iterations} proposal_source={evaluation.get('proposal_source', 'model')} proposed={proposed_move or '(none)'} selected={selected_move} approved={evaluation['approved']} gets_closer={evaluation['gets_closer']} kernel_move_used={fallback_used} guard_override={guard_override} pattern_name={evaluation.get('pattern_name', '') or '(none)'} memory_event={evaluation.get('memory_event', '') or 'memory:unknown'} distance_before={('hidden' if maze_mode else current_distance)} distance_after={('hidden' if maze_mode else selected_distance)} reason={step_reason_text} projection_score_delta={projection_score_delta_log} projection_score_delta_scaled={round(projection_score_delta_scaled_log, 3)} projection_score_delta_clipped={projection_score_delta_clipped_log} projection_forward_bonus={projection_forward_bonus_log} projection_backward_penalty={projection_backward_penalty_log} projection_backward_escape_bonus={projection_backward_escape_bonus_log} projection_score_influence_scale={round(projection_score_influence_scale_log, 3)} projection_trust_scale={round(self._projection_trust_scale(), 3)} projection_trust_score_ema={round(float(self.projection_trust_score_ema), 3)} terminal_guidance_pressure={round(terminal_guidance_pressure_log, 3)} terminal_trust_scale={round(self._terminal_risk_trust_scale(), 3)} terminal_trust_score_ema={round(float(self.terminal_trust_score_ema), 3)} terminal_hard_avoid_active={(1 if self._terminal_hard_avoid_active() else 0)} terminal_filtered={(1 if self._terminal_hard_filter_applied_last else 0)} {_phase1_telemetry_fields(step_memory_event, step_reason_text, guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, decision_score=telemetry_decision_score)} {('[MV-PREPLAN: ' + mv_preplan_note + ']' if mv_preplan_note else '')}".strip())
             if maze_mode:
                 recent_objective_routing_flags.append(1 if objective_routing_step else 0)
@@ -5983,6 +6345,17 @@ class AIAssistantApp:
                     self._apply_fast_mode_profile(True, sync_var=True, persist=False)
                 elif parsed_text in {'0', 'false', 'no', 'off'}:
                     self._apply_fast_mode_profile(False, sync_var=True, persist=False)
+            saved_long_run_mode = payload.get('long_run_mode_enabled')
+            if isinstance(saved_long_run_mode, bool):
+                self._apply_long_run_mode_profile(saved_long_run_mode, sync_var=True, persist=False)
+            elif isinstance(saved_long_run_mode, (int, float)):
+                self._apply_long_run_mode_profile(bool(saved_long_run_mode), sync_var=True, persist=False)
+            elif isinstance(saved_long_run_mode, str):
+                parsed_text = saved_long_run_mode.strip().lower()
+                if parsed_text in {'1', 'true', 'yes', 'on'}:
+                    self._apply_long_run_mode_profile(True, sync_var=True, persist=False)
+                elif parsed_text in {'0', 'false', 'no', 'off'}:
+                    self._apply_long_run_mode_profile(False, sync_var=True, persist=False)
             saved_challenge_mode = payload.get('challenge_mode_enabled')
             if isinstance(saved_challenge_mode, bool):
                 self._apply_challenge_mode_profile(saved_challenge_mode, sync_var=True, persist=False, randomize_on_enable=False)
@@ -5994,6 +6367,21 @@ class AIAssistantApp:
                     self._apply_challenge_mode_profile(True, sync_var=True, persist=False, randomize_on_enable=False)
                 elif parsed_text in {'0', 'false', 'no', 'off'}:
                     self._apply_challenge_mode_profile(False, sync_var=True, persist=False, randomize_on_enable=False)
+            if 'kernel_phase_disabled' in payload:
+                saved_kernel_phase_disabled = payload.get('kernel_phase_disabled')
+                parsed_kernel_phase_disabled: list[str] = []
+                if isinstance(saved_kernel_phase_disabled, list):
+                    parsed_kernel_phase_disabled = [str(token).strip() for token in saved_kernel_phase_disabled if str(token).strip()]
+                elif isinstance(saved_kernel_phase_disabled, str):
+                    parsed_kernel_phase_disabled = [token.strip() for token in saved_kernel_phase_disabled.split(',') if token.strip()]
+                self._apply_kernel_phase_disable_list(tuple(parsed_kernel_phase_disabled), persist=False, refresh_controls=True)
+            if self.kernel_phase_program_enable and self.kernel_phase_program is not None:
+                saved_kernel_phase_state = payload.get('kernel_phase_program_state')
+                if isinstance(saved_kernel_phase_state, dict):
+                    restored = self.kernel_phase_program.restore_snapshot(saved_kernel_phase_state)
+                    if restored:
+                        self._schedule_kernel_phase_controls_refresh()
+                        self._schedule_micro_progress_header_update(announce_transition=False)
             self._sync_machine_vision_toggle_controls()
             self._on_layout_settings_changed()
             saved_sash = payload.get('pane_sash_x')
@@ -6069,7 +6457,11 @@ class AIAssistantApp:
             payload['mv_route_planning_mode_enable'] = bool(self.mv_route_planning_mode_enable)
             payload['machine_vision_master_enable'] = bool(self.machine_vision_master_enable)
             payload['fast_mode_enabled'] = bool(self.fast_mode_enabled)
+            payload['long_run_mode_enabled'] = bool(getattr(self, 'long_run_mode_enabled', False))
             payload['challenge_mode_enabled'] = bool(self.challenge_mode_enabled)
+            payload['kernel_phase_disabled'] = list(self.kernel_phase_disable_list)
+            if self.kernel_phase_program_enable and self.kernel_phase_program is not None:
+                payload['kernel_phase_program_state'] = self.kernel_phase_program.snapshot()
             payload['micro_progress_persisted_series_value'] = round(float(self.micro_progress_persisted_series_value), 6)
             payload['micro_progress_batch_quality_ema'] = round(float(getattr(self, 'micro_progress_batch_quality_ema', 1.0) or 1.0), 6)
             payload['micro_progress_regression_fail_streak'] = int(getattr(self, 'micro_progress_regression_fail_streak', 0) or 0)
@@ -12926,6 +13318,64 @@ class AIAssistantApp:
             self.status_var.set('Fast mode enabled (lower UI delay + reduced sleep-cycle and telemetry overhead)')
         else:
             self.status_var.set('Fast mode disabled (restored normal timing, sleep-cycle, and telemetry behavior)')
+
+    def _detect_long_run_mode_active(self) -> bool:
+        if int(self.memory_viewer_refresh_interval_steps) < int(self.long_run_memory_viewer_refresh_interval_steps):
+            return False
+        if int(self.structural_memory_snapshot_interval_steps) < int(self.long_run_structural_memory_snapshot_interval_steps):
+            return False
+        if int(self.layout_cell_snapshot_interval_steps) < int(self.long_run_layout_cell_snapshot_interval_steps):
+            return False
+        if int(self.adaptive_save_interval_steps) < int(self.long_run_adaptive_save_interval_steps):
+            return False
+        if self.adaptive_progress_report_enable and int(self.adaptive_progress_report_interval_steps) < int(self.long_run_adaptive_progress_report_interval_steps):
+            return False
+        if int(self.step_hygiene_interval_steps) < int(self.long_run_step_hygiene_interval_steps):
+            return False
+        if int(self.step_hygiene_full_gc_interval_steps) < int(self.long_run_step_hygiene_full_gc_interval_steps):
+            return False
+        if int(self.stm_pruning_interval_steps) < int(self.long_run_stm_pruning_interval_steps):
+            return False
+        if int(self.cause_effect_pruning_interval_steps) < int(self.long_run_cause_effect_pruning_interval_steps):
+            return False
+        return True
+
+    def _apply_long_run_mode_profile(self, enabled: bool, *, sync_var: bool=True, persist: bool=True) -> None:
+        enabled_flag = bool(enabled)
+        if enabled_flag:
+            self.memory_viewer_refresh_interval_steps = max(int(self.memory_viewer_refresh_interval_steps), int(self.long_run_memory_viewer_refresh_interval_steps))
+            self.structural_memory_snapshot_interval_steps = max(int(self.structural_memory_snapshot_interval_steps), int(self.long_run_structural_memory_snapshot_interval_steps))
+            self.layout_cell_snapshot_interval_steps = max(int(self.layout_cell_snapshot_interval_steps), int(self.long_run_layout_cell_snapshot_interval_steps))
+            self.adaptive_save_interval_steps = max(int(self.adaptive_save_interval_steps), int(self.long_run_adaptive_save_interval_steps))
+            self.adaptive_progress_report_interval_steps = max(int(self.adaptive_progress_report_interval_steps), int(self.long_run_adaptive_progress_report_interval_steps))
+            self.step_hygiene_interval_steps = max(int(self.step_hygiene_interval_steps), int(self.long_run_step_hygiene_interval_steps))
+            self.step_hygiene_full_gc_interval_steps = max(int(self.step_hygiene_full_gc_interval_steps), int(self.long_run_step_hygiene_full_gc_interval_steps))
+            self.stm_pruning_interval_steps = max(int(self.stm_pruning_interval_steps), int(self.long_run_stm_pruning_interval_steps))
+            self.cause_effect_pruning_interval_steps = max(int(self.cause_effect_pruning_interval_steps), int(self.long_run_cause_effect_pruning_interval_steps))
+        else:
+            self.memory_viewer_refresh_interval_steps = int(self.normal_mode_memory_viewer_refresh_interval_steps)
+            self.structural_memory_snapshot_interval_steps = int(self.normal_mode_structural_memory_snapshot_interval_steps)
+            self.layout_cell_snapshot_interval_steps = int(self.normal_mode_layout_cell_snapshot_interval_steps)
+            self.adaptive_save_interval_steps = int(self.normal_mode_adaptive_save_interval_steps)
+            self.adaptive_progress_report_interval_steps = int(self.normal_mode_adaptive_progress_report_interval_steps)
+            self.step_hygiene_interval_steps = int(self.normal_mode_step_hygiene_interval_steps)
+            self.step_hygiene_full_gc_interval_steps = int(self.normal_mode_step_hygiene_full_gc_interval_steps)
+            self.stm_pruning_interval_steps = int(self.normal_mode_stm_pruning_interval_steps)
+            self.cause_effect_pruning_interval_steps = int(self.normal_mode_cause_effect_pruning_interval_steps)
+        self.long_run_mode_enabled = enabled_flag
+        if sync_var and hasattr(self, 'long_run_mode_enabled_var'):
+            if bool(self.long_run_mode_enabled_var.get()) != enabled_flag:
+                self.long_run_mode_enabled_var.set(enabled_flag)
+        if persist:
+            self._save_window_geometry()
+
+    def _on_long_run_mode_toggled(self) -> None:
+        enabled = bool(self.long_run_mode_enabled_var.get())
+        self._apply_long_run_mode_profile(enabled, sync_var=False, persist=True)
+        if enabled:
+            self.status_var.set('Long-run mode enabled (lower non-kernel churn via slower maintenance/telemetry/storage cadence)')
+        else:
+            self.status_var.set('Long-run mode disabled (restored normal maintenance/telemetry/storage cadence)')
 
     def _challenge_prompt_text(self) -> str:
         run_length = max(1, min(self.max_repeat_executions, int(getattr(self, 'challenge_mode_run_length', 25))))

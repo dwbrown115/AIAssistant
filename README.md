@@ -507,6 +507,18 @@ STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS=6
 STRUCTURAL_MEMORY_MAX_ROWS=12000
 # Optional: minimum movement-step gap for automatic Memory Viewer refreshes.
 MEMORY_VIEWER_REFRESH_INTERVAL_STEPS=8
+# Optional: long-run efficiency profile (non-kernel cadence tuning only).
+# `LONG_RUN_MODE_DEFAULT_ON=1` starts app with Long-Run Mode enabled.
+LONG_RUN_MODE_DEFAULT_ON=0
+LONG_RUN_MEMORY_VIEWER_REFRESH_INTERVAL_STEPS=20
+LONG_RUN_STRUCTURAL_MEMORY_SNAPSHOT_INTERVAL_STEPS=14
+LONG_RUN_LAYOUT_CELL_SNAPSHOT_INTERVAL_STEPS=24
+LONG_RUN_ADAPTIVE_SAVE_INTERVAL_STEPS=240
+LONG_RUN_ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS=600
+LONG_RUN_STEP_HYGIENE_INTERVAL_STEPS=36
+LONG_RUN_STEP_HYGIENE_FULL_GC_INTERVAL_STEPS=300
+LONG_RUN_STM_PRUNING_INTERVAL_STEPS=8
+LONG_RUN_CAUSE_EFFECT_PRUNING_INTERVAL_STEPS=16
 # Optional: sleep-cycle maintenance for long runs (prune/compress + usage reinforcement).
 SLEEP_CYCLE_ENABLE=1
 # Optional: run automatic sleep cycle every N movement steps (0 disables periodic auto cycle).
@@ -769,6 +781,7 @@ This opens a dedicated app window.
 
 UI quality-of-life:
 - Window size and position are persisted between launches.
+- Kernel phase-program progression state (active micro/phase, EMA metrics, and completed status) is persisted between launches.
 - Use `Copy Output` to copy prompt + response + pipeline debug to clipboard.
 
 Ambiguity tuning:
@@ -785,6 +798,7 @@ Game controls:
 - In maze mode, use `Difficulty` (`easy`/`medium`/`hard`/`very hard`) for predictable algorithmic layouts.
 - Use `MV Enable` to turn machine vision on/off at runtime (disables MV localization/hints/preplan/overlays/routing when off, and clears MV Route Mode).
 - Use `Fast Mode` to temporarily speed up run throughput (lower move/look delays and reduced telemetry/auto-maintenance overhead) and toggle back to restore normal timing/maintenance behavior.
+- Use `Long-Run Mode` to reduce long-session overhead by slowing non-kernel maintenance/telemetry/storage cadence while preserving planner/kernel behavior.
 - Challenge profile behavior can be configured via `.env` (`CHALLENGE_MODE_*` settings).
 - Intra-batch micro progression can be configured via `.env` (`MAZE_BATCH_MICRO_PROGRESSION_*` settings) to gradually tighten challenge within a single run set; optional persistence/quality gates (`MAZE_MICRO_PROGRESSION_PERSIST_*`) can require stricter whole-batch quality before promotion, and regression controls (`MAZE_MICRO_PROGRESSION_REGRESSION_*`) can step progression down after repeated underperformance (for example `6.0 -> 5.9`).
 - Mode and Difficulty switching is app-based and persisted between launches.

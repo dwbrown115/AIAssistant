@@ -164,6 +164,16 @@ def build_ui(app: object) -> None:
         anchor="w",
     ).pack(side=tk.LEFT)
 
+    tk.Checkbutton(
+        toggle_row,
+        text="Long-Run Mode",
+        variable=app.long_run_mode_enabled_var,
+        command=app._on_long_run_mode_toggled,
+        anchor="w",
+    ).pack(side=tk.LEFT, padx=(8, 0))
+
+    app._build_kernel_phase_toggle_panel(runtime_controls)
+
     action_row = tk.Frame(runtime_controls)
     action_row.pack(fill=tk.X)
     tk.Label(action_row, text="Actions").pack(side=tk.LEFT)
