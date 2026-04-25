@@ -371,6 +371,8 @@ class AIAssistantApp:
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
         self.kernel_phase_program_status_var = tk.StringVar(value='Kernel phase program: disabled')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
+        self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
+        self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
         self.kernel_phase_toggle_vars: dict[str, tk.BooleanVar] = {}
         self.kernel_phase_toggle_buttons: dict[str, tk.Checkbutton] = {}
         self.kernel_phase_advance_micro_button = None
@@ -769,6 +771,17 @@ class AIAssistantApp:
         self.maze_agent_corridor_forward_bias = max(0.0, float(os.getenv('MAZE_AGENT_CORRIDOR_FORWARD_BIAS', '1.2')))
         self.maze_agent_side_open_bias = max(0.0, float(os.getenv('MAZE_AGENT_SIDE_OPEN_BIAS', '0.8')))
         self.maze_agent = self._build_maze_agent()
+        self.kernel_phase_force_safety_core_enable = os.getenv('KERNEL_PHASE_FORCE_SAFETY_CORE_ENABLE', '1') == '1'
+        self.kernel_phase_module_base_enable = {
+            'learned_autonomy_controller': bool(self.learned_autonomy_subphase_enable),
+            'parallel_reasoning_engine': bool(self.parallel_reasoning_enable),
+            'adaptive_controller': bool(self.adaptive_controller_enable),
+            'organism_control': bool(self.organism_control_enable),
+            'maze_agent': bool(self.maze_agent_enable),
+            'governance_orchestrator': bool(getattr(self.governance_orchestrator, 'enabled', False)),
+        }
+        self.kernel_phase_runtime_module_signature: tuple[str, int, int, int, int, int, int] | None = None
+        self._apply_kernel_phase_runtime_integration()
         self.bio_nav_enable = os.getenv('BIO_NAV_ENABLE', '1') == '1'
         self.bio_nav_opening_weight = max(0, int(os.getenv('BIO_NAV_OPENING_WEIGHT', '18')))
         self.bio_nav_dead_end_escape_weight = max(0, int(os.getenv('BIO_NAV_DEAD_END_ESCAPE_WEIGHT', '24')))
@@ -1614,6 +1627,8 @@ class AIAssistantApp:
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
         tk.Label(panel, textvariable=self.kernel_phase_program_current_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
+        tk.Label(panel, textvariable=self.kernel_phase_program_details_var, anchor='w', justify=tk.LEFT, wraplength=560).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
+        tk.Label(panel, textvariable=self.kernel_phase_program_modules_var, anchor='w', justify=tk.LEFT, wraplength=560).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
         controls_row = tk.Frame(panel)
         controls_row.pack(fill=tk.X, pady=(0, 4))
         tk.Label(controls_row, text='Manual').pack(side=tk.LEFT)
@@ -1633,6 +1648,8 @@ class AIAssistantApp:
             tk.Label(toggle_grid, text='Kernel phase program disabled').pack(anchor='w')
             self.kernel_phase_program_status_var.set('Kernel phase program: disabled')
             self.kernel_phase_program_current_var.set('Current: --')
+            self.kernel_phase_program_details_var.set('Stage: --')
+            self.kernel_phase_program_modules_var.set('Module targets: --')
             return
         for idx, spec in enumerate(self.kernel_phase_specs):
             phase_id = str(spec.phase_id)
@@ -1653,6 +1670,7 @@ class AIAssistantApp:
         self.kernel_phase_disable_list = ordered_disabled
         if self.kernel_phase_program is not None:
             self.kernel_phase_program.set_disabled_phase_ids(self.kernel_phase_disable_list)
+        self._apply_kernel_phase_runtime_integration()
         if refresh_controls:
             self._schedule_kernel_phase_controls_refresh()
             self._schedule_micro_progress_header_update(announce_transition=False)
@@ -1663,12 +1681,16 @@ class AIAssistantApp:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
             self.kernel_phase_program_status_var.set('Kernel phase program: disabled')
             self.kernel_phase_program_current_var.set('Current: --')
+            self.kernel_phase_program_details_var.set('Stage: --')
+            self.kernel_phase_program_modules_var.set('Module targets: --')
             return
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
             self.kernel_phase_program_status_var.set('Kernel phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
+            self.kernel_phase_program_details_var.set('Stage: --')
+            self.kernel_phase_program_modules_var.set('Module targets: --')
             return
         phase_map = {str(phase.get('phase_id', '')): phase for phase in phases}
         spec_map = {str(spec.phase_id): spec for spec in self.kernel_phase_specs}
@@ -1697,12 +1719,20 @@ class AIAssistantApp:
             is_reached = bool(is_completed or is_active or (active_index > 0 and idx < active_index) or (active_index <= 0 and completed_count >= idx))
             is_enabled = bool(phase_state.get('enabled', 1))
             label = str(spec.label)
+            micro_total = max(1, len(spec.micro_stages))
+            micro_state_index = int(phase_state.get('micro_index', 0) or 0)
+            if is_completed:
+                micro_position = f'{micro_total}/{micro_total}'
+            else:
+                micro_position = f'{max(1, min(micro_total, micro_state_index + 1))}/{micro_total}'
             if is_active:
-                label = f'{label} (active)'
+                label = f'{label} [{micro_position}] (active)'
             elif is_completed:
-                label = f'{label} (integrated)'
+                label = f'{label} [{micro_position}] (integrated)'
             elif not is_reached:
-                label = f'{label} (pending)'
+                label = f'{label} [{micro_position}] (pending)'
+            else:
+                label = f'{label} [{micro_position}]'
             button = self.kernel_phase_toggle_buttons.get(phase_id)
             var = self.kernel_phase_toggle_vars.get(phase_id)
             if var is not None:
@@ -1718,14 +1748,32 @@ class AIAssistantApp:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
             micro_position = '--/--'
+            micro_mode = '--'
+            objective_signals = '--'
+            module_targets = '--'
+            min_observations = '--'
+            observation_position = '--/--'
+            active_state = phase_map.get(active_phase_id, {})
+            active_observations = int(active_state.get('observations', 0) or 0)
             for micro_idx, micro_spec in enumerate(active_spec.micro_stages, start=1):
                 if str(micro_spec.stage_id) == active_micro_id:
                     micro_label = str(micro_spec.label)
                     micro_position = f'{micro_idx}/{len(active_spec.micro_stages)}'
+                    micro_mode = str(getattr(micro_spec, 'mode', '--') or '--')
+                    objective_values = tuple((str(signal).strip() for signal in tuple(getattr(micro_spec, 'objective_signals', ()) or ()) if str(signal).strip()))
+                    module_values = tuple((str(target).strip() for target in tuple(getattr(micro_spec, 'module_targets', ()) or ()) if str(target).strip()))
+                    objective_signals = ', '.join(objective_values) if objective_values else '--'
+                    module_targets = ', '.join(module_values) if module_values else '--'
+                    min_observations = str(int(getattr(micro_spec, 'min_observations', 0) or 0))
+                    observation_position = f"{active_observations}/{min_observations}"
                     break
             self.kernel_phase_program_current_var.set(f'Current: {active_spec.label} | {micro_label} ({micro_position})')
+            self.kernel_phase_program_details_var.set(f'Stage mode: {micro_mode} | objective signals: {objective_signals} | observations: {observation_position}')
+            self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets}')
         else:
             self.kernel_phase_program_current_var.set('Current: complete')
+            self.kernel_phase_program_details_var.set('Stage: complete')
+            self.kernel_phase_program_modules_var.set('Module targets: --')
 
         can_advance_phase = bool(active_phase_id)
         can_regress_phase = False
@@ -1790,6 +1838,7 @@ class AIAssistantApp:
         self.status_var.set(f'Kernel phase {phase_key} {state_text}')
 
     def _handle_kernel_phase_manual_transition(self, *, action: str, transition: object | None) -> None:
+        self._apply_kernel_phase_runtime_integration()
         self._schedule_kernel_phase_controls_refresh()
         self._schedule_micro_progress_header_update(announce_transition=False)
         if transition is None:
@@ -2103,6 +2152,292 @@ class AIAssistantApp:
                 self.governance_orchestrator.record_autonomy_transition(transition_event)
         self._observe_kernel_phase_program_step(telemetry_channel=str(telemetry_channel or 'unknown'), intervention_types=list(intervention_types or ()), unresolved_objective_override=bool(unresolved_objective_override), progress_delta=int(progress_delta), reward_signal=float(reward_signal), penalty_signal=float(penalty_signal))
 
+    def _kernel_phase_active_specs(self, phase_id: str, stage_id: str) -> tuple[object | None, object | None]:
+        phase_token = str(phase_id or '').strip()
+        stage_token = str(stage_id or '').strip()
+        active_phase_spec = None
+        active_micro_spec = None
+        for spec in tuple(getattr(self, 'kernel_phase_specs', ()) or ()):
+            if str(getattr(spec, 'phase_id', '')).strip() != phase_token:
+                continue
+            active_phase_spec = spec
+            for micro_spec in tuple(getattr(spec, 'micro_stages', ()) or ()):
+                if str(getattr(micro_spec, 'stage_id', '')).strip() == stage_token:
+                    active_micro_spec = micro_spec
+                    break
+            break
+        return (active_phase_spec, active_micro_spec)
+
+    def _kernel_phase_active_module_targets(self) -> tuple[str, ...]:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return ()
+        active_target = self.kernel_phase_program.current_active_target()
+        if active_target is None:
+            return ()
+        phase_id, stage_id = active_target
+        _, active_micro_spec = self._kernel_phase_active_specs(phase_id=phase_id, stage_id=stage_id)
+        if active_micro_spec is None:
+            return ()
+        tokens: list[str] = []
+        for module_name in tuple(getattr(active_micro_spec, 'module_targets', ()) or ()):
+            token = str(module_name or '').strip().lower()
+            if token:
+                tokens.append(token)
+        return tuple(dict.fromkeys(tokens))
+
+    def _kernel_phase_runtime_module_enabled(self, module_id: str, *, base_enabled: bool, active_targets: tuple[str, ...]) -> bool:
+        if not bool(base_enabled):
+            return False
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return True
+        if not active_targets:
+            return True
+        token = str(module_id or '').strip().lower()
+        if not token:
+            return True
+        if token == 'governance_orchestrator':
+            return True
+        if bool(getattr(self, 'kernel_phase_force_safety_core_enable', True)) and token in {'organism_control', 'maze_agent'}:
+            return True
+        return token in set(active_targets)
+
+    def _apply_kernel_phase_runtime_integration(self) -> None:
+        base_map = dict(getattr(self, 'kernel_phase_module_base_enable', {}) or {})
+        if not base_map:
+            base_map = {
+                'learned_autonomy_controller': bool(getattr(self, 'learned_autonomy_subphase_enable', False)),
+                'parallel_reasoning_engine': bool(getattr(self, 'parallel_reasoning_enable', False)),
+                'adaptive_controller': bool(getattr(self, 'adaptive_controller_enable', False)),
+                'organism_control': bool(getattr(self, 'organism_control_enable', False)),
+                'maze_agent': bool(getattr(self, 'maze_agent_enable', False)),
+                'governance_orchestrator': bool(getattr(getattr(self, 'governance_orchestrator', None), 'enabled', False)),
+            }
+            self.kernel_phase_module_base_enable = dict(base_map)
+
+        active_targets = self._kernel_phase_active_module_targets()
+        active_target = self.kernel_phase_program.current_active_target() if ((self.kernel_phase_program_enable) and (self.kernel_phase_program is not None)) else None
+        target_label = f'{active_target[0]}::{active_target[1]}' if active_target else ('complete' if self.kernel_phase_program_enable else 'disabled')
+
+        desired_states = {
+            'learned_autonomy_controller': self._kernel_phase_runtime_module_enabled('learned_autonomy_controller', base_enabled=bool(base_map.get('learned_autonomy_controller', False)), active_targets=active_targets),
+            'parallel_reasoning_engine': self._kernel_phase_runtime_module_enabled('parallel_reasoning_engine', base_enabled=bool(base_map.get('parallel_reasoning_engine', False)), active_targets=active_targets),
+            'adaptive_controller': self._kernel_phase_runtime_module_enabled('adaptive_controller', base_enabled=bool(base_map.get('adaptive_controller', False)), active_targets=active_targets),
+            'organism_control': self._kernel_phase_runtime_module_enabled('organism_control', base_enabled=bool(base_map.get('organism_control', False)), active_targets=active_targets),
+            'maze_agent': self._kernel_phase_runtime_module_enabled('maze_agent', base_enabled=bool(base_map.get('maze_agent', False)), active_targets=active_targets),
+            'governance_orchestrator': self._kernel_phase_runtime_module_enabled('governance_orchestrator', base_enabled=bool(base_map.get('governance_orchestrator', False)), active_targets=active_targets),
+        }
+
+        signature = (
+            str(target_label),
+            int(desired_states['learned_autonomy_controller']),
+            int(desired_states['parallel_reasoning_engine']),
+            int(desired_states['adaptive_controller']),
+            int(desired_states['organism_control']),
+            int(desired_states['maze_agent']),
+            int(desired_states['governance_orchestrator']),
+        )
+        if signature == getattr(self, 'kernel_phase_runtime_module_signature', None):
+            return
+
+        previous_states = {
+            'learned_autonomy_controller': bool(getattr(self, 'learned_autonomy_subphase_enable', False)),
+            'parallel_reasoning_engine': bool(getattr(self, 'parallel_reasoning_enable', False)),
+            'adaptive_controller': bool(getattr(self, 'adaptive_controller_enable', False)),
+            'organism_control': bool(getattr(self, 'organism_control_enable', False)),
+            'maze_agent': bool(getattr(self, 'maze_agent_enable', False)),
+            'governance_orchestrator': bool(getattr(getattr(self, 'governance_orchestrator', None), 'enabled', False)),
+        }
+
+        self.learned_autonomy_subphase_enable = bool(desired_states['learned_autonomy_controller'])
+        if getattr(self, 'learned_autonomy_controller', None) is not None:
+            self.learned_autonomy_controller.enabled = bool(desired_states['learned_autonomy_controller'])
+        self.parallel_reasoning_enable = bool(desired_states['parallel_reasoning_engine'])
+        if getattr(self, 'parallel_reasoning_engine', None) is not None:
+            self.parallel_reasoning_engine.enabled = bool(desired_states['parallel_reasoning_engine'])
+        self.adaptive_controller_enable = bool(desired_states['adaptive_controller'])
+        self.organism_control_enable = bool(desired_states['organism_control'])
+        self.maze_agent_enable = bool(desired_states['maze_agent'])
+        if getattr(self, 'governance_orchestrator', None) is not None:
+            self.governance_orchestrator.enabled = bool(desired_states['governance_orchestrator'])
+
+        self._refresh_learned_autonomy_subphase_state()
+        self.kernel_phase_runtime_module_signature = signature
+
+        if getattr(self, 'governance_orchestrator', None) is not None and self.governance_orchestrator.enabled:
+            changed = any((desired_states[key] != previous_states.get(key, False) for key in desired_states.keys()))
+            if changed:
+                self.governance_orchestrator.record_runtime_event(
+                    kind='adaptive_phase_module_activation',
+                    payload={
+                        'target': str(target_label),
+                        'module_targets': list(active_targets),
+                        'module_states': {key: int(value) for key, value in desired_states.items()},
+                    },
+                )
+
+    def _kernel_phase_module_metrics(self, *, module_targets: tuple[str, ...], telemetry_channel: str) -> dict[str, float]:
+        def _clip(value: object, lower: float=0.0, upper: float=1.0) -> float:
+            try:
+                numeric = float(value)
+            except Exception:
+                numeric = lower
+            if numeric < lower:
+                return lower
+            if numeric > upper:
+                return upper
+            return numeric
+
+        def _add(metrics: list[dict[str, float]], *, train: float, integrate: float, stability: float, transfer: float, safety: float, introspection: float) -> None:
+            metrics.append({'train_quality': _clip(train), 'integration_quality': _clip(integrate), 'stability': _clip(stability), 'transfer': _clip(transfer), 'safety': _clip(safety), 'introspection_gain': _clip(introspection)})
+
+        contributions: list[dict[str, float]] = []
+        for module_name in tuple(module_targets or ()):
+            token = str(module_name or '').strip().lower()
+
+            if token == 'learned_autonomy_controller':
+                autonomy = self.learned_autonomy_controller.snapshot() if self.learned_autonomy_subphase_enable else {}
+                score = _clip(autonomy.get('score_ema', 0.5))
+                learned_only = _clip(autonomy.get('learned_only_ema', score))
+                intervention_ema = _clip(autonomy.get('intervention_ema', 0.5))
+                unresolved_ema = _clip(autonomy.get('unresolved_override_ema', 0.0))
+                autonomy_level = _clip(autonomy.get('autonomy_level', 0.5))
+                _add(contributions, train=score, integrate=(1.0 - intervention_ema), stability=(1.0 - unresolved_ema), transfer=learned_only, safety=(1.0 - unresolved_ema), introspection=autonomy_level)
+                continue
+
+            if token == 'parallel_reasoning_engine':
+                reasoning = self._parallel_reasoning_snapshot() if self.parallel_reasoning_enable else {}
+                confidence = _clip(reasoning.get('last_confidence', 0.0))
+                confidence_ema = _clip(reasoning.get('confidence_ema', confidence))
+                utility_ema = _clip(reasoning.get('utility_ema', 0.5))
+                trust_local = _clip(reasoning.get('plan_trust_local', 0.5))
+                trust_adaptive = _clip(reasoning.get('plan_trust_adaptive', 0.5))
+                trust_deliberative = _clip(reasoning.get('plan_trust_deliberative', 0.5))
+                trust_mean = _clip((trust_local + trust_adaptive + trust_deliberative) / 3.0)
+                conf_margin = _clip(0.5 + (0.5 * float(reasoning.get('last_confidence_margin', 0.0) or 0.0)))
+                _add(contributions, train=confidence_ema, integrate=utility_ema, stability=trust_mean, transfer=confidence, safety=((0.55 * trust_mean) + (0.45 * conf_margin)), introspection=conf_margin)
+                continue
+
+            if token == 'adaptive_controller':
+                if self.adaptive_controller_enable and self.adaptive_controller is not None:
+                    stats = self.adaptive_controller.stats()
+                    steps = max(0, int(stats.get('steps', 0) or 0))
+                    hidden = max(1, int(stats.get('hidden_units', 1) or 1))
+                    error_ema = _clip(stats.get('error_ema', 1.0))
+                    step_floor = max(24, int(getattr(self, 'adaptive_policy_min_steps', 120) or 120))
+                    step_ratio = _clip(float(steps) / float(max(step_floor, 120)))
+                    error_relief = _clip(1.0 - error_ema)
+                    hidden_ratio = _clip(float(hidden) / 96.0)
+                    policy_signal = 0.62
+                    if str(getattr(self, 'adaptive_policy_mode', 'hybrid')) == 'adaptive_first':
+                        policy_signal = 1.0 if steps >= step_floor else 0.72
+                    elif steps >= step_floor:
+                        policy_signal = 0.84
+                    _add(contributions, train=((0.6 * error_relief) + (0.4 * step_ratio)), integrate=((0.55 * step_ratio) + (0.45 * policy_signal)), stability=error_relief, transfer=step_ratio, safety=((0.65 * error_relief) + (0.35 * policy_signal)), introspection=((0.4 * hidden_ratio) + (0.6 * step_ratio)))
+                else:
+                    _add(contributions, train=0.35, integrate=0.35, stability=0.45, transfer=0.35, safety=0.5, introspection=0.35)
+                continue
+
+            if token == 'governance_orchestrator':
+                enabled = bool(getattr(self.governance_orchestrator, 'enabled', False))
+                capabilities = getattr(self.governance_orchestrator, 'capabilities', {})
+                audit_log = list(getattr(self.governance_orchestrator, 'audit_log', []))
+                recent = audit_log[-240:]
+                recent_total = max(1, len(recent))
+                event_density = _clip(float(len(recent)) / 120.0)
+                capability_density = _clip(float(len(capabilities)) / 8.0)
+                error_count = 0
+                runtime_count = 0
+                for row in recent:
+                    kind = str((row or {}).get('kind', '')).strip().lower() if isinstance(row, dict) else ''
+                    if kind == 'error':
+                        error_count += 1
+                    if kind.startswith('adaptive_phase_') or kind in {'runtime_event', 'action_outcome', 'autonomy_transition'}:
+                        runtime_count += 1
+                error_rate = _clip(float(error_count) / float(recent_total))
+                runtime_rate = _clip(float(runtime_count) / float(recent_total))
+                enabled_scale = 1.0 if enabled else 0.35
+                _add(contributions, train=enabled_scale * ((0.55 * capability_density) + (0.45 * event_density)), integrate=enabled_scale * ((0.6 * capability_density) + (0.4 * runtime_rate)), stability=enabled_scale * (1.0 - error_rate), transfer=enabled_scale * event_density, safety=enabled_scale * (1.0 - min(1.0, error_rate * 1.35)), introspection=enabled_scale * ((0.5 * runtime_rate) + (0.5 * event_density)))
+                continue
+
+            if token == 'organism_control':
+                enabled = bool(getattr(self, 'organism_control_enable', False))
+                loop_suspected = bool(getattr(getattr(self, 'organism_control_state', None), 'loop_suspected', False))
+                serotonin = _clip(getattr(getattr(self, 'organism_endocrine_state', None), 'serotonin', 0.5))
+                cortisol = _clip(getattr(getattr(self, 'organism_endocrine_state', None), 'cortisol', 0.5))
+                dopamine = _clip(getattr(getattr(self, 'organism_endocrine_state', None), 'dopamine', 0.5))
+                policy_token = str(getattr(getattr(self, 'organism_control_state', None), 'current_policy', '') or '').strip().lower()
+                policy_signal = 0.75 if policy_token else 0.45
+                stability_signal = 0.42 if loop_suspected else 0.82
+                _add(contributions, train=(0.7 if enabled else 0.3), integrate=((0.6 if enabled else 0.35) + (0.4 * policy_signal)), stability=stability_signal, transfer=((0.45 * serotonin) + (0.35 * dopamine) + (0.2 * policy_signal)), safety=((0.62 if enabled else 0.4) + (0.38 * (1.0 - cortisol))), introspection=((0.55 * policy_signal) + (0.45 * (1.0 - _clip(cortisol - dopamine, 0.0, 1.0)))))
+                continue
+
+            if token in {'maze_agent', 'maze_agent_controller'}:
+                enabled = bool(getattr(self, 'maze_agent_enable', False)) and (getattr(self, 'maze_agent', None) is not None)
+                controller_state = getattr(getattr(self, 'maze_agent', None), 'controller_state', None)
+                mode_token = str(getattr(controller_state, 'mode', '') or '').upper()
+                escape_pressure = 1.0 if 'ESCAPE' in mode_token else 0.0
+                step_pressure = _clip(float(getattr(self, 'episode_steps', 0) or 0) / 240.0)
+                _add(contributions, train=(0.68 if enabled else 0.3), integrate=((0.72 if enabled else 0.35) - (0.2 * escape_pressure)), stability=((0.78 if enabled else 0.42) - (0.35 * escape_pressure)), transfer=((0.65 if enabled else 0.35) + (0.2 * (1.0 - step_pressure))), safety=((0.74 if enabled else 0.45) - (0.2 * escape_pressure)), introspection=(0.78 if mode_token else 0.45))
+                continue
+
+        channel_baseline = {'learned_only': 0.72, 'mixed': 0.58, 'hardcoded_only': 0.42}.get(str(telemetry_channel or 'unknown'), 0.5)
+        if not contributions:
+            return {'train_quality': channel_baseline, 'integration_quality': channel_baseline, 'stability': channel_baseline, 'transfer': channel_baseline, 'safety': max(0.45, channel_baseline), 'introspection_gain': channel_baseline}
+
+        averaged: dict[str, float] = {'train_quality': 0.0, 'integration_quality': 0.0, 'stability': 0.0, 'transfer': 0.0, 'safety': 0.0, 'introspection_gain': 0.0}
+        for row in contributions:
+            for key in tuple(averaged.keys()):
+                averaged[key] += _clip(row.get(key, channel_baseline))
+        norm = float(len(contributions))
+        for key in tuple(averaged.keys()):
+            averaged[key] = _clip(averaged[key] / norm)
+        return averaged
+
+    def _kernel_phase_blend_metrics(self, *, base_metrics: dict[str, float], module_metrics: dict[str, float], micro_mode: str, objective_signals: tuple[str, ...]) -> dict[str, float]:
+        def _clip(value: object, lower: float=0.0, upper: float=1.0) -> float:
+            try:
+                numeric = float(value)
+            except Exception:
+                numeric = lower
+            if numeric < lower:
+                return lower
+            if numeric > upper:
+                return upper
+            return numeric
+
+        mode = str(micro_mode or '').strip().lower()
+        if 'control' in mode:
+            base_weight = 0.40
+            module_weight = 0.60
+        elif 'integrate' in mode:
+            base_weight = 0.48
+            module_weight = 0.52
+        elif 'train' in mode:
+            base_weight = 0.62
+            module_weight = 0.38
+        else:
+            base_weight = 0.55
+            module_weight = 0.45
+
+        objective_set = {str(signal or '').strip() for signal in tuple(objective_signals or ()) if str(signal or '').strip()}
+        supported_keys = ('train_quality', 'integration_quality', 'stability', 'transfer', 'safety', 'introspection_gain')
+        objective_values = [_clip(base_metrics.get(key, 0.5)) for key in objective_set if key in supported_keys]
+        objective_alignment = _clip(sum(objective_values) / float(len(objective_values))) if objective_values else 0.5
+
+        blended: dict[str, float] = {}
+        for key in supported_keys:
+            base_value = _clip(base_metrics.get(key, 0.5))
+            module_value = _clip(module_metrics.get(key, base_value))
+            value = _clip((base_weight * base_value) + (module_weight * module_value))
+            if key in objective_set:
+                value = _clip((0.82 * value) + (0.18 * objective_alignment))
+            if ('train' in mode) and key in {'train_quality', 'introspection_gain'}:
+                value = _clip((0.78 * value) + (0.22 * module_value))
+            if ('integrate' in mode) and key in {'integration_quality', 'transfer'}:
+                value = _clip((0.76 * value) + (0.24 * module_value))
+            blended[key] = value
+        return blended
+
     def _observe_kernel_phase_program_step(self, *, telemetry_channel: str, intervention_types: list[str], unresolved_objective_override: bool, progress_delta: int, reward_signal: float, penalty_signal: float) -> None:
         if not self.kernel_phase_program_enable:
             return
@@ -2111,7 +2446,11 @@ class AIAssistantApp:
         active_target = self.kernel_phase_program.current_active_target()
         if active_target is None:
             return
-        phase_id, _ = active_target
+        phase_id, stage_id = active_target
+        _, active_micro_spec = self._kernel_phase_active_specs(phase_id=phase_id, stage_id=stage_id)
+        micro_mode = str(getattr(active_micro_spec, 'mode', 'integrate') or 'integrate')
+        module_targets = tuple(getattr(active_micro_spec, 'module_targets', ()) or ())
+        objective_signals = tuple(getattr(active_micro_spec, 'objective_signals', ()) or ())
         autonomy_snapshot = self.learned_autonomy_controller.snapshot() if self.learned_autonomy_subphase_enable else {}
         reasoning_snapshot = self._parallel_reasoning_snapshot() if self.parallel_reasoning_enable else {}
         utility_anchor = max(0.0, min(1.0, float(getattr(self, 'guard_utility_ema', 0.5) or 0.5)))
@@ -2128,23 +2467,35 @@ class AIAssistantApp:
         reasoning_conf = max(0.0, min(1.0, float(reasoning_snapshot.get('last_confidence', 0.0))))
         reasoning_margin = max(0.0, min(1.0, 0.5 + (0.5 * float(reasoning_snapshot.get('last_confidence_margin', 0.0)))))
 
-        train_quality = max(0.0, min(1.0, (0.55 * learned_score) + (0.25 * learned_only) + (0.20 * progress_signal)))
-        integration_quality = max(0.0, min(1.0, (0.60 * utility_anchor) + (0.25 * (1.0 - intervention_ema)) + (0.15 * channel_signal)))
-        stability = max(0.0, min(1.0, (0.55 * utility_anchor) + (0.30 * (1.0 - penalty_norm)) + (0.15 * (1.0 - unresolved_signal))))
-        transfer = max(0.0, min(1.0, (0.55 * progress_signal) + (0.25 * reward_norm) + (0.20 * channel_signal)))
-        safety = max(0.0, min(1.0, (0.65 * (1.0 - penalty_norm)) + (0.20 * (1.0 - unresolved_signal)) + (0.15 * (1.0 - intervention_flag))))
-        introspection_gain = max(0.0, min(1.0, (0.65 * reasoning_conf) + (0.35 * reasoning_margin)))
+        base_metrics = {
+            'train_quality': max(0.0, min(1.0, (0.55 * learned_score) + (0.25 * learned_only) + (0.20 * progress_signal))),
+            'integration_quality': max(0.0, min(1.0, (0.60 * utility_anchor) + (0.25 * (1.0 - intervention_ema)) + (0.15 * channel_signal))),
+            'stability': max(0.0, min(1.0, (0.55 * utility_anchor) + (0.30 * (1.0 - penalty_norm)) + (0.15 * (1.0 - unresolved_signal)))),
+            'transfer': max(0.0, min(1.0, (0.55 * progress_signal) + (0.25 * reward_norm) + (0.20 * channel_signal))),
+            'safety': max(0.0, min(1.0, (0.65 * (1.0 - penalty_norm)) + (0.20 * (1.0 - unresolved_signal)) + (0.15 * (1.0 - intervention_flag)))),
+            'introspection_gain': max(0.0, min(1.0, (0.65 * reasoning_conf) + (0.35 * reasoning_margin))),
+        }
+        module_metrics = self._kernel_phase_module_metrics(module_targets=module_targets, telemetry_channel=telemetry_channel)
+        blended_metrics = self._kernel_phase_blend_metrics(base_metrics=base_metrics, module_metrics=module_metrics, micro_mode=micro_mode, objective_signals=objective_signals)
+
+        train_quality = float(blended_metrics.get('train_quality', base_metrics['train_quality']))
+        integration_quality = float(blended_metrics.get('integration_quality', base_metrics['integration_quality']))
+        stability = float(blended_metrics.get('stability', base_metrics['stability']))
+        transfer = float(blended_metrics.get('transfer', base_metrics['transfer']))
+        safety = float(blended_metrics.get('safety', base_metrics['safety']))
+        introspection_gain = float(blended_metrics.get('introspection_gain', base_metrics['introspection_gain']))
 
         transition = self.kernel_phase_program.observe_micro_metrics(phase_id, train_quality=train_quality, integration_quality=integration_quality, stability=stability, transfer=transfer, safety=safety, introspection_gain=introspection_gain)
         current_target = self.kernel_phase_program.current_active_target()
         target_label = f'{current_target[0]}::{current_target[1]}' if current_target else 'complete'
+        self._apply_kernel_phase_runtime_integration()
         if target_label != self.kernel_phase_last_target:
-            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_target', payload={'target': target_label, 'disabled_phases': list(self.kernel_phase_disable_list), 'completed_micro_total': int(self.kernel_phase_program.snapshot().get('completed_micro_total', 0))})
+            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_target', payload={'target': target_label, 'phase_id': phase_id, 'stage_id': stage_id, 'stage_mode': micro_mode, 'module_targets': list(module_targets), 'objective_signals': list(objective_signals), 'disabled_phases': list(self.kernel_phase_disable_list), 'completed_micro_total': int(self.kernel_phase_program.snapshot().get('completed_micro_total', 0))})
             self.kernel_phase_last_target = target_label
             self._schedule_kernel_phase_controls_refresh()
             self._schedule_micro_progress_header_update(announce_transition=False)
         if transition is not None:
-            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_transition', payload={'phase_id': transition.phase_id, 'from_micro': int(transition.from_micro), 'to_micro': int(transition.to_micro), 'completed_phase': int(transition.completed_phase), 'reason': transition.reason})
+            self.governance_orchestrator.record_runtime_event(kind='adaptive_phase_transition', payload={'phase_id': transition.phase_id, 'from_micro': int(transition.from_micro), 'to_micro': int(transition.to_micro), 'completed_phase': int(transition.completed_phase), 'reason': transition.reason, 'stage_mode': micro_mode, 'module_targets': list(module_targets), 'objective_signals': list(objective_signals), 'blended_metrics': {key: round(float(value), 4) for key, value in blended_metrics.items()}})
             self._schedule_kernel_phase_controls_refresh()
             self._schedule_micro_progress_header_update(announce_transition=True)
             self._save_window_geometry()
@@ -6548,6 +6899,7 @@ class AIAssistantApp:
                 if isinstance(merged_kernel_phase_state, dict):
                     restored = self.kernel_phase_program.restore_snapshot(merged_kernel_phase_state)
                     if restored:
+                        self._apply_kernel_phase_runtime_integration()
                         self._schedule_kernel_phase_controls_refresh()
                         self._schedule_micro_progress_header_update(announce_transition=False)
             self._sync_machine_vision_toggle_controls()
