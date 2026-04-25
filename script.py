@@ -33,8 +33,7 @@ print(f'Total Kernel Env Vars: {len(kernel_vars)}')
 print(f'Self-Tuning: {len(self_tuning)}')
 print(f'Hand-Tuned: {len(hand_tuned)}')
 def print_bucket(name, items):
-    print(f'
-{name} ({len(items)}):')
+    print(f'\n{name} ({len(items)}):')
     for i in items[:40]: print(f'  - {i}')
     if len(items) > 40: print(f'  ... ({len(items)-40} more)')
 print_bucket('SELF-TUNING', self_tuning)

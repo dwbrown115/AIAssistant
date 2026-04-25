@@ -11,3 +11,8 @@ __pycache__/
 /Snapshots/
 /AIAssistant-main/
 /AIAssistantBAD/
+.DS_Store
+.window_state.json
+files_to_check.txt
+newest
+log_curation_manifest_*.txt
