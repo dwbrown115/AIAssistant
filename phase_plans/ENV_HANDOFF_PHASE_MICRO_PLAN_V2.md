@@ -196,21 +196,25 @@ Wave 9: `p2.m9_kernel_manage_core_runtime_policy_controls` (`K5_CORE_RUNTIME_POL
 - Stage id: `p2.m3_remove_hormone_decay_legacy_envs`
 - Type: `R3_HORMONE_LEGACY`
 - System: `hormone_decay_legacy_removal_system`
+- Status: implemented (legacy hormone decay alias reads removed from active runtime path for `HORMONE_CURIOSITY_DECAY`, `HORMONE_STRESS_DECAY`, `HORMONE_REWARD_DECAY`, `HORMONE_FATIGUE_DECAY`, `HORMONE_CONFIDENCE_DECAY`; dynamic legacy controls `HORMONE_DYNAMIC_LEGACY_ENABLE` and `HORMONE_DYNAMIC_LEGACY_BATCH12_SUPPRESSION_MAX` remain non-active/deprecated-only and are not read by active runtime).
 
 ### Micro 2.4
 - Stage id: `p2.m4_remove_progression_override_legacy_envs`
 - Type: `R4_PROGRESSION_OVERRIDE_LEGACY`
 - System: `progression_override_legacy_removal_system`
+- Status: implemented (no active runtime env reads for `MAZE_BATCH_MICRO_PROGRESSION_PHASE2_REDUCTION` or `PHASE2_SOFT_OVERRIDE_ENABLE`; legacy references are deprecated-only/non-active).
 
 ### Micro 2.5
 - Stage id: `p2.m5_kernel_manage_trust_memory_controls`
 - Type: `K1_TRUST_MEMORY_CONTROLS`
 - System: `trust_memory_kernel_management_system`
+- Status: implemented (app runtime env reads removed for K1 trust/memory prefixes and replaced with code-owned defaults: `TERMINAL_TRUST_*`, `PROJECTION_TRUST_*`, `HAZARD_PREPAREDNESS_*`, `STM_*`, `SEMANTIC_*`, `ENDOCRINE_*`).
 
 ### Micro 2.6
 - Stage id: `p2.m6_kernel_manage_learning_reasoning_controls`
 - Type: `K2_LEARNING_REASONING_CONTROLS`
 - System: `learning_reasoning_kernel_management_system`
+- Status: implemented (app runtime env reads removed for K2 learning/reasoning prefixes and replaced with code-owned defaults: `ADAPTIVE_*`, `LEARNED_AUTONOMY_*`, `PARALLEL_REASONING_*`).
 
 ### Micro 2.7
 - Stage id: `p2.m7_kernel_manage_perception_endocrine_controls`
@@ -221,6 +225,7 @@ Wave 9: `p2.m9_kernel_manage_core_runtime_policy_controls` (`K5_CORE_RUNTIME_POL
 - Stage id: `p2.m8_kernel_manage_maze_policy_controls`
 - Type: `K4_MAZE_POLICY_CONTROLS`
 - System: `maze_policy_kernel_management_system`
+- Status: implemented (app runtime `MAZE_*` env reads removed and replaced with kernel-owned Wave 8 defaults in `runtime_kernel/integration/kernel_env_defaults.py`; computed fallbacks for `MAZE_MICRO_PROGRESSION_PERSIST_MIN_RUN`, `MAZE_MICRO_PROGRESSION_PERSIST_MIN_COMPLETED_GOALS`, and `MAZE_MICRO_PROGRESSION_REGRESSION_MIN_RUN` are now code-owned and non-env-driven).
 
 ### Micro 2.9
 - Stage id: `p2.m9_kernel_manage_core_runtime_policy_controls`

@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from kernel_contracts import (
+from runtime_kernel.kernel_contracts import (
     ActionOutcomeEvent,
     AutonomyTransitionEvent,
     DevelopmentStage,

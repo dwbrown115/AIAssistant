@@ -36,11 +36,11 @@ from dotenv import load_dotenv
 
 from openai import OpenAI
 
-from adaptive_controller import AdaptiveNeuralController
+from runtime_kernel.adaptive_controller import AdaptiveNeuralController
 
-from governance_orchestrator import GovernanceOrchestrator
+from runtime_kernel.governance_orchestrator import GovernanceOrchestrator
 
-from kernel_contracts import (
+from runtime_kernel.kernel_contracts import (
     ActionOutcomeEvent,
     DevelopmentStage,
     ErrorHandlingHint,
@@ -51,11 +51,11 @@ from kernel_contracts import (
     ReasoningProfile,
 )
 
-from learned_autonomy_controller import LearnedAutonomyController
+from runtime_kernel.learned_autonomy_controller import LearnedAutonomyController
 
-from parallel_reasoning_engine import ParallelReasoningEngine
+from runtime_kernel.parallel_reasoning_engine import ParallelReasoningEngine
 
-from organism_control import (
+from runtime_kernel.organism_control import (
     CandidateProjection,
     ControlState as OrganismControlState,
     EndocrineState as OrganismEndocrineState,

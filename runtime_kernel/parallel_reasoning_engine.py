@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from kernel_contracts import ReasoningBudgetContract, ReasoningProfile
+from runtime_kernel.kernel_contracts import ReasoningBudgetContract, ReasoningProfile
 
 
 class ParallelReasoningEngine:

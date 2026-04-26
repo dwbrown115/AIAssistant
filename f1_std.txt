@@ -1,0 +1,9 @@
+preflight_status=pass profile=batch4
+dump_file=Log Dump/15_mazes_hard_20260426_144921.txt
+planner_steps=632 guard_override_rows=26 guard_override_rate=0.0411
+behavior_screen=learned_only_rate=0.7991 hardcoded_only_rate=0.0079 mixed_rate=0.0332 unresolved_objective_override_rate=0.0 phase1_telemetry_coverage=1.0 phase1_intervention_utility_win3=0.4289 phase1_penalty_delta_win3=0.0
+projection_screen=enabled=1 usage_detected=1 coverage=1.0 tag_rate=0.8066 beneficial_rate=0.8085 non_beneficial_rate=0.1915 clip_rate=0.1424 delta_avg=-7.2991 delta_scaled_avg=-7.7454 effectiveness_score=0.6313
+intervention_diagnostics=harmful=[anti_oscillation_override:rows=5 util=-1.0121 pen_delta=0.0 | cycle_avoid_override:rows=2 util=1.8016 pen_delta=0.0] helpful=[objective_progress_guard:rows=13 util=1.8336 pen_delta=0.0 | objective_override:rows=13 util=1.8336 pen_delta=0.0]
+pipeline=execution_count=15 completed=15 remaining=0 success=True
+memory_regression_check=shortest_route_integrity=pass objective_steps=225
+post_run_set_sleep_cycles=1

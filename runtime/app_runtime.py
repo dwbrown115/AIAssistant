@@ -17,16 +17,17 @@ from collections import deque
 from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
-from adaptive_controller import AdaptiveNeuralController
-from adaptive_phase_program import AdaptiveKernelPhaseProgram, build_default_kernel_phase_specs
-from governance_orchestrator import GovernanceOrchestrator
-from kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
-from learned_autonomy_controller import LearnedAutonomyController
-from parallel_reasoning_engine import ParallelReasoningEngine
-from organism_control import CandidateProjection, ControlState as OrganismControlState, EndocrineState as OrganismEndocrineState, Event as OrganismEvent, GridState as OrganismGridState, MemoryState as OrganismMemoryState, Signature as OrganismSignature, is_catastrophic_trap as organism_is_catastrophic_trap, step_agent as organism_step_agent
+from runtime_kernel.adaptive_controller import AdaptiveNeuralController
+from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_default_kernel_phase_specs
+from runtime_kernel.governance_orchestrator import GovernanceOrchestrator
+from runtime_kernel.kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
+from runtime_kernel.learned_autonomy_controller import LearnedAutonomyController
+from runtime_kernel.parallel_reasoning_engine import ParallelReasoningEngine
+from runtime_kernel.organism_control import CandidateProjection, ControlState as OrganismControlState, EndocrineState as OrganismEndocrineState, Event as OrganismEvent, GridState as OrganismGridState, MemoryState as OrganismMemoryState, Signature as OrganismSignature, is_catastrophic_trap as organism_is_catastrophic_trap, step_agent as organism_step_agent
 from maze.projection_module import ProjectionConfig, ProjectionModule
 from maze.runner import CandidateInput, MazeAgent, StepOutput as MazeStepOutput
 from runtime.config import load_model_runtime_config
+from runtime_kernel.integration.kernel_env_defaults import WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS as _WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS, WAVE3_HORMONE_DECAY_DEFAULTS as _WAVE3_HORMONE_DECAY_DEFAULTS, WAVE5_TRUST_MEMORY_DEFAULTS as _WAVE5_TRUST_MEMORY_DEFAULTS, WAVE6_LEARNING_REASONING_DEFAULTS as _WAVE6_LEARNING_REASONING_DEFAULTS, WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS as _WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS, WAVE8_MAZE_POLICY_DEFAULTS as _WAVE8_MAZE_POLICY_DEFAULTS, WAVE9_CORE_RUNTIME_POLICY_DEFAULTS as _WAVE9_CORE_RUNTIME_POLICY_DEFAULTS
 from runtime_kernel.integration.kernel_phase_policy_runtime import DEFAULT_KERNEL_PHASE_FORCE_SAFETY_CORE_ENABLE as KERNEL_PHASE_FORCE_SAFETY_CORE_DEFAULT_ENABLE_RUNTIME, DEFAULT_KERNEL_PHASE_PROGRAM_ENABLE as KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME, DEFAULT_KERNEL_PHASE_PROGRAM_KWARGS as KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME, DEFAULT_TRAINING_PHASE_SETTINGS as TRAINING_PHASE_DEFAULT_SETTINGS_RUNTIME, apply_kernel_phase_runtime_integration as kernel_apply_kernel_phase_runtime_integration, build_kernel_phase_step_context as kernel_build_kernel_phase_step_context_runtime, init_kernel_phase_policy_runtime as kernel_init_kernel_phase_policy_runtime, kernel_phase_active_module_targets as kernel_phase_active_module_targets_runtime, kernel_phase_active_specs as kernel_phase_active_specs_runtime, kernel_phase_blend_metrics as kernel_phase_blend_metrics_runtime, kernel_phase_module_metrics as kernel_phase_module_metrics_runtime, kernel_phase_runtime_module_enabled as kernel_phase_runtime_module_enabled_runtime, kernel_phase_runtime_policy_snapshot as kernel_phase_runtime_policy_snapshot_runtime, observe_kernel_adaptive_step as kernel_observe_kernel_adaptive_step_runtime
 from runtime_kernel.maintenance.sleep_cycle_runtime import maybe_run_sleep_cycle as kernel_maybe_run_sleep_cycle_runtime, maybe_run_step_hygiene as kernel_maybe_run_step_hygiene_runtime, run_sleep_cycle as kernel_run_sleep_cycle_runtime, run_step_hygiene as kernel_run_step_hygiene_runtime
 from runtime_kernel.persistence.memory_db_runtime import ensure_action_outcome_memory_schema as kernel_ensure_action_outcome_memory_schema_runtime, ensure_pattern_catalog_uncertainty_schema as kernel_ensure_pattern_catalog_uncertainty_schema_runtime, ensure_prediction_memory_schema as kernel_ensure_prediction_memory_schema_runtime, init_memory_db as kernel_init_memory_db_runtime
@@ -40,16 +41,6 @@ load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 load_dotenv(os.path.join(BASE_DIR, '.env.secret'), override=True)
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = ((re.compile('\\bsk-[A-Za-z0-9_-]{12,}\\b'), '[REDACTED_API_KEY]'), (re.compile('(OPENAI_API_KEY\\s*=\\s*)([^\\s]+)'), '\\1[REDACTED_API_KEY]'), (re.compile('(Authorization:\\s*Bearer\\s+)([^\\s]+)', flags=re.IGNORECASE), '\\1[REDACTED_TOKEN]'))
 _PREDICTION_SHAPE_LABELS: tuple[str, ...] = ('wall', 'dead_end', 'corridor', 'corner', 'junction')
-_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS: dict[str, float | int] = {
-    'hidden_max': 128,
-    'growth_step': 4,
-    'growth_patience': 120,
-    'growth_error_threshold': 0.22,
-    'prune_interval': 500,
-    'prune_importance_threshold': 0.008,
-    'learning_rate': 0.018,
-    'l2': 0.0008,
-}
 _MAZE_PLATEAU_AUTO_VERY_HARD_ENABLE = False
 
 def redact_secrets(text: str) -> str:
@@ -78,27 +69,27 @@ class EndocrineSystem:
     """Slow global modulators that bias move selection and memory behavior."""
 
     def __init__(self) -> None:
-        self.H_curiosity = Hormone(value=0.36, decay=float(os.getenv('H_CURIOSITY_DECAY', os.getenv('HORMONE_CURIOSITY_DECAY', '0.97'))))
-        self.H_caution = Hormone(value=0.24, decay=float(os.getenv('H_CAUTION_DECAY', os.getenv('HORMONE_STRESS_DECAY', '0.93'))))
-        self.H_persistence = Hormone(value=0.32, decay=float(os.getenv('H_PERSISTENCE_DECAY', os.getenv('HORMONE_REWARD_DECAY', '0.965'))))
-        self.H_mv_trust = Hormone(value=0.28, decay=float(os.getenv('H_MV_TRUST_DECAY', '0.96')))
-        self.H_boredom = Hormone(value=0.16, decay=float(os.getenv('H_BOREDOM_DECAY', os.getenv('HORMONE_FATIGUE_DECAY', '0.985'))))
-        self.H_confidence = Hormone(value=0.3, decay=float(os.getenv('H_CONFIDENCE_DECAY', os.getenv('HORMONE_CONFIDENCE_DECAY', '0.96'))))
+        self.H_curiosity = Hormone(value=0.36, decay=float(_WAVE3_HORMONE_DECAY_DEFAULTS['curiosity_decay']))
+        self.H_caution = Hormone(value=0.24, decay=float(_WAVE3_HORMONE_DECAY_DEFAULTS['caution_decay']))
+        self.H_persistence = Hormone(value=0.32, decay=float(_WAVE3_HORMONE_DECAY_DEFAULTS['persistence_decay']))
+        self.H_mv_trust = Hormone(value=0.28, decay=float(_WAVE3_HORMONE_DECAY_DEFAULTS['mv_trust_decay']))
+        self.H_boredom = Hormone(value=0.16, decay=float(_WAVE3_HORMONE_DECAY_DEFAULTS['boredom_decay']))
+        self.H_confidence = Hormone(value=0.3, decay=float(_WAVE3_HORMONE_DECAY_DEFAULTS['confidence_decay']))
         self._homeostasis_targets = {'H_curiosity': 0.36, 'H_caution': 0.24, 'H_persistence': 0.32, 'H_mv_trust': 0.28, 'H_boredom': 0.16, 'H_confidence': 0.3}
-        self._saturation_high_start = max(0.7, min(0.99, float(os.getenv('HORMONE_SATURATION_HIGH_START', '0.86'))))
-        self._saturation_low_end = max(0.01, min(0.3, float(os.getenv('HORMONE_SATURATION_LOW_END', '0.14'))))
-        self._saturation_min_scale = max(0.05, min(1.0, float(os.getenv('HORMONE_SATURATION_MIN_SCALE', '0.30'))))
-        self._distress_recovery_enable = os.getenv('HORMONE_DISTRESS_RECOVERY_ENABLE', '1') == '1'
-        self._distress_recovery_threshold = max(0.75, min(0.99, float(os.getenv('HORMONE_DISTRESS_RECOVERY_THRESHOLD', '0.86'))))
-        self._distress_recovery_step = max(0.001, min(0.05, float(os.getenv('HORMONE_DISTRESS_RECOVERY_STEP', '0.016'))))
-        self._distress_drive_threshold = min(-0.2, max(-2.0, float(os.getenv('HORMONE_DISTRESS_EXPLORATION_DRIVE_THRESHOLD', '-0.82'))))
-        self._distress_drive_recovery_scale = max(1.0, min(3.0, float(os.getenv('HORMONE_DISTRESS_DRIVE_RECOVERY_SCALE', '1.55'))))
-        self._outcome_penalty_clip = max(30.0, float(os.getenv('HORMONE_OUTCOME_PENALTY_CLIP', '260.0')))
-        self._dead_end_penalty_scale = max(0.05, min(1.0, float(os.getenv('HORMONE_DEAD_END_PENALTY_SCALE', '0.30'))))
-        self._terminal_boxed_penalty_scale = max(0.05, min(1.0, float(os.getenv('HORMONE_TERMINAL_BOXED_PENALTY_SCALE', '0.45'))))
-        self._repeat_loop_penalty_scale = max(0.05, min(1.0, float(os.getenv('HORMONE_REPEAT_LOOP_PENALTY_SCALE', '0.55'))))
-        self._distress_persistence_cap = max(0.05, min(0.95, float(os.getenv('HORMONE_DISTRESS_PERSISTENCE_CAP', '0.42'))))
-        self._distress_persistence_relief_step = max(0.002, min(0.08, float(os.getenv('HORMONE_DISTRESS_PERSISTENCE_RELIEF_STEP', '0.024'))))
+        self._saturation_high_start = max(0.7, min(0.99, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_SATURATION_HIGH_START'])))
+        self._saturation_low_end = max(0.01, min(0.3, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_SATURATION_LOW_END'])))
+        self._saturation_min_scale = max(0.05, min(1.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_SATURATION_MIN_SCALE'])))
+        self._distress_recovery_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_RECOVERY_ENABLE'])
+        self._distress_recovery_threshold = max(0.75, min(0.99, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_RECOVERY_THRESHOLD'])))
+        self._distress_recovery_step = max(0.001, min(0.05, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_RECOVERY_STEP'])))
+        self._distress_drive_threshold = min(-0.2, max(-2.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_EXPLORATION_DRIVE_THRESHOLD'])))
+        self._distress_drive_recovery_scale = max(1.0, min(3.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_DRIVE_RECOVERY_SCALE'])))
+        self._outcome_penalty_clip = max(30.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_OUTCOME_PENALTY_CLIP']))
+        self._dead_end_penalty_scale = max(0.05, min(1.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DEAD_END_PENALTY_SCALE'])))
+        self._terminal_boxed_penalty_scale = max(0.05, min(1.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_TERMINAL_BOXED_PENALTY_SCALE'])))
+        self._repeat_loop_penalty_scale = max(0.05, min(1.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_REPEAT_LOOP_PENALTY_SCALE'])))
+        self._distress_persistence_cap = max(0.05, min(0.95, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_PERSISTENCE_CAP'])))
+        self._distress_persistence_relief_step = max(0.002, min(0.08, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_DISTRESS_PERSISTENCE_RELIEF_STEP'])))
         self._last_decay_step = -1
         self._last_signature_step = -1
 
@@ -239,7 +230,7 @@ class EndocrineSystem:
                 outcome *= scale
         trap_churn = bool({'visible_terminal', 'boxed_corridor'} & tag_set) and bool({'cycle_pair', 'transition_repeat', 'immediate_backtrack'} & tag_set)
         if trap_churn and penalty > 0.0:
-            churn_scale = max(0.1, min(1.0, float(os.getenv('HORMONE_TRAP_CHURN_PENALTY_SCALE', '0.35'))))
+            churn_scale = max(0.1, min(1.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_TRAP_CHURN_PENALTY_SCALE'])))
             penalty *= churn_scale
             if outcome < 0.0:
                 outcome *= churn_scale
@@ -324,61 +315,64 @@ class AIAssistantApp:
         self.agent_model = model_runtime_config.agent_model
         self.local_navigation_kernel = model_runtime_config.local_navigation_kernel
         self.local_navigation_api_fallback = model_runtime_config.local_navigation_api_fallback
+        self.kernel_wave9_runtime_policy_defaults = dict(_WAVE9_CORE_RUNTIME_POLICY_DEFAULTS)
+        self.kernel_wave9_runtime_policy = {key: os.getenv(key, default) for key, default in self.kernel_wave9_runtime_policy_defaults.items()}
         self.enable_logic_repetition_resolver = os.getenv('ENABLE_LOGIC_REPETITION_RESOLVER', '0') == '1'
         self.enable_logic_finalizer_for_navigation = os.getenv('ENABLE_LOGIC_FINALIZER_FOR_NAVIGATION', '0') == '1'
-        self.maze_step_model_hints = os.getenv('MAZE_STEP_MODEL_HINTS', '0') == '1'
-        self.maze_targeted_model_assist_enable = os.getenv('MAZE_TARGETED_MODEL_ASSIST_ENABLE', '1') == '1'
-        self.maze_model_assist_reliance = min(1.0, max(0.0, float(os.getenv('MAZE_MODEL_ASSIST_RELIANCE', '0.22'))))
-        self.maze_batch_micro_progression_enable = os.getenv('MAZE_BATCH_MICRO_PROGRESSION_ENABLE', '1') == '1'
-        self.maze_batch_micro_progression_min_run = max(2, int(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_MIN_RUN', '8')))
-        self.maze_batch_micro_progression_start_ratio = max(0.0, min(0.95, float(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_START_RATIO', '0.2'))))
-        self.maze_batch_micro_progression_curve = max(0.5, min(4.0, float(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_CURVE', '1.15'))))
-        self.maze_batch_micro_progression_max_hard_phase_bonus = max(0, min(2, int(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_MAX_HARD_PHASE_BONUS', '1'))))
-        self.maze_batch_micro_progression_max_objective_phase_bonus = max(0, min(2, int(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_MAX_OBJECTIVE_PHASE_BONUS', '1'))))
-        self.maze_batch_micro_progression_assist_reliance_floor = min(1.0, max(0.0, float(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_ASSIST_RELIANCE_FLOOR', '0.08'))))
-        self.maze_batch_micro_progression_guard_strength_reduction = max(0.0, min(0.8, float(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_GUARD_STRENGTH_REDUCTION', '0.22'))))
-        self.maze_batch_micro_progression_stuck_trigger_no_progress_bonus = max(0, min(20, int(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_NO_PROGRESS_BONUS', '3'))))
-        self.maze_batch_micro_progression_stuck_trigger_repeat_bonus = max(0, min(6, int(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_REPEAT_BONUS', '1'))))
-        self.maze_batch_micro_progression_objective_unresolved_bonus = max(0, min(4, int(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_OBJECTIVE_UNRESOLVED_BONUS', '1'))))
-        self.maze_batch_micro_progression_cycle_avoid_margin_reduction = max(0.0, min(0.9, float(os.getenv('MAZE_BATCH_MICRO_PROGRESSION_CYCLE_AVOID_MARGIN_REDUCTION', '0.5'))))
-        self.maze_model_assist_max_calls_per_episode = max(0, int(os.getenv('MAZE_MODEL_ASSIST_MAX_CALLS_PER_EPISODE', '6')))
-        self.maze_model_assist_cooldown_steps = max(0, int(os.getenv('MAZE_MODEL_ASSIST_COOLDOWN_STEPS', '10')))
-        self.adaptive_controller_enable = os.getenv('ADAPTIVE_CONTROLLER_ENABLE', '1') == '1'
-        self.adaptive_disable_mv_hints = os.getenv('ADAPTIVE_DISABLE_MV_HINTS', '0') == '1'
-        self.adaptive_score_blend = max(0.0, float(os.getenv('ADAPTIVE_SCORE_BLEND', '28.0')))
-        self.adaptive_max_score_adjust = max(0, int(os.getenv('ADAPTIVE_MAX_SCORE_ADJUST', '120')))
-        self.adaptive_outcome_scale = max(1.0, float(os.getenv('ADAPTIVE_OUTCOME_SCALE', '120.0')))
-        self.adaptive_save_interval_steps = max(20, int(os.getenv('ADAPTIVE_SAVE_INTERVAL_STEPS', '120')))
-        adaptive_mode_raw = str(os.getenv('ADAPTIVE_POLICY_MODE', 'hybrid') or 'hybrid').strip().lower()
+        self.maze_step_model_hints = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STEP_MODEL_HINTS']) == '1'
+        self.maze_targeted_model_assist_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_TARGETED_MODEL_ASSIST_ENABLE']) == '1'
+        self.maze_model_assist_reliance = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MODEL_ASSIST_RELIANCE']))))
+        self.maze_batch_micro_progression_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_ENABLE']) == '1'
+        self.maze_batch_micro_progression_min_run = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_MIN_RUN'])))
+        self.maze_batch_micro_progression_start_ratio = max(0.0, min(0.95, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_START_RATIO']))))
+        self.maze_batch_micro_progression_curve = max(0.5, min(4.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_CURVE']))))
+        self.maze_batch_micro_progression_max_hard_phase_bonus = max(0, min(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_MAX_HARD_PHASE_BONUS']))))
+        self.maze_batch_micro_progression_max_objective_phase_bonus = max(0, min(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_MAX_OBJECTIVE_PHASE_BONUS']))))
+        self.maze_batch_micro_progression_assist_reliance_floor = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_ASSIST_RELIANCE_FLOOR']))))
+        self.maze_batch_micro_progression_guard_strength_reduction = max(0.0, min(0.8, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_GUARD_STRENGTH_REDUCTION']))))
+        self.maze_batch_micro_progression_stuck_trigger_no_progress_bonus = max(0, min(20, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_NO_PROGRESS_BONUS']))))
+        self.maze_batch_micro_progression_stuck_trigger_repeat_bonus = max(0, min(6, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_REPEAT_BONUS']))))
+        self.maze_batch_micro_progression_objective_unresolved_bonus = max(0, min(4, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_OBJECTIVE_UNRESOLVED_BONUS']))))
+        self.maze_batch_micro_progression_cycle_avoid_margin_reduction = max(0.0, min(0.9, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_MICRO_PROGRESSION_CYCLE_AVOID_MARGIN_REDUCTION']))))
+        self.maze_model_assist_max_calls_per_episode = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MODEL_ASSIST_MAX_CALLS_PER_EPISODE'])))
+        self.maze_model_assist_cooldown_steps = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MODEL_ASSIST_COOLDOWN_STEPS'])))
+        self.adaptive_controller_enable = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_CONTROLLER_ENABLE'])
+        self.adaptive_disable_mv_hints = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_DISABLE_MV_HINTS'])
+        self.adaptive_score_blend = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_SCORE_BLEND']))
+        self.adaptive_max_score_adjust = max(0, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_MAX_SCORE_ADJUST']))
+        self.adaptive_outcome_scale = max(1.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_OUTCOME_SCALE']))
+        self.adaptive_save_interval_steps = max(20, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_SAVE_INTERVAL_STEPS']))
+        adaptive_mode_raw = str(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_POLICY_MODE'] or 'hybrid').strip().lower()
         self.adaptive_policy_mode = adaptive_mode_raw if adaptive_mode_raw in {'hybrid', 'adaptive_first'} else 'hybrid'
-        self.adaptive_policy_min_steps = max(0, int(os.getenv('ADAPTIVE_POLICY_MIN_STEPS', '120')))
-        self.adaptive_policy_score_margin = max(0, int(os.getenv('ADAPTIVE_POLICY_SCORE_MARGIN', '40')))
-        self.adaptive_policy_min_pred_gap = max(0.0, float(os.getenv('ADAPTIVE_POLICY_MIN_PRED_GAP', '0.05')))
-        self.adaptive_policy_epsilon = min(1.0, max(0.0, float(os.getenv('ADAPTIVE_POLICY_EPSILON', '0.06'))))
-        self.adaptive_replay_enable = os.getenv('ADAPTIVE_REPLAY_ENABLE', '1') == '1'
-        self.adaptive_replay_batch = max(1, int(os.getenv('ADAPTIVE_REPLAY_BATCH', '6')))
-        self.adaptive_replay_updates = max(1, int(os.getenv('ADAPTIVE_REPLAY_UPDATES', '2')))
-        self.adaptive_progress_report_enable = os.getenv('ADAPTIVE_PROGRESS_REPORT_ENABLE', '1') == '1'
-        self.adaptive_progress_report_model = os.getenv('ADAPTIVE_PROGRESS_REPORT_MODEL', self.logic_model)
-        self.adaptive_progress_report_interval_steps = max(30, int(os.getenv('ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS', '180')))
-        self.adaptive_progress_auto_tune = os.getenv('ADAPTIVE_PROGRESS_AUTO_TUNE', '1') == '1'
-        self.adaptive_progress_report_max_notes_chars = max(120, int(os.getenv('ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS', '260')))
+        self.adaptive_policy_min_steps = max(0, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_POLICY_MIN_STEPS']))
+        self.adaptive_policy_score_margin = max(0, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_POLICY_SCORE_MARGIN']))
+        self.adaptive_policy_min_pred_gap = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_POLICY_MIN_PRED_GAP']))
+        self.adaptive_policy_epsilon = min(1.0, max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_POLICY_EPSILON'])))
+        self.adaptive_replay_enable = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_REPLAY_ENABLE'])
+        self.adaptive_replay_batch = max(1, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_REPLAY_BATCH']))
+        self.adaptive_replay_updates = max(1, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_REPLAY_UPDATES']))
+        self.adaptive_progress_report_enable = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_PROGRESS_REPORT_ENABLE'])
+        adaptive_progress_report_model_default = str(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_PROGRESS_REPORT_MODEL'])
+        self.adaptive_progress_report_model = self.logic_model if adaptive_progress_report_model_default == '__LOGIC_MODEL__' else adaptive_progress_report_model_default
+        self.adaptive_progress_report_interval_steps = max(30, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS']))
+        self.adaptive_progress_auto_tune = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_PROGRESS_AUTO_TUNE'])
+        self.adaptive_progress_report_max_notes_chars = max(120, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS']))
         self._last_adaptive_progress_report_step = -1
         self._adaptive_progress_report_inflight = False
         self.adaptive_progress_last_feedback_summary = ''
         self.adaptive_progress_last_feedback_step = -1
         self.adaptive_progress_last_autotune_summary = ''
         self.adaptive_progress_last_error = ''
-        self._adaptive_replay: deque[tuple[list[float], float]] = deque(maxlen=max(64, int(os.getenv('ADAPTIVE_REPLAY_BUFFER_SIZE', '6000'))))
+        self._adaptive_replay: deque[tuple[list[float], float]] = deque(maxlen=max(64, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_REPLAY_BUFFER_SIZE'])))
         self.adaptive_brain_path = os.path.join(BASE_DIR, 'adaptive_brain.json')
         self.adaptive_controller: AdaptiveNeuralController | None = None
         if self.adaptive_controller_enable:
-            adaptive_seed = int(os.getenv('MAZE_SEED', '1337')) + 1723
+            adaptive_seed = int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_SEED'])) + 1723
             self.adaptive_controller = AdaptiveNeuralController(
                 input_dim=16,
                 state_path=self.adaptive_brain_path,
                 seed=adaptive_seed,
-                hidden_min=max(8, int(os.getenv('ADAPTIVE_HIDDEN_MIN', '20'))),
+                hidden_min=max(8, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_HIDDEN_MIN'])),
                 hidden_max=max(16, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['hidden_max'])),
                 growth_step=max(1, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['growth_step'])),
                 growth_patience=max(20, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['growth_patience'])),
@@ -420,10 +414,10 @@ class AIAssistantApp:
         self.episode_start_player_cell = (0, 0)
         self.current_target_cell = (0, 0)
         self.current_player_cell = (0, 0)
-        self.maze_fast_solve_treat_enable = os.getenv('MAZE_FAST_SOLVE_TREAT_ENABLE', '1') == '1'
-        self.maze_fast_solve_treat_max_bonus = max(0.0, float(os.getenv('MAZE_FAST_SOLVE_TREAT_MAX_BONUS', '24.0')))
-        self.maze_fast_solve_treat_target_multiplier = max(0.25, float(os.getenv('MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER', '1.85')))
-        self.maze_fast_solve_treat_min_target_seconds = max(1.0, float(os.getenv('MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS', '8.0')))
+        self.maze_fast_solve_treat_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FAST_SOLVE_TREAT_ENABLE']) == '1'
+        self.maze_fast_solve_treat_max_bonus = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FAST_SOLVE_TREAT_MAX_BONUS'])))
+        self.maze_fast_solve_treat_target_multiplier = max(0.25, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER'])))
+        self.maze_fast_solve_treat_min_target_seconds = max(1.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS'])))
         self.last_maze_solve_seconds = 0.0
         self.last_maze_fast_treat_bonus = 0.0
         self.last_maze_fast_treat_target_seconds = 0.0
@@ -433,11 +427,11 @@ class AIAssistantApp:
         self.goal_session_active = False
         self.goal_session_start_hits = 0
         self.goal_session_target_hits = 0
-        self.micro_progress_series_base = max(0.0, min(99.9, float(os.getenv('MAZE_MICRO_PROGRESSION_SERIES_BASE', '5.5'))))
-        self.micro_progress_series_step = max(0.01, min(5.0, float(os.getenv('MAZE_MICRO_PROGRESSION_SERIES_STEP', '0.1'))))
-        self.batch_progress_total = max(1, int(os.getenv('MAZE_BATCH_PROGRESS_TOTAL', '8')))
-        self.micro_progress_total = max(2, int(os.getenv('MAZE_MICRO_PROGRESS_TOTAL', '10')))
-        _micro_threshold_tokens = [token.strip() for token in os.getenv('MAZE_MICRO_PROGRESSION_THRESHOLDS', '0.2,0.4,0.6,0.8').split(',') if token.strip()]
+        self.micro_progress_series_base = max(0.0, min(99.9, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_SERIES_BASE']))))
+        self.micro_progress_series_step = max(0.01, min(5.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_SERIES_STEP']))))
+        self.batch_progress_total = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_BATCH_PROGRESS_TOTAL'])))
+        self.micro_progress_total = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESS_TOTAL'])))
+        _micro_threshold_tokens = [token.strip() for token in str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_THRESHOLDS']).split(',') if token.strip()]
         _micro_threshold_values: list[float] = []
         for token in _micro_threshold_tokens:
             try:
@@ -447,21 +441,21 @@ class AIAssistantApp:
         self.micro_progress_series_thresholds = sorted(set(_micro_threshold_values))
         if not self.micro_progress_series_thresholds:
             self.micro_progress_series_thresholds = [0.2, 0.4, 0.6, 0.8]
-        self.maze_micro_progression_persist_enable = os.getenv('MAZE_MICRO_PROGRESSION_PERSIST_ENABLE', '1') == '1'
-        self.maze_micro_progression_persist_min_completion_ratio = max(0.0, min(1.0, float(os.getenv('MAZE_MICRO_PROGRESSION_PERSIST_MIN_COMPLETION_RATIO', '0.9'))))
-        self.maze_micro_progression_persist_require_success = os.getenv('MAZE_MICRO_PROGRESSION_PERSIST_REQUIRE_SUCCESS', '1') == '1'
-        self.maze_micro_progression_persist_min_run = max(2, int(os.getenv('MAZE_MICRO_PROGRESSION_PERSIST_MIN_RUN', str(self.maze_batch_micro_progression_min_run))))
-        self.maze_micro_progression_persist_min_completed_goals = max(0, int(os.getenv('MAZE_MICRO_PROGRESSION_PERSIST_MIN_COMPLETED_GOALS', str(self.maze_micro_progression_persist_min_run))))
-        self.maze_micro_progression_batch_quality_ema_decay = max(0.0, min(0.995, float(os.getenv('MAZE_MICRO_PROGRESSION_BATCH_QUALITY_EMA_DECAY', '0.75'))))
-        self.maze_micro_progression_persist_min_batch_quality_ema = max(0.0, min(1.0, float(os.getenv('MAZE_MICRO_PROGRESSION_PERSIST_MIN_BATCH_QUALITY_EMA', '0.88'))))
-        self.maze_micro_progression_regression_enable = os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_ENABLE', '1') == '1'
-        self.maze_micro_progression_regression_fail_streak = max(1, int(os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_FAIL_STREAK', '2')))
-        self.maze_micro_progression_regression_min_run = max(2, int(os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_MIN_RUN', str(self.maze_micro_progression_persist_min_run))))
-        self.maze_micro_progression_regression_max_completion_ratio = max(0.0, min(1.0, float(os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_MAX_COMPLETION_RATIO', '0.65'))))
-        self.maze_micro_progression_regression_max_batch_quality_ema = max(0.0, min(1.0, float(os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_MAX_BATCH_QUALITY_EMA', '0.78'))))
-        self.maze_micro_progression_regression_min_completed_goals = max(0, int(os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_MIN_COMPLETED_GOALS', '0')))
-        self.maze_micro_progression_regression_step_count = max(1, int(os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_STEP_COUNT', '1')))
-        self.maze_micro_progression_regression_require_failure = os.getenv('MAZE_MICRO_PROGRESSION_REGRESSION_REQUIRE_FAILURE', '1') == '1'
+        self.maze_micro_progression_persist_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_PERSIST_ENABLE']) == '1'
+        self.maze_micro_progression_persist_min_completion_ratio = max(0.0, min(1.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_PERSIST_MIN_COMPLETION_RATIO']))))
+        self.maze_micro_progression_persist_require_success = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_PERSIST_REQUIRE_SUCCESS']) == '1'
+        self.maze_micro_progression_persist_min_run = max(2, int(self.maze_batch_micro_progression_min_run))
+        self.maze_micro_progression_persist_min_completed_goals = max(0, int(self.maze_micro_progression_persist_min_run))
+        self.maze_micro_progression_batch_quality_ema_decay = max(0.0, min(0.995, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_BATCH_QUALITY_EMA_DECAY']))))
+        self.maze_micro_progression_persist_min_batch_quality_ema = max(0.0, min(1.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_PERSIST_MIN_BATCH_QUALITY_EMA']))))
+        self.maze_micro_progression_regression_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_ENABLE']) == '1'
+        self.maze_micro_progression_regression_fail_streak = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_FAIL_STREAK'])))
+        self.maze_micro_progression_regression_min_run = max(2, int(self.maze_micro_progression_persist_min_run))
+        self.maze_micro_progression_regression_max_completion_ratio = max(0.0, min(1.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_MAX_COMPLETION_RATIO']))))
+        self.maze_micro_progression_regression_max_batch_quality_ema = max(0.0, min(1.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_MAX_BATCH_QUALITY_EMA']))))
+        self.maze_micro_progression_regression_min_completed_goals = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_MIN_COMPLETED_GOALS'])))
+        self.maze_micro_progression_regression_step_count = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_STEP_COUNT'])))
+        self.maze_micro_progression_regression_require_failure = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MICRO_PROGRESSION_REGRESSION_REQUIRE_FAILURE']) == '1'
         self.micro_progress_persisted_series_value = float(self.micro_progress_series_base)
         self.micro_progress_batch_quality_ema = 1.0
         self.micro_progress_regression_fail_streak = 0
@@ -494,21 +488,21 @@ class AIAssistantApp:
         self.blocked_cells: set[tuple[int, int]] = set()
         self.layout_mode = tk.StringVar(value='grid')
         self.maze_difficulty = tk.StringVar(value='medium')
-        self.maze_seed_base = int(os.getenv('MAZE_SEED', '1337'))
+        self.maze_seed_base = int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_SEED']))
         self.target_distance_min_ratio = float(os.getenv('TARGET_DISTANCE_MIN_RATIO', '0.75'))
         self.target_distance_max_ratio = float(os.getenv('TARGET_DISTANCE_MAX_RATIO', '1.0'))
-        self.maze_fov_depth = int(os.getenv('MAZE_FOV_DEPTH', '5'))
-        self.maze_fov_peripheral = int(os.getenv('MAZE_FOV_PERIPHERAL', '1'))
-        self.maze_fov_cone_degrees = float(os.getenv('MAZE_FOV_CONE_DEGREES', '95'))
-        self.maze_fov_full_threshold = float(os.getenv('MAZE_FOV_FULL_THRESHOLD', '0.22'))
-        self.maze_fov_half_threshold = float(os.getenv('MAZE_FOV_HALF_THRESHOLD', '0.08'))
-        self.maze_fov_distance_falloff = float(os.getenv('MAZE_FOV_DISTANCE_FALLOFF', '0.22'))
-        self.maze_fov_corner_graze_factor = float(os.getenv('MAZE_FOV_CORNER_GRAZE_FACTOR', '0.62'))
-        self.maze_fov_wedge_distance_scale = float(os.getenv('MAZE_FOV_WEDGE_DISTANCE_SCALE', '0.2'))
-        self.maze_fov_lateral_extra_degrees = float(os.getenv('MAZE_FOV_LATERAL_EXTRA_DEGREES', '18'))
-        self.maze_fov_lateral_near_depth = float(os.getenv('MAZE_FOV_LATERAL_NEAR_DEPTH', '4.0'))
-        self.maze_fov_lateral_floor_margin = float(os.getenv('MAZE_FOV_LATERAL_FLOOR_MARGIN', '0.04'))
-        self.maze_fov_lateral_band_cells = float(os.getenv('MAZE_FOV_LATERAL_BAND_CELLS', '2.5'))
+        self.maze_fov_depth = int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_DEPTH']))
+        self.maze_fov_peripheral = int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_PERIPHERAL']))
+        self.maze_fov_cone_degrees = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_CONE_DEGREES']))
+        self.maze_fov_full_threshold = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_FULL_THRESHOLD']))
+        self.maze_fov_half_threshold = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_HALF_THRESHOLD']))
+        self.maze_fov_distance_falloff = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_DISTANCE_FALLOFF']))
+        self.maze_fov_corner_graze_factor = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_CORNER_GRAZE_FACTOR']))
+        self.maze_fov_wedge_distance_scale = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_WEDGE_DISTANCE_SCALE']))
+        self.maze_fov_lateral_extra_degrees = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_LATERAL_EXTRA_DEGREES']))
+        self.maze_fov_lateral_near_depth = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_LATERAL_NEAR_DEPTH']))
+        self.maze_fov_lateral_floor_margin = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_LATERAL_FLOOR_MARGIN']))
+        self.maze_fov_lateral_band_cells = float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_FOV_LATERAL_BAND_CELLS']))
         self.maze_fov_lateral_extra_degrees = max(0.0, min(40.0, self.maze_fov_lateral_extra_degrees))
         self.maze_fov_lateral_near_depth = max(1.0, self.maze_fov_lateral_near_depth)
         self.maze_fov_lateral_floor_margin = max(0.0, min(0.2, self.maze_fov_lateral_floor_margin))
@@ -571,7 +565,7 @@ class AIAssistantApp:
         self.working_memory_recent_signatures: deque[str] = deque(maxlen=24)
         self._last_wm_signature_logged = ''
         self._last_wm_signature_logged_step = -1
-        self.stm_familiar_resample_interval = int(os.getenv('STM_FAMILIAR_RESAMPLE_INTERVAL', '12'))
+        self.stm_familiar_resample_interval = int(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_FAMILIAR_RESAMPLE_INTERVAL'])
         self.cause_effect_vector_dim = max(12, int(os.getenv('CAUSE_EFFECT_VECTOR_DIM', '24')))
         self.cause_effect_retrieval_top_k = max(1, int(os.getenv('CAUSE_EFFECT_RETRIEVAL_TOP_K', '6')))
         self.cause_effect_retrieval_min_similarity = float(os.getenv('CAUSE_EFFECT_RETRIEVAL_MIN_SIMILARITY', '0.22'))
@@ -612,19 +606,19 @@ class AIAssistantApp:
         self.prediction_lookahead_enable = os.getenv('PREDICTION_LOOKAHEAD_ENABLE', '1') == '1'
         self.prediction_lookahead_discount = min(1.0, max(0.0, float(os.getenv('PREDICTION_LOOKAHEAD_DISCOUNT', '0.4'))))
         self.prediction_lookahead_weight = max(0.0, float(os.getenv('PREDICTION_LOOKAHEAD_WEIGHT', '1.0')))
-        self.maze_projection_module_enable = os.getenv('MAZE_PROJECTION_MODULE_ENABLE', '1') == '1'
-        self.maze_projection_forward_depth = max(1, min(8, int(os.getenv('MAZE_PROJECTION_FORWARD_DEPTH', '3'))))
-        self.maze_projection_forward_weight = max(0.0, float(os.getenv('MAZE_PROJECTION_FORWARD_WEIGHT', '1.0')))
-        self.maze_projection_backtrace_window = max(4, min(64, int(os.getenv('MAZE_PROJECTION_BACKTRACE_WINDOW', '14'))))
-        self.maze_projection_backtrace_penalty_weight = max(0.0, float(os.getenv('MAZE_PROJECTION_BACKTRACE_PENALTY_WEIGHT', '1.0')))
-        self.maze_projection_backtrace_escape_weight = max(0.0, float(os.getenv('MAZE_PROJECTION_BACKTRACE_ESCAPE_WEIGHT', '1.0')))
-        self.maze_projection_score_influence_cap = max(0, int(os.getenv('MAZE_PROJECTION_SCORE_INFLUENCE_CAP', '24')))
-        self.maze_projection_score_influence_scale = max(0.0, float(os.getenv('MAZE_PROJECTION_SCORE_INFLUENCE_SCALE', '1.25')))
-        self.projection_trust_adapt_enable = os.getenv('PROJECTION_TRUST_ADAPT_ENABLE', '1') == '1'
-        self.projection_trust_ema_decay = min(0.999, max(0.5, float(os.getenv('PROJECTION_TRUST_EMA_DECAY', '0.97'))))
-        self.projection_trust_min_scale = min(1.0, max(0.05, float(os.getenv('PROJECTION_TRUST_MIN_SCALE', '0.25'))))
-        self.projection_trust_max_scale = min(1.5, max(self.projection_trust_min_scale, float(os.getenv('PROJECTION_TRUST_MAX_SCALE', '1.0'))))
-        self.projection_trust_warmup_steps = max(0, int(os.getenv('PROJECTION_TRUST_WARMUP_STEPS', '64')))
+        self.maze_projection_module_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_MODULE_ENABLE']) == '1'
+        self.maze_projection_forward_depth = max(1, min(8, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_FORWARD_DEPTH']))))
+        self.maze_projection_forward_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_FORWARD_WEIGHT'])))
+        self.maze_projection_backtrace_window = max(4, min(64, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_BACKTRACE_WINDOW']))))
+        self.maze_projection_backtrace_penalty_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_BACKTRACE_PENALTY_WEIGHT'])))
+        self.maze_projection_backtrace_escape_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_BACKTRACE_ESCAPE_WEIGHT'])))
+        self.maze_projection_score_influence_cap = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_SCORE_INFLUENCE_CAP'])))
+        self.maze_projection_score_influence_scale = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PROJECTION_SCORE_INFLUENCE_SCALE'])))
+        self.projection_trust_adapt_enable = bool(_WAVE5_TRUST_MEMORY_DEFAULTS['PROJECTION_TRUST_ADAPT_ENABLE'])
+        self.projection_trust_ema_decay = min(0.999, max(0.5, float(_WAVE5_TRUST_MEMORY_DEFAULTS['PROJECTION_TRUST_EMA_DECAY'])))
+        self.projection_trust_min_scale = min(1.0, max(0.05, float(_WAVE5_TRUST_MEMORY_DEFAULTS['PROJECTION_TRUST_MIN_SCALE'])))
+        self.projection_trust_max_scale = min(1.5, max(self.projection_trust_min_scale, float(_WAVE5_TRUST_MEMORY_DEFAULTS['PROJECTION_TRUST_MAX_SCALE'])))
+        self.projection_trust_warmup_steps = max(0, int(_WAVE5_TRUST_MEMORY_DEFAULTS['PROJECTION_TRUST_WARMUP_STEPS']))
         self.projection_trust_score_ema = 0.0
         self.projection_trust_observations = 0
         self.kernel_projection_reward_enable = os.getenv('KERNEL_PROJECTION_REWARD_ENABLE', '1') == '1'
@@ -647,22 +641,22 @@ class AIAssistantApp:
         self.prediction_shape_brier_total = 0.0
         self._prediction_context_stats_cache: dict[str, dict[str, float]] = {}
         self._prediction_context_trust_cache: dict[str, float] = {}
-        self.machine_vision_master_enable = os.getenv('MACHINE_VISION_ENABLE', '1') == '1'
+        self.machine_vision_master_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_ENABLE'])
         self.machine_vision_master_enable_var = tk.BooleanVar(value=self.machine_vision_master_enable)
-        self.machine_vision_player_localization_enable = os.getenv('MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE', '1') == '1'
-        self.machine_vision_player_localization_train_enable = os.getenv('MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE', '1') == '1'
-        self.machine_vision_exit_localization_enable = os.getenv('MACHINE_VISION_EXIT_LOCALIZATION_ENABLE', '1') == '1'
-        self.machine_vision_exit_localization_train_enable = os.getenv('MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE', '1') == '1'
+        self.machine_vision_player_localization_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE'])
+        self.machine_vision_player_localization_train_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE'])
+        self.machine_vision_exit_localization_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_EXIT_LOCALIZATION_ENABLE'])
+        self.machine_vision_exit_localization_train_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE'])
         self.machine_vision_overlay_color = '#9acd32'
         self.machine_vision_overlay_fill = '#adff2f'
         self.machine_vision_exit_overlay_color = '#9acd32'
         self.machine_vision_exit_overlay_fill = '#adff2f'
-        self.machine_vision_unseen_confidence_floor = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_UNSEEN_CONFIDENCE_FLOOR', '0.08'))))
-        self.machine_vision_unseen_temperature = max(0.05, float(os.getenv('MACHINE_VISION_UNSEEN_TEMPERATURE', '1.35')))
-        self.machine_vision_unseen_random_explore_chance = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_UNSEEN_RANDOM_EXPLORE_CHANCE', '0.2'))))
-        self.machine_vision_kernel_hint_enable = os.getenv('MACHINE_VISION_KERNEL_HINT_ENABLE', '1') == '1'
-        self.machine_vision_kernel_hint_min_conf = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_KERNEL_HINT_MIN_CONF', '0.08'))))
-        self.machine_vision_kernel_exit_bias_weight = max(0.0, float(os.getenv('MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT', '3.0')))
+        self.machine_vision_unseen_confidence_floor = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_UNSEEN_CONFIDENCE_FLOOR'])))
+        self.machine_vision_unseen_temperature = max(0.05, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_UNSEEN_TEMPERATURE']))
+        self.machine_vision_unseen_random_explore_chance = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_UNSEEN_RANDOM_EXPLORE_CHANCE'])))
+        self.machine_vision_kernel_hint_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_HINT_ENABLE'])
+        self.machine_vision_kernel_hint_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_HINT_MIN_CONF'])))
+        self.machine_vision_kernel_exit_bias_weight = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT']))
         self.mv_bootstrap_route_enable = os.getenv('MV_BOOTSTRAP_ROUTE_ENABLE', '1') == '1'
         self.mv_bootstrap_self_min_conf = min(1.0, max(0.0, float(os.getenv('MV_BOOTSTRAP_SELF_MIN_CONF', '0.9'))))
         self.mv_bootstrap_exit_min_conf = min(1.0, max(0.0, float(os.getenv('MV_BOOTSTRAP_EXIT_MIN_CONF', '0.9'))))
@@ -675,19 +669,19 @@ class AIAssistantApp:
         self.mv_preplan_acquire_max_sweeps = max(1, int(os.getenv('MV_PREPLAN_ACQUIRE_MAX_SWEEPS', '6')))
         self._mv_preplan_last_status = 'idle'
         self._mv_preplan_no_sweep_wait_streak = 0
-        self.machine_vision_cellmap_init_enable = os.getenv('MACHINE_VISION_CELLMAP_INIT_ENABLE', '1') == '1'
-        self.machine_vision_cellmap_overlay_enable = os.getenv('MACHINE_VISION_CELLMAP_OVERLAY_ENABLE', '1') == '1'
-        self.machine_vision_cellmap_overlay_show_text = os.getenv('MACHINE_VISION_CELLMAP_OVERLAY_SHOW_TEXT', '1') == '1'
-        self.machine_vision_cellmap_force_ready = os.getenv('MACHINE_VISION_CELLMAP_FORCE_READY', '1') == '1'
-        self.machine_vision_cellmap_min_confidence = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_MIN_CONFIDENCE', '0.9'))))
-        self.machine_vision_cellmap_kernel_hint_enable = os.getenv('MACHINE_VISION_CELLMAP_KERNEL_HINT_ENABLE', '1') == '1'
-        self.machine_vision_cellmap_kernel_min_conf = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_KERNEL_MIN_CONF', '0.75'))))
-        self.machine_vision_cellmap_kernel_bias_weight = max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_KERNEL_BIAS_WEIGHT', '10.0')))
+        self.machine_vision_cellmap_init_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_INIT_ENABLE'])
+        self.machine_vision_cellmap_overlay_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_OVERLAY_ENABLE'])
+        self.machine_vision_cellmap_overlay_show_text = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_OVERLAY_SHOW_TEXT'])
+        self.machine_vision_cellmap_force_ready = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_FORCE_READY'])
+        self.machine_vision_cellmap_min_confidence = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_CONFIDENCE'])))
+        self.machine_vision_cellmap_kernel_hint_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_HINT_ENABLE'])
+        self.machine_vision_cellmap_kernel_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_MIN_CONF'])))
+        self.machine_vision_cellmap_kernel_bias_weight = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_BIAS_WEIGHT']))
         self.mv_route_planning_mode_enable = os.getenv('MV_ROUTE_PLANNING_MODE_ENABLE', '0') == '1'
         self.mv_route_planning_mode_var = tk.BooleanVar(value=self.mv_route_planning_mode_enable)
-        self.machine_vision_cellmap_min_accuracy = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_MIN_ACCURACY', '1.0'))))
-        self.machine_vision_cellmap_min_confident_accuracy = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_MIN_CONFIDENT_ACCURACY', '1.0'))))
-        self.machine_vision_cellmap_refine_passes_per_check = max(1, int(os.getenv('MACHINE_VISION_CELLMAP_REFINE_PASSES_PER_CHECK', '1')))
+        self.machine_vision_cellmap_min_accuracy = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_ACCURACY'])))
+        self.machine_vision_cellmap_min_confident_accuracy = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_CONFIDENT_ACCURACY'])))
+        self.machine_vision_cellmap_refine_passes_per_check = max(1, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_REFINE_PASSES_PER_CHECK']))
         self.machine_vision_cellmap_refine_passes = 0
         self.machine_vision_cellmap_predictions: dict[tuple[int, int], dict[str, object]] = {}
         self.machine_vision_cellmap_layout_id = -1
@@ -695,8 +689,8 @@ class AIAssistantApp:
         self.machine_vision_cellmap_status = 'idle'
         self.machine_vision_cellmap_grade: dict[str, float | int] = {'total': 0, 'confident': 0, 'correct': 0, 'confident_correct': 0, 'forced': 0, 'accuracy': 0.0, 'confident_accuracy': 0.0, 'avg_confidence': 0.0, 'avg_brier': 0.0, 'refine_passes': 0}
         self._machine_vision_cellmap_grade_dirty = True
-        self.machine_vision_beam_equivalent_min_conf = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF', '0.9'))))
-        self.machine_vision_beam_equivalent_max_self_error = max(0, int(os.getenv('MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR', '1')))
+        self.machine_vision_beam_equivalent_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF'])))
+        self.machine_vision_beam_equivalent_max_self_error = max(0, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR']))
         self.machine_vision_recent_results: deque[dict[str, object]] = deque(maxlen=80)
         self.machine_vision_signature_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
         self.machine_vision_global_cell_counts: dict[tuple[int, int], int] = {}
@@ -716,17 +710,17 @@ class AIAssistantApp:
         self.machine_vision_exit_last_prediction: dict[str, object] = {'predicted_cell': (-1, -1), 'actual_cell': (-1, -1), 'confidence': 0.0, 'support': 0, 'exact': False, 'manhattan_error': 0, 'source': 'none', 'maze_layout_id': -1, 'step_index': -1}
         self._machine_vision_exit_last_sample_key: tuple[int, int, int, int] | None = None
         self._machine_vision_exit_rng = random.Random(self.maze_seed_base + 104729)
-        self.endocrine_enabled = os.getenv('ENDOCRINE_ENABLE', '1') == '1'
+        self.endocrine_enabled = bool(_WAVE5_TRUST_MEMORY_DEFAULTS['ENDOCRINE_ENABLE'])
         self.endocrine = EndocrineSystem()
         # Phase 1-4 deprecation channels are retired in the live runtime path.
         self.objective_override_phase_level = 4
         self.consolidated_override_phase_level = -1
-        self.learned_autonomy_subphase_enable = os.getenv('LEARNED_AUTONOMY_SUBPHASE_ENABLE', '1') == '1'
-        self.learned_autonomy_warmup_steps = max(24, int(os.getenv('LEARNED_AUTONOMY_WARMUP_STEPS', '120')))
-        self.learned_autonomy_ema_decay = max(0.5, min(0.999, float(os.getenv('LEARNED_AUTONOMY_EMA_DECAY', '0.97'))))
-        self.learned_autonomy_phase1_score = max(0.0, min(1.0, float(os.getenv('LEARNED_AUTONOMY_PHASE1_SCORE', '0.62'))))
-        self.learned_autonomy_phase2_score = max(self.learned_autonomy_phase1_score, min(1.0, float(os.getenv('LEARNED_AUTONOMY_PHASE2_SCORE', '0.78'))))
-        self.learned_autonomy_unresolved_target = max(0.0, min(1.0, float(os.getenv('LEARNED_AUTONOMY_UNRESOLVED_TARGET', '0.10'))))
+        self.learned_autonomy_subphase_enable = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['LEARNED_AUTONOMY_SUBPHASE_ENABLE'])
+        self.learned_autonomy_warmup_steps = max(24, int(_WAVE6_LEARNING_REASONING_DEFAULTS['LEARNED_AUTONOMY_WARMUP_STEPS']))
+        self.learned_autonomy_ema_decay = max(0.5, min(0.999, float(_WAVE6_LEARNING_REASONING_DEFAULTS['LEARNED_AUTONOMY_EMA_DECAY'])))
+        self.learned_autonomy_phase1_score = max(0.0, min(1.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['LEARNED_AUTONOMY_PHASE1_SCORE'])))
+        self.learned_autonomy_phase2_score = max(self.learned_autonomy_phase1_score, min(1.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['LEARNED_AUTONOMY_PHASE2_SCORE'])))
+        self.learned_autonomy_unresolved_target = max(0.0, min(1.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['LEARNED_AUTONOMY_UNRESOLVED_TARGET'])))
         self.learned_autonomy_controller = LearnedAutonomyController(enabled=self.learned_autonomy_subphase_enable, ema_decay=self.learned_autonomy_ema_decay, warmup_steps=self.learned_autonomy_warmup_steps, phase1_score=self.learned_autonomy_phase1_score, phase2_score=self.learned_autonomy_phase2_score, unresolved_target=self.learned_autonomy_unresolved_target)
         self.learned_autonomy_hard_phase_bonus = 0
         self.learned_autonomy_objective_phase_bonus = 0
@@ -743,26 +737,26 @@ class AIAssistantApp:
             self.kernel_phase_program.set_disabled_phase_ids(self.kernel_phase_disable_list)
         self.kernel_phase_last_target = ''
         self.kernel_phase_last_metric_debug: dict[str, object] = {}
-        self.parallel_reasoning_enable = os.getenv('PARALLEL_REASONING_ENGINE_ENABLE', '1') == '1'
-        self.parallel_reasoning_ema_decay = max(0.5, min(0.999, float(os.getenv('PARALLEL_REASONING_EMA_DECAY', '0.965'))))
-        self.parallel_reasoning_warmup_steps = max(24, int(os.getenv('PARALLEL_REASONING_WARMUP_STEPS', '140')))
-        self.parallel_reasoning_min_confidence = max(0.05, min(0.99, float(os.getenv('PARALLEL_REASONING_MIN_CONFIDENCE', '0.58'))))
-        self.parallel_reasoning_local_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_LOCAL_WEIGHT', '1.0')))
-        self.parallel_reasoning_adaptive_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_ADAPTIVE_WEIGHT', '1.0')))
-        self.parallel_reasoning_deliberative_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIBERATIVE_WEIGHT', '1.0')))
-        self.parallel_reasoning_deliberative_unknown_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIB_UNKNOWN_WEIGHT', '0.85')))
-        self.parallel_reasoning_deliberative_frontier_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIB_FRONTIER_WEIGHT', '0.95')))
-        self.parallel_reasoning_deliberative_lookahead_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIB_LOOKAHEAD_WEIGHT', '0.8')))
-        self.parallel_reasoning_deliberative_loop_penalty_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIB_LOOP_PENALTY_WEIGHT', '0.8')))
-        self.parallel_reasoning_deliberative_hazard_penalty_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIB_HAZARD_PENALTY_WEIGHT', '0.65')))
-        self.parallel_reasoning_deliberative_contradiction_penalty_weight = max(0.0, float(os.getenv('PARALLEL_REASONING_DELIB_CONTRADICTION_PENALTY_WEIGHT', '0.55')))
+        self.parallel_reasoning_enable = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_ENGINE_ENABLE'])
+        self.parallel_reasoning_ema_decay = max(0.5, min(0.999, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_EMA_DECAY'])))
+        self.parallel_reasoning_warmup_steps = max(24, int(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_WARMUP_STEPS']))
+        self.parallel_reasoning_min_confidence = max(0.05, min(0.99, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_MIN_CONFIDENCE'])))
+        self.parallel_reasoning_local_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_LOCAL_WEIGHT']))
+        self.parallel_reasoning_adaptive_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_ADAPTIVE_WEIGHT']))
+        self.parallel_reasoning_deliberative_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIBERATIVE_WEIGHT']))
+        self.parallel_reasoning_deliberative_unknown_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIB_UNKNOWN_WEIGHT']))
+        self.parallel_reasoning_deliberative_frontier_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIB_FRONTIER_WEIGHT']))
+        self.parallel_reasoning_deliberative_lookahead_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIB_LOOKAHEAD_WEIGHT']))
+        self.parallel_reasoning_deliberative_loop_penalty_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIB_LOOP_PENALTY_WEIGHT']))
+        self.parallel_reasoning_deliberative_hazard_penalty_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIB_HAZARD_PENALTY_WEIGHT']))
+        self.parallel_reasoning_deliberative_contradiction_penalty_weight = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_DELIB_CONTRADICTION_PENALTY_WEIGHT']))
         self.parallel_reasoning_engine = ParallelReasoningEngine(enabled=self.parallel_reasoning_enable, ema_decay=self.parallel_reasoning_ema_decay, warmup_steps=self.parallel_reasoning_warmup_steps, min_confidence=self.parallel_reasoning_min_confidence, local_weight=self.parallel_reasoning_local_weight, adaptive_weight=self.parallel_reasoning_adaptive_weight, deliberative_weight=self.parallel_reasoning_deliberative_weight, deliberative_unknown_weight=self.parallel_reasoning_deliberative_unknown_weight, deliberative_frontier_weight=self.parallel_reasoning_deliberative_frontier_weight, deliberative_lookahead_weight=self.parallel_reasoning_deliberative_lookahead_weight, deliberative_loop_penalty_weight=self.parallel_reasoning_deliberative_loop_penalty_weight, deliberative_hazard_penalty_weight=self.parallel_reasoning_deliberative_hazard_penalty_weight, deliberative_contradiction_penalty_weight=self.parallel_reasoning_deliberative_contradiction_penalty_weight)
         self.parallel_reasoning_last_result: dict[str, object] = {}
         try:
-            self.parallel_reasoning_profile = ReasoningProfile(str(os.getenv('PARALLEL_REASONING_PROFILE', 'BALANCED')).strip().upper())
+            self.parallel_reasoning_profile = ReasoningProfile(str(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_PROFILE']).strip().upper())
         except Exception:
             self.parallel_reasoning_profile = ReasoningProfile.BALANCED
-        self.parallel_reasoning_budget = ReasoningBudgetContract(max_branches=max(1, int(os.getenv('PARALLEL_REASONING_MAX_BRANCHES', '8'))), max_depth=max(1, int(os.getenv('PARALLEL_REASONING_MAX_DEPTH', '3'))), time_budget_ms=max(8, int(os.getenv('PARALLEL_REASONING_TIME_BUDGET_MS', '90'))), token_budget=max(64, int(os.getenv('PARALLEL_REASONING_TOKEN_BUDGET', '620'))))
+        self.parallel_reasoning_budget = ReasoningBudgetContract(max_branches=max(1, int(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_MAX_BRANCHES'])), max_depth=max(1, int(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_MAX_DEPTH'])), time_budget_ms=max(8, int(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_TIME_BUDGET_MS'])), token_budget=max(64, int(_WAVE6_LEARNING_REASONING_DEFAULTS['PARALLEL_REASONING_TOKEN_BUDGET'])))
         governance_enable = os.getenv('GOVERNANCE_ORCHESTRATOR_ENABLE', '1') == '1'
         try:
             dev_stage = DevelopmentStage(str(os.getenv('KERNEL_DEVELOPMENT_STAGE', 'JUVENILE_KERNEL')).strip())
@@ -775,13 +769,13 @@ class AIAssistantApp:
         if self.kernel_phase_program is not None:
             for phase_spec in self.kernel_phase_specs:
                 self.governance_orchestrator.register_module(ModuleCapabilityDescriptor(module_id=phase_spec.module_id, module_version='0.1', supported_features=('adaptive_micro_progression', 'phase_disable_resume', 'kernel_introspection'), known_limitations=('shadow_training_bootstrap',), safety_guarantees=('bounded_promotion_target',)))
-        self.hormone_caution_danger_weight = float(os.getenv('HORMONE_CAUTION_DANGER_WEIGHT', '18.0'))
-        self.hormone_curiosity_novelty_weight = float(os.getenv('HORMONE_CURIOSITY_NOVELTY_WEIGHT', os.getenv('HORMONE_CURIOUSITY_NOVELTY_WEIGHT', '14.0')))
-        self.hormone_boredom_repeat_weight = float(os.getenv('HORMONE_BOREDOM_REPEAT_WEIGHT', '10.0'))
-        self.hormone_confidence_risk_bonus = float(os.getenv('HORMONE_CONFIDENCE_RISK_BONUS', '8.0'))
-        self.hormone_momentum_bonus_weight = float(os.getenv('HORMONE_MOMENTUM_BONUS_WEIGHT', '6.0'))
-        self.hormone_mv_trust_bonus_weight = float(os.getenv('HORMONE_MV_TRUST_BONUS_WEIGHT', '9.0'))
-        self.endocrine_event_log_maxlen = max(160, int(os.getenv('ENDOCRINE_EVENT_LOG_MAXLEN', '1600')))
+        self.hormone_caution_danger_weight = float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_CAUTION_DANGER_WEIGHT'])
+        self.hormone_curiosity_novelty_weight = float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_CURIOSITY_NOVELTY_WEIGHT'])
+        self.hormone_boredom_repeat_weight = float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_BOREDOM_REPEAT_WEIGHT'])
+        self.hormone_confidence_risk_bonus = float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_CONFIDENCE_RISK_BONUS'])
+        self.hormone_momentum_bonus_weight = float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_MOMENTUM_BONUS_WEIGHT'])
+        self.hormone_mv_trust_bonus_weight = float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['HORMONE_MV_TRUST_BONUS_WEIGHT'])
+        self.endocrine_event_log_maxlen = max(160, int(_WAVE5_TRUST_MEMORY_DEFAULTS['ENDOCRINE_EVENT_LOG_MAXLEN']))
         self.endocrine_event_log: deque[str] = deque(maxlen=self.endocrine_event_log_maxlen)
         self._last_endocrine_trace_step = -1
         self.organism_control_enable = os.getenv('ORGANISM_CONTROL_ENABLE', '1') == '1'
@@ -790,21 +784,21 @@ class AIAssistantApp:
         self.organism_endocrine_state = OrganismEndocrineState()
         self.organism_control_state = OrganismControlState()
         self.organism_last_step_debug = ''
-        self.maze_agent_enable = os.getenv('MAZE_AGENT_ENABLE', '1') == '1'
-        self.maze_agent_cycle_taboo_duration = max(4, int(os.getenv('MAZE_AGENT_CYCLE_TABOO_DURATION', '12')))
-        self.maze_agent_corridor_escape_threshold = max(2, int(os.getenv('MAZE_AGENT_CORRIDOR_ESCAPE_THRESHOLD', '5')))
-        self.maze_agent_escape_timeout = max(4, int(os.getenv('MAZE_AGENT_ESCAPE_TIMEOUT', '14')))
-        self.maze_agent_escape_exit_pressure = max(0.0, float(os.getenv('MAZE_AGENT_ESCAPE_EXIT_PRESSURE', '0.25')))
-        self.maze_agent_corridor_overuse_threshold = max(0.1, float(os.getenv('MAZE_AGENT_CORRIDOR_OVERUSE_THRESHOLD', '0.55')))
-        self.maze_agent_novelty_weight = max(0.0, float(os.getenv('MAZE_AGENT_NOVELTY_WEIGHT', '2.0')))
-        self.maze_agent_frontier_weight = max(0.0, float(os.getenv('MAZE_AGENT_FRONTIER_WEIGHT', '3.0')))
-        self.maze_agent_junction_bonus = max(0.0, float(os.getenv('MAZE_AGENT_JUNCTION_BONUS', '1.5')))
-        self.maze_agent_corridor_overuse_penalty = max(0.0, float(os.getenv('MAZE_AGENT_CORRIDOR_OVERUSE_PENALTY', '4.0')))
-        self.maze_agent_dead_end_penalty = max(0.0, float(os.getenv('MAZE_AGENT_DEAD_END_PENALTY', '2.0')))
-        self.maze_agent_motif_weight = max(0.0, float(os.getenv('MAZE_AGENT_MOTIF_WEIGHT', '1.0')))
-        self.maze_agent_loop_risk_weight = max(0.0, float(os.getenv('MAZE_AGENT_LOOP_RISK_WEIGHT', '3.0')))
-        self.maze_agent_corridor_forward_bias = max(0.0, float(os.getenv('MAZE_AGENT_CORRIDOR_FORWARD_BIAS', '1.2')))
-        self.maze_agent_side_open_bias = max(0.0, float(os.getenv('MAZE_AGENT_SIDE_OPEN_BIAS', '0.8')))
+        self.maze_agent_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_ENABLE']) == '1'
+        self.maze_agent_cycle_taboo_duration = max(4, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_CYCLE_TABOO_DURATION'])))
+        self.maze_agent_corridor_escape_threshold = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_CORRIDOR_ESCAPE_THRESHOLD'])))
+        self.maze_agent_escape_timeout = max(4, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_ESCAPE_TIMEOUT'])))
+        self.maze_agent_escape_exit_pressure = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_ESCAPE_EXIT_PRESSURE'])))
+        self.maze_agent_corridor_overuse_threshold = max(0.1, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_CORRIDOR_OVERUSE_THRESHOLD'])))
+        self.maze_agent_novelty_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_NOVELTY_WEIGHT'])))
+        self.maze_agent_frontier_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_FRONTIER_WEIGHT'])))
+        self.maze_agent_junction_bonus = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_JUNCTION_BONUS'])))
+        self.maze_agent_corridor_overuse_penalty = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_CORRIDOR_OVERUSE_PENALTY'])))
+        self.maze_agent_dead_end_penalty = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_DEAD_END_PENALTY'])))
+        self.maze_agent_motif_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_MOTIF_WEIGHT'])))
+        self.maze_agent_loop_risk_weight = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_LOOP_RISK_WEIGHT'])))
+        self.maze_agent_corridor_forward_bias = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_CORRIDOR_FORWARD_BIAS'])))
+        self.maze_agent_side_open_bias = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_AGENT_SIDE_OPEN_BIAS'])))
         self.maze_agent = self._build_maze_agent()
         self.kernel_phase_force_safety_core_enable = KERNEL_PHASE_FORCE_SAFETY_CORE_DEFAULT_ENABLE_RUNTIME
         kernel_init_kernel_phase_policy_runtime(self)
@@ -823,35 +817,35 @@ class AIAssistantApp:
         self.memory_export_debug_limit = max(0, int(os.getenv('MEMORY_EXPORT_DEBUG_LIMIT', '3000')))
         self.memory_export_ascii_max_lines = max(0, int(os.getenv('MEMORY_EXPORT_ASCII_MAX_LINES', '220')))
         self.memory_export_strip_look_sections = os.getenv('MEMORY_EXPORT_STRIP_LOOK_SECTIONS', '1') == '1'
-        self.maze_ascii_visible_only = os.getenv('MAZE_ASCII_VISIBLE_ONLY', '0') == '1'
+        self.maze_ascii_visible_only = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_ASCII_VISIBLE_ONLY']) == '1'
         self.memory_step_index = 0
-        self.sleep_cycle_enable = os.getenv('SLEEP_CYCLE_ENABLE', '1') == '1'
-        self.sleep_cycle_auto_interval_steps = max(0, int(os.getenv('SLEEP_CYCLE_AUTO_INTERVAL_STEPS', '0')))
-        self.sleep_cycle_auto_after_maze_completion = os.getenv('SLEEP_CYCLE_AUTO_AFTER_MAZE_COMPLETION', '1') == '1'
-        self.sleep_cycle_auto_after_run_set = os.getenv('SLEEP_CYCLE_AUTO_AFTER_RUN_SET', '1') == '1'
-        self.sleep_cycle_auto_after_log_dump = os.getenv('SLEEP_CYCLE_AUTO_AFTER_LOG_DUMP', '1') == '1'
-        self.sleep_cycle_hormone_prune_enable = os.getenv('SLEEP_CYCLE_HORMONE_PRUNE_ENABLE', '1') == '1'
-        self.sleep_cycle_hormone_decay_passes = max(1, int(os.getenv('SLEEP_CYCLE_HORMONE_DECAY_PASSES', '2')))
-        self.sleep_cycle_hormone_pull_strength = min(1.0, max(0.0, float(os.getenv('SLEEP_CYCLE_HORMONE_PULL_STRENGTH', '0.08'))))
-        self.sleep_cycle_hormone_extreme_threshold = min(0.999, max(0.5, float(os.getenv('SLEEP_CYCLE_HORMONE_EXTREME_THRESHOLD', '0.95'))))
-        self.sleep_cycle_usage_boost = max(0.0, float(os.getenv('SLEEP_CYCLE_USAGE_BOOST', '0.04')))
-        self.sleep_cycle_usage_recent_window_steps = max(8, int(os.getenv('SLEEP_CYCLE_USAGE_RECENT_WINDOW_STEPS', '96')))
-        self.sleep_cycle_memory_event_keep = max(200, int(os.getenv('SLEEP_CYCLE_MEMORY_EVENT_KEEP', '1400')))
-        self.sleep_cycle_endocrine_event_keep = max(80, int(os.getenv('SLEEP_CYCLE_ENDOCRINE_EVENT_KEEP', '240')))
-        self.sleep_cycle_action_outcome_keep_rows = max(0, int(os.getenv('SLEEP_CYCLE_ACTION_OUTCOME_KEEP_ROWS', '120000')))
-        self.sleep_cycle_prediction_keep_rows = max(0, int(os.getenv('SLEEP_CYCLE_PREDICTION_KEEP_ROWS', '160000')))
-        self.sleep_cycle_log_rle_enable = os.getenv('SLEEP_CYCLE_LOG_RLE_ENABLE', '1') == '1'
-        self.sleep_cycle_log_rle_min_run = max(2, int(os.getenv('SLEEP_CYCLE_LOG_RLE_MIN_RUN', '4')))
-        self.sleep_cycle_stm_max_rows = max(0, int(os.getenv('STM_MAX_ROWS', '25000')))
-        self.sleep_cycle_semantic_max_rows = max(0, int(os.getenv('SEMANTIC_MAX_ROWS', '40000')))
+        self.sleep_cycle_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_ENABLE'])
+        self.sleep_cycle_auto_interval_steps = max(0, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_AUTO_INTERVAL_STEPS']))
+        self.sleep_cycle_auto_after_maze_completion = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_AUTO_AFTER_MAZE_COMPLETION'])
+        self.sleep_cycle_auto_after_run_set = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_AUTO_AFTER_RUN_SET'])
+        self.sleep_cycle_auto_after_log_dump = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_AUTO_AFTER_LOG_DUMP'])
+        self.sleep_cycle_hormone_prune_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_HORMONE_PRUNE_ENABLE'])
+        self.sleep_cycle_hormone_decay_passes = max(1, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_HORMONE_DECAY_PASSES']))
+        self.sleep_cycle_hormone_pull_strength = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_HORMONE_PULL_STRENGTH'])))
+        self.sleep_cycle_hormone_extreme_threshold = min(0.999, max(0.5, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_HORMONE_EXTREME_THRESHOLD'])))
+        self.sleep_cycle_usage_boost = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_USAGE_BOOST']))
+        self.sleep_cycle_usage_recent_window_steps = max(8, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_USAGE_RECENT_WINDOW_STEPS']))
+        self.sleep_cycle_memory_event_keep = max(200, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_MEMORY_EVENT_KEEP']))
+        self.sleep_cycle_endocrine_event_keep = max(80, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_ENDOCRINE_EVENT_KEEP']))
+        self.sleep_cycle_action_outcome_keep_rows = max(0, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_ACTION_OUTCOME_KEEP_ROWS']))
+        self.sleep_cycle_prediction_keep_rows = max(0, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_PREDICTION_KEEP_ROWS']))
+        self.sleep_cycle_log_rle_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_LOG_RLE_ENABLE'])
+        self.sleep_cycle_log_rle_min_run = max(2, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_LOG_RLE_MIN_RUN']))
+        self.sleep_cycle_stm_max_rows = max(0, int(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_MAX_ROWS']))
+        self.sleep_cycle_semantic_max_rows = max(0, int(_WAVE5_TRUST_MEMORY_DEFAULTS['SEMANTIC_MAX_ROWS']))
         self.sleep_cycle_cause_effect_stm_max_rows = max(0, int(os.getenv('CAUSE_EFFECT_STM_MAX_ROWS', '25000')))
         self.sleep_cycle_cause_effect_semantic_max_rows = max(0, int(os.getenv('CAUSE_EFFECT_SEMANTIC_MAX_ROWS', '40000')))
         self.sleep_cycle_cause_effect_semantic_prune_enable = os.getenv('CAUSE_EFFECT_SEMANTIC_PRUNE_ENABLE', '1') == '1'
         self.sleep_cycle_cause_effect_semantic_prune_strength_threshold = max(0.0, float(os.getenv('CAUSE_EFFECT_SEMANTIC_PRUNE_STRENGTH_THRESHOLD', '0.35')))
         self.sleep_cycle_cause_effect_semantic_prune_recall_max = max(0, int(os.getenv('CAUSE_EFFECT_SEMANTIC_PRUNE_RECALL_MAX', '1')))
         self.sleep_cycle_cause_effect_semantic_prune_abs_outcome_max = max(0.0, float(os.getenv('CAUSE_EFFECT_SEMANTIC_PRUNE_ABS_OUTCOME_MAX', '0.25')))
-        self.sleep_cycle_vacuum_on_manual = os.getenv('SLEEP_CYCLE_VACUUM_ON_MANUAL', '0') == '1'
-        self.sleep_cycle_vacuum_on_auto = os.getenv('SLEEP_CYCLE_VACUUM_ON_AUTO', '0') == '1'
+        self.sleep_cycle_vacuum_on_manual = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_VACUUM_ON_MANUAL'])
+        self.sleep_cycle_vacuum_on_auto = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['SLEEP_CYCLE_VACUUM_ON_AUTO'])
         self.step_hygiene_enable = os.getenv('STEP_HYGIENE_ENABLE', '1') == '1'
         self.step_hygiene_interval_steps = max(0, int(os.getenv('STEP_HYGIENE_INTERVAL_STEPS', '24')))
         self.step_hygiene_full_gc_interval_steps = max(0, int(os.getenv('STEP_HYGIENE_FULL_GC_INTERVAL_STEPS', '180')))
@@ -862,16 +856,16 @@ class AIAssistantApp:
         self._last_sleep_cycle_step = -10000
         self._last_step_hygiene_step = -10000
         self._last_step_hygiene_full_gc_step = -10000
-        self.stm_reinforce_alpha = float(os.getenv('STM_REINFORCE_ALPHA', '0.2'))
-        self.stm_decay_rate = float(os.getenv('STM_DECAY_RATE', '0.97'))
-        self.stm_prune_threshold = float(os.getenv('STM_PRUNE_THRESHOLD', '0.15'))
-        self.semantic_promotion_threshold = float(os.getenv('SEMANTIC_PROMOTION_THRESHOLD', '1.2'))
+        self.stm_reinforce_alpha = float(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_REINFORCE_ALPHA'])
+        self.stm_decay_rate = float(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_DECAY_RATE'])
+        self.stm_prune_threshold = float(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_PRUNE_THRESHOLD'])
+        self.semantic_promotion_threshold = float(_WAVE5_TRUST_MEMORY_DEFAULTS['SEMANTIC_PROMOTION_THRESHOLD'])
         self.cause_effect_pruning_interval_steps = max(1, int(os.getenv('CAUSE_EFFECT_PRUNING_INTERVAL_STEPS', '12')))
         self._last_cause_effect_pruning_step = -10000
-        self.stm_pruning_interval_steps = max(1, int(os.getenv('STM_PRUNING_INTERVAL_STEPS', '6')))
-        self.stm_access_unused_prune_chance = min(1.0, max(0.0, float(os.getenv('STM_ACCESS_UNUSED_PRUNE_CHANCE', '0.04'))))
-        self.stm_access_unused_prune_min_age_steps = max(1, int(os.getenv('STM_ACCESS_UNUSED_PRUNE_MIN_AGE_STEPS', '24')))
-        self.stm_access_unused_prune_max_rows = max(1, int(os.getenv('STM_ACCESS_UNUSED_PRUNE_MAX_ROWS', '1')))
+        self.stm_pruning_interval_steps = max(1, int(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_PRUNING_INTERVAL_STEPS']))
+        self.stm_access_unused_prune_chance = min(1.0, max(0.0, float(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_ACCESS_UNUSED_PRUNE_CHANCE'])))
+        self.stm_access_unused_prune_min_age_steps = max(1, int(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_ACCESS_UNUSED_PRUNE_MIN_AGE_STEPS']))
+        self.stm_access_unused_prune_max_rows = max(1, int(_WAVE5_TRUST_MEMORY_DEFAULTS['STM_ACCESS_UNUSED_PRUNE_MAX_ROWS']))
         self._last_stm_pruning_step = -10000
         self.maze_recent_cells: deque[tuple[int, int]] = deque(maxlen=18)
         self.reset_epoch = 0
@@ -915,15 +909,15 @@ class AIAssistantApp:
         self.frontier_lock_memory_veto_margin = max(0.0, float(os.getenv('FRONTIER_LOCK_MEMORY_VETO_MARGIN', '120')))
         self.frontier_lock_memory_veto_window = max(6, int(os.getenv('FRONTIER_LOCK_MEMORY_VETO_WINDOW', '18')))
         self.frontier_lock_memory_veto_score_margin = max(0, int(os.getenv('FRONTIER_LOCK_MEMORY_VETO_SCORE_MARGIN', '120')))
-        self.hazard_preparedness_enable = os.getenv('HAZARD_PREPAREDNESS_ENABLE', '1') == '1'
-        self.hazard_preparedness_window = max(8, int(os.getenv('HAZARD_PREPAREDNESS_WINDOW', '28')))
-        self.hazard_preparedness_min_samples = max(1, int(os.getenv('HAZARD_PREPAREDNESS_MIN_SAMPLES', '2')))
-        self.hazard_preparedness_rank_decay = max(0.1, float(os.getenv('HAZARD_PREPAREDNESS_RANK_DECAY', '0.7')))
-        self.hazard_preparedness_penalty_scale = max(0.0, float(os.getenv('HAZARD_PREPAREDNESS_PENALTY_SCALE', '0.16')))
-        self.hazard_preparedness_max_penalty = max(0, int(os.getenv('HAZARD_PREPAREDNESS_MAX_PENALTY', '120')))
-        self.hazard_preparedness_reward_relief_scale = max(0.0, float(os.getenv('HAZARD_PREPAREDNESS_REWARD_RELIEF_SCALE', '0.85')))
-        self.hazard_preparedness_risk_hit_weight = max(0.0, float(os.getenv('HAZARD_PREPAREDNESS_RISK_HIT_WEIGHT', '16.0')))
-        self.hazard_preparedness_safe_hit_weight = max(0.0, float(os.getenv('HAZARD_PREPAREDNESS_SAFE_HIT_WEIGHT', '12.0')))
+        self.hazard_preparedness_enable = bool(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_ENABLE'])
+        self.hazard_preparedness_window = max(8, int(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_WINDOW']))
+        self.hazard_preparedness_min_samples = max(1, int(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_MIN_SAMPLES']))
+        self.hazard_preparedness_rank_decay = max(0.1, float(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_RANK_DECAY']))
+        self.hazard_preparedness_penalty_scale = max(0.0, float(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_PENALTY_SCALE']))
+        self.hazard_preparedness_max_penalty = max(0, int(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_MAX_PENALTY']))
+        self.hazard_preparedness_reward_relief_scale = max(0.0, float(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_REWARD_RELIEF_SCALE']))
+        self.hazard_preparedness_risk_hit_weight = max(0.0, float(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_RISK_HIT_WEIGHT']))
+        self.hazard_preparedness_safe_hit_weight = max(0.0, float(_WAVE5_TRUST_MEMORY_DEFAULTS['HAZARD_PREPAREDNESS_SAFE_HIT_WEIGHT']))
         self.frontier_lock_force_score_guard_enable = os.getenv('FRONTIER_LOCK_FORCE_SCORE_GUARD_ENABLE', '1') == '1'
         self.frontier_lock_force_score_margin = max(0, int(os.getenv('FRONTIER_LOCK_FORCE_SCORE_MARGIN', '120')))
         self.objective_unresolved_force_score_margin = max(0, int(os.getenv('OBJECTIVE_UNRESOLVED_FORCE_SCORE_MARGIN', '90')))
@@ -949,12 +943,12 @@ class AIAssistantApp:
         self.terminal_override_unresolved_margin_reduction = max(0, int(os.getenv('TERMINAL_OVERRIDE_UNRESOLVED_MARGIN_REDUCTION', '6')))
         self.terminal_override_require_repeat_improvement_unresolved = os.getenv('TERMINAL_OVERRIDE_REQUIRE_REPEAT_IMPROVEMENT_UNRESOLVED', '1') == '1'
         self.terminal_end_hard_avoid = os.getenv('TERMINAL_END_HARD_AVOID', '1') == '1'
-        self.terminal_trust_adapt_enable = os.getenv('TERMINAL_TRUST_ADAPT_ENABLE', '1') == '1'
-        self.terminal_trust_ema_decay = min(0.999, max(0.5, float(os.getenv('TERMINAL_TRUST_EMA_DECAY', '0.97'))))
-        self.terminal_trust_min_scale = min(1.0, max(0.05, float(os.getenv('TERMINAL_TRUST_MIN_SCALE', '0.35'))))
-        self.terminal_trust_max_scale = min(1.5, max(self.terminal_trust_min_scale, float(os.getenv('TERMINAL_TRUST_MAX_SCALE', '1.0'))))
-        self.terminal_trust_warmup_steps = max(0, int(os.getenv('TERMINAL_TRUST_WARMUP_STEPS', '64')))
-        self.terminal_trust_hard_avoid_min_scale = min(1.0, max(0.0, float(os.getenv('TERMINAL_TRUST_HARD_AVOID_MIN_SCALE', '0.72'))))
+        self.terminal_trust_adapt_enable = bool(_WAVE5_TRUST_MEMORY_DEFAULTS['TERMINAL_TRUST_ADAPT_ENABLE'])
+        self.terminal_trust_ema_decay = min(0.999, max(0.5, float(_WAVE5_TRUST_MEMORY_DEFAULTS['TERMINAL_TRUST_EMA_DECAY'])))
+        self.terminal_trust_min_scale = min(1.0, max(0.05, float(_WAVE5_TRUST_MEMORY_DEFAULTS['TERMINAL_TRUST_MIN_SCALE'])))
+        self.terminal_trust_max_scale = min(1.5, max(self.terminal_trust_min_scale, float(_WAVE5_TRUST_MEMORY_DEFAULTS['TERMINAL_TRUST_MAX_SCALE'])))
+        self.terminal_trust_warmup_steps = max(0, int(_WAVE5_TRUST_MEMORY_DEFAULTS['TERMINAL_TRUST_WARMUP_STEPS']))
+        self.terminal_trust_hard_avoid_min_scale = min(1.0, max(0.0, float(_WAVE5_TRUST_MEMORY_DEFAULTS['TERMINAL_TRUST_HARD_AVOID_MIN_SCALE'])))
         self.terminal_trust_score_ema = 0.0
         self.terminal_trust_observations = 0
         self._terminal_hard_filter_applied_last = False
@@ -968,23 +962,23 @@ class AIAssistantApp:
         self.frontier_override_score_margin = int(os.getenv('FRONTIER_OVERRIDE_SCORE_MARGIN', '6'))
         self.no_progress_repeat_penalty = int(os.getenv('NO_PROGRESS_REPEAT_PENALTY', '22'))
         self.loop_commitment_penalty = int(os.getenv('LOOP_COMMITMENT_PENALTY', '28'))
-        self.adaptive_guard_enable = os.getenv('ADAPTIVE_GUARD_ENABLE', '1') == '1'
-        adaptive_guard_strength_init = max(0.05, min(1.0, float(os.getenv('ADAPTIVE_GUARD_LEGACY_STRENGTH_INIT', '1.0'))))
+        self.adaptive_guard_enable = bool(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_ENABLE'])
+        adaptive_guard_strength_init = max(0.05, min(1.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_LEGACY_STRENGTH_INIT'])))
         self.adaptive_guard_legacy_strength_init = adaptive_guard_strength_init
         self.adaptive_guard_legacy_strength = adaptive_guard_strength_init
-        self.adaptive_guard_legacy_min_strength = max(0.05, min(1.0, float(os.getenv('ADAPTIVE_GUARD_LEGACY_MIN_STRENGTH', '0.25'))))
+        self.adaptive_guard_legacy_min_strength = max(0.05, min(1.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_LEGACY_MIN_STRENGTH'])))
         if self.adaptive_guard_legacy_strength < self.adaptive_guard_legacy_min_strength:
             self.adaptive_guard_legacy_strength = self.adaptive_guard_legacy_min_strength
         if self.adaptive_guard_legacy_strength_init < self.adaptive_guard_legacy_min_strength:
             self.adaptive_guard_legacy_strength_init = self.adaptive_guard_legacy_min_strength
-        self.adaptive_guard_learn_rate = max(0.0, min(0.5, float(os.getenv('ADAPTIVE_GUARD_LEARN_RATE', '0.045'))))
-        self.adaptive_guard_ema_decay = max(0.5, min(0.999, float(os.getenv('ADAPTIVE_GUARD_EMA_DECAY', '0.94'))))
-        self.adaptive_guard_utility_target = max(0.05, min(0.95, float(os.getenv('ADAPTIVE_GUARD_UTILITY_TARGET', '0.58'))))
-        self.adaptive_guard_intervention_target = max(0.02, min(0.95, float(os.getenv('ADAPTIVE_GUARD_INTERVENTION_TARGET', '0.28'))))
-        self.adaptive_guard_penalty_floor = max(0.0, float(os.getenv('ADAPTIVE_GUARD_PENALTY_FLOOR', '18.0')))
-        self.adaptive_guard_budget_window = max(8, int(os.getenv('ADAPTIVE_GUARD_BUDGET_WINDOW', '18')))
-        self.adaptive_guard_budget_base = max(1, int(os.getenv('ADAPTIVE_GUARD_BUDGET_BASE', '6')))
-        self.adaptive_guard_hysteresis_steps = max(0, int(os.getenv('ADAPTIVE_GUARD_HYSTERESIS_STEPS', '3')))
+        self.adaptive_guard_learn_rate = max(0.0, min(0.5, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_LEARN_RATE'])))
+        self.adaptive_guard_ema_decay = max(0.5, min(0.999, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_EMA_DECAY'])))
+        self.adaptive_guard_utility_target = max(0.05, min(0.95, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_UTILITY_TARGET'])))
+        self.adaptive_guard_intervention_target = max(0.02, min(0.95, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_INTERVENTION_TARGET'])))
+        self.adaptive_guard_penalty_floor = max(0.0, float(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_PENALTY_FLOOR']))
+        self.adaptive_guard_budget_window = max(8, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_BUDGET_WINDOW']))
+        self.adaptive_guard_budget_base = max(1, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_BUDGET_BASE']))
+        self.adaptive_guard_hysteresis_steps = max(0, int(_WAVE6_LEARNING_REASONING_DEFAULTS['ADAPTIVE_GUARD_HYSTERESIS_STEPS']))
         self.long_run_runtime_normalize_enable = os.getenv('LONG_RUN_RUNTIME_NORMALIZE_ENABLE', '1') == '1'
         self.long_run_runtime_guard_blend = max(0.0, min(1.0, float(os.getenv('LONG_RUN_RUNTIME_GUARD_BLEND', '0.22'))))
         training_phase_defaults = dict(TRAINING_PHASE_DEFAULT_SETTINGS_RUNTIME)
@@ -1090,7 +1084,7 @@ class AIAssistantApp:
         self.last_uncertainty_score_margin = max(0, int(os.getenv('LAST_UNCERTAINTY_SCORE_MARGIN', '64')))
         self.terminal_corridor_hard_veto_penalty = int(os.getenv('TERMINAL_CORRIDOR_HARD_VETO_PENALTY', '220'))
         self.high_risk_frontier_override_bonus = int(os.getenv('HIGH_RISK_FRONTIER_OVERRIDE_BONUS', '26'))
-        self.maze_step_limit_reset_enable = os.getenv('MAZE_STEP_LIMIT_RESET_ENABLE', '1') == '1'
+        self.maze_step_limit_reset_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STEP_LIMIT_RESET_ENABLE']) == '1'
         self.branch_tightening_abort_threshold = max(2, int(os.getenv('BRANCH_TIGHTENING_ABORT_THRESHOLD', '6')))
         self.branch_tightening_abort_penalty = max(0, int(os.getenv('BRANCH_TIGHTENING_ABORT_PENALTY', '240')))
         self.branch_tightening_escape_bonus = max(0, int(os.getenv('BRANCH_TIGHTENING_ESCAPE_BONUS', '36')))
@@ -1108,7 +1102,7 @@ class AIAssistantApp:
         self.spatial_exit_guidance_ema = 0.0
         self.dead_end_end_slap_penalty = float(os.getenv('DEAD_END_END_SLAP_PENALTY', '58.0'))
         self.dead_end_tip_revisit_slap_penalty = float(os.getenv('DEAD_END_TIP_REVISIT_SLAP_PENALTY', '92.0'))
-        self.semantic_reinforce_cooldown_steps = max(0, int(os.getenv('SEMANTIC_REINFORCE_COOLDOWN_STEPS', '6')))
+        self.semantic_reinforce_cooldown_steps = max(0, int(_WAVE5_TRUST_MEMORY_DEFAULTS['SEMANTIC_REINFORCE_COOLDOWN_STEPS']))
         self.tie_random_requires_novel = os.getenv('TIE_RANDOM_REQUIRES_NOVEL', '1') == '1'
         self.maze_recent_transitions: deque[tuple[tuple[int, int], tuple[int, int]]] = deque(maxlen=max(24, self.recent_cycle_window * 3))
         self.move_delay_ms = int(os.getenv('GAME_MOVE_DELAY_MS', '250'))
@@ -1180,26 +1174,26 @@ class AIAssistantApp:
         self.last_navigation_difficulty = (self.maze_difficulty.get() or 'medium').strip().lower()
         self.runtime_maze_difficulty_override = None
         self.maze_plateau_extra_hard_enable = _MAZE_PLATEAU_AUTO_VERY_HARD_ENABLE
-        self.maze_plateau_extra_hard_streak = max(1, min(12, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_STREAK', '2'))))
-        self.maze_plateau_extra_hard_runs = max(0, min(self.max_repeat_executions, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_RUNS', '1'))))
-        self.maze_plateau_extra_hard_max_triggers = max(1, min(self.max_repeat_executions, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_MAX_TRIGGERS', '2'))))
-        self.maze_plateau_extra_hard_min_batch_loop = max(1, min(self.max_repeat_executions, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_MIN_BATCH_LOOP', '2'))))
-        self.maze_plateau_extra_hard_difficulty = str(os.getenv('MAZE_PLATEAU_EXTRA_HARD_DIFFICULTY', 'very hard')).strip().lower()
+        self.maze_plateau_extra_hard_streak = max(1, min(12, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PLATEAU_EXTRA_HARD_STREAK']))))
+        self.maze_plateau_extra_hard_runs = max(0, min(self.max_repeat_executions, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PLATEAU_EXTRA_HARD_RUNS']))))
+        self.maze_plateau_extra_hard_max_triggers = max(1, min(self.max_repeat_executions, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PLATEAU_EXTRA_HARD_MAX_TRIGGERS']))))
+        self.maze_plateau_extra_hard_min_batch_loop = max(1, min(self.max_repeat_executions, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PLATEAU_EXTRA_HARD_MIN_BATCH_LOOP']))))
+        self.maze_plateau_extra_hard_difficulty = str(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PLATEAU_EXTRA_HARD_DIFFICULTY'])).strip().lower()
         if self.maze_plateau_extra_hard_difficulty not in {'easy', 'medium', 'hard', 'very hard'}:
             self.maze_plateau_extra_hard_difficulty = 'very hard'
-        self.maze_map_doubt_enable = os.getenv('MAZE_MAP_DOUBT_ENABLE', '1') == '1'
-        self.maze_map_doubt_repeat_threshold = max(2, int(os.getenv('MAZE_MAP_DOUBT_REPEAT_THRESHOLD', '3')))
-        self.maze_map_doubt_stall_threshold = max(1, int(os.getenv('MAZE_MAP_DOUBT_STALL_THRESHOLD', '2')))
-        self.maze_map_doubt_cooldown_steps = max(1, int(os.getenv('MAZE_MAP_DOUBT_COOLDOWN_STEPS', '8')))
-        self.maze_stuck_reexplore_enable = os.getenv('MAZE_STUCK_REEXPLORE_ENABLE', '1') == '1'
-        self.maze_stuck_repeat_threshold = max(2, int(os.getenv('MAZE_STUCK_REPEAT_THRESHOLD', '3')))
-        self.maze_stuck_no_progress_threshold = max(2, int(os.getenv('MAZE_STUCK_NO_PROGRESS_THRESHOLD', '4')))
-        self.maze_stuck_window = max(8, int(os.getenv('MAZE_STUCK_WINDOW', '18')))
-        self.maze_stuck_reexplore_cooldown_steps = max(2, int(os.getenv('MAZE_STUCK_REEXPLORE_COOLDOWN_STEPS', '10')))
-        self.maze_stuck_prediction_conf_floor = min(1.0, max(0.0, float(os.getenv('MAZE_STUCK_PREDICTION_CONF_FLOOR', '0.08'))))
-        self.maze_stuck_prediction_bias_scale = max(0.0, float(os.getenv('MAZE_STUCK_PREDICTION_BIAS_SCALE', '0.35')))
-        self.maze_stuck_transition_repeat_boost = max(0.0, float(os.getenv('MAZE_STUCK_TRANSITION_REPEAT_BOOST', '24.0')))
-        self.maze_stuck_transition_reverse_boost = max(0.0, float(os.getenv('MAZE_STUCK_TRANSITION_REVERSE_BOOST', '34.0')))
+        self.maze_map_doubt_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MAP_DOUBT_ENABLE']) == '1'
+        self.maze_map_doubt_repeat_threshold = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MAP_DOUBT_REPEAT_THRESHOLD'])))
+        self.maze_map_doubt_stall_threshold = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MAP_DOUBT_STALL_THRESHOLD'])))
+        self.maze_map_doubt_cooldown_steps = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_MAP_DOUBT_COOLDOWN_STEPS'])))
+        self.maze_stuck_reexplore_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_REEXPLORE_ENABLE']) == '1'
+        self.maze_stuck_repeat_threshold = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_REPEAT_THRESHOLD'])))
+        self.maze_stuck_no_progress_threshold = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_NO_PROGRESS_THRESHOLD'])))
+        self.maze_stuck_window = max(8, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_WINDOW'])))
+        self.maze_stuck_reexplore_cooldown_steps = max(2, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_REEXPLORE_COOLDOWN_STEPS'])))
+        self.maze_stuck_prediction_conf_floor = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_PREDICTION_CONF_FLOOR']))))
+        self.maze_stuck_prediction_bias_scale = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_PREDICTION_BIAS_SCALE'])))
+        self.maze_stuck_transition_repeat_boost = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_TRANSITION_REPEAT_BOOST'])))
+        self.maze_stuck_transition_reverse_boost = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STUCK_TRANSITION_REVERSE_BOOST'])))
         self.kernel_uncertainty_enable = os.getenv('KERNEL_UNCERTAINTY_ENABLE', '1') == '1'
         self.kernel_uncertainty_no_progress_min = max(2, int(os.getenv('KERNEL_UNCERTAINTY_NO_PROGRESS_MIN', '8')))
         self.kernel_uncertainty_repeat_min = max(1, int(os.getenv('KERNEL_UNCERTAINTY_REPEAT_MIN', '2')))
@@ -1232,7 +1226,7 @@ class AIAssistantApp:
         self.decision_noise_weight = float(os.getenv('DECISION_NOISE_WEIGHT', '3.0'))
         self.exploration_tie_band = int(os.getenv('EXPLORATION_TIE_BAND', '2'))
         self.exploration_randomize_ties = os.getenv('EXPLORATION_RANDOMIZE_TIES', '1') == '1'
-        self.personality_variation_enabled = os.getenv('MAZE_PERSONALITY_VARIATION', '1') == '1'
+        self.personality_variation_enabled = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_PERSONALITY_VARIATION']) == '1'
         self.dead_end_learning_allowance_base = int(os.getenv('DEAD_END_LEARNING_ALLOWANCE', '1'))
         self.shallow_dead_end_penalty_base = float(os.getenv('SHALLOW_DEAD_END_PENALTY_BASE', '18.0'))
         self.dead_end_frontier_distance_scale = float(os.getenv('DEAD_END_FRONTIER_DISTANCE_SCALE', '0.33'))

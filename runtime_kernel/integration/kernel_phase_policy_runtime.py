@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kernel_contracts import DevelopmentStage, ReasoningBudgetContract, ReasoningProfile
+from runtime_kernel.kernel_contracts import DevelopmentStage, ReasoningBudgetContract, ReasoningProfile
 
 
 DEFAULT_KERNEL_PHASE_AUTOSTEP_ENABLE = True

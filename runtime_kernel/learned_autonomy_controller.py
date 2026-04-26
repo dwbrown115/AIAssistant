@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kernel_contracts import AutonomyState, AutonomyTransitionEvent
+from runtime_kernel.kernel_contracts import AutonomyState, AutonomyTransitionEvent
 
 
 class LearnedAutonomyController:

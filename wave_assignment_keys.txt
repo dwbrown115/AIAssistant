@@ -1,0 +1,6 @@
+WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS:dict[str,float|int]
+WAVE3_HORMONE_DECAY_DEFAULTS:dict[str,float]
+WAVE5_TRUST_MEMORY_DEFAULTS:dict[str,float|int|bool]
+WAVE6_LEARNING_REASONING_DEFAULTS:dict[str,float|int|bool|str]
+WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS:dict[str,float|int|bool]
+WAVE8_MAZE_POLICY_DEFAULTS:dict[str,str]
