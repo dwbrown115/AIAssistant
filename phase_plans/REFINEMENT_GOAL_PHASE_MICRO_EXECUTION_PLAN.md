@@ -17,6 +17,7 @@ The goal is complete only when all are true:
 5. Disable/re-enable semantics are preserved.
 6. Governance payloads and dumps reflect active phase/micro policy state.
 7. Preflight gate passes on newest hard-15 dump (normal + strict).
+8. Causal counterfactual module telemetry is active and reflected in phase policy.
 
 ## Phase 0: Baseline Lock
 
@@ -124,6 +125,17 @@ Exit:
 Exit:
 - Semantics confirmed in snapshot and event traces.
 
+### Micro 3.4: Causality Module Integration
+- Add explicit `causal_counterfactual_planner` runtime policy support.
+- Feed causal quality signals into module metrics:
+  - safe objective override readiness
+  - shortest-path-to-exit progress signal
+  - exit confidence and exit guidance memory state
+- Ensure policy snapshot/module states expose causality module enablement.
+
+Exit:
+- Active phase policy and governance payloads include causal module state and metrics context.
+
 ## Phase 4: Verification Gates
 
 ### Micro 4.1: Compile Gate
@@ -142,7 +154,7 @@ Exit:
 - Both preflight gates pass.
 
 ### Micro 4.3: Final Checklist Review
-- Verify Completion Criteria section (all 7 items) with explicit pass/fail marks.
+- Verify Completion Criteria section (all 8 items) with explicit pass/fail marks.
 
 Exit:
 - All completion criteria pass.

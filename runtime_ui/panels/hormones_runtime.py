@@ -70,18 +70,89 @@ def hormone_monitor_text(app: object) -> str:
         ) is not None:
             phase_snapshot = app.kernel_phase_program.snapshot()
             active_target = phase_snapshot.get("active_target")
+            completed_micro_total = int(phase_snapshot.get("completed_micro_total", 0) or 0)
+            completed_phase_count = int(phase_snapshot.get("completed_phase_count", 0) or 0)
+            phase_specs = tuple(getattr(app, "kernel_phase_specs", ()) or ())
+            total_phase_count = len(phase_specs)
+            total_micro_count = 0
+            for spec in phase_specs:
+                try:
+                    total_micro_count += len(tuple(getattr(spec, "micro_stages", ()) or ()))
+                except Exception:
+                    continue
             if isinstance(active_target, (tuple, list)) and len(active_target) == 2:
                 target_text = f"{active_target[0]}::{active_target[1]}"
             else:
                 target_text = "complete"
-            lines.append(
-                (
-                    "adaptive_phase_program: "
-                    f"target={target_text} "
-                    f"completed_micro_total={phase_snapshot.get('completed_micro_total', 0)} "
-                    f"disabled={','.join(getattr(app, 'kernel_phase_disable_list', ()))}"
+            active_phase_row = None
+            phases_payload = phase_snapshot.get("phases", [])
+            if isinstance(active_target, (tuple, list)) and len(active_target) >= 1 and isinstance(phases_payload, list):
+                active_phase_id = str(active_target[0] or "").strip()
+                for row in phases_payload:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("phase_id", "") or "").strip() == active_phase_id:
+                        active_phase_row = row
+                        break
+            if isinstance(active_phase_row, dict):
+                observations = int(active_phase_row.get("observations", 0) or 0)
+                effective_min_observations = int(active_phase_row.get("effective_min_observations", 0) or 0)
+                score_ema = float(active_phase_row.get("score_ema", 0.0) or 0.0)
+                promotion_target = float(active_phase_row.get("promotion_target", 0.0) or 0.0)
+                blocked_reason = str(active_phase_row.get("promotion_blocked_reason", "") or "none")
+                safety_ema = float(active_phase_row.get("safety_ema", 0.0) or 0.0)
+                safety_floor = float(active_phase_row.get("safety_floor", 0.0) or 0.0)
+                stability_ema = float(active_phase_row.get("stability_ema", 0.0) or 0.0)
+                stability_floor = float(active_phase_row.get("stability_floor", 0.0) or 0.0)
+                micro_index = int(active_phase_row.get("micro_index", 0) or 0)
+                gate_ready = int(active_phase_row.get("promotion_gate_ready", 0) or 0)
+                gate_met = int(active_phase_row.get("promotion_gate_met", 0) or 0)
+                score_gap = max(0.0, promotion_target - score_ema)
+                obs_gap = max(0, effective_min_observations - observations)
+                early_cap_applied = int(active_phase_row.get("early_target_cap_applied", 0) or 0)
+                lines.append(
+                    (
+                        "promotion_tracker: "
+                        f"phase={completed_phase_count}/{max(0, total_phase_count)} "
+                        f"micro={completed_micro_total}/{max(0, total_micro_count)} "
+                        f"active_micro={micro_index + 1}/4 "
+                        f"gate_ready={gate_ready} "
+                        f"gate_met={gate_met} "
+                        f"obs_gap={obs_gap} "
+                        f"score_gap={round(score_gap, 4)} "
+                        f"early_cap_applied={early_cap_applied}"
+                    )
                 )
-            )
+                lines.append(
+                    (
+                        "adaptive_phase_program: "
+                        f"target={target_text} "
+                        f"completed_micro_total={completed_micro_total} "
+                        f"obs={observations}/{effective_min_observations} "
+                        f"score={round(score_ema, 4)}/{round(promotion_target, 4)} "
+                        f"safety={round(safety_ema, 4)}/{round(safety_floor, 4)} "
+                        f"stability={round(stability_ema, 4)}/{round(stability_floor, 4)} "
+                        f"blocked={blocked_reason} "
+                        f"disabled={','.join(getattr(app, 'kernel_phase_disable_list', ()))}"
+                    )
+                )
+            else:
+                lines.append(
+                    (
+                        "promotion_tracker: "
+                        f"phase={completed_phase_count}/{max(0, total_phase_count)} "
+                        f"micro={completed_micro_total}/{max(0, total_micro_count)} "
+                        "active_micro=-- gate_ready=0 gate_met=0 obs_gap=0 score_gap=0.0 early_cap_applied=0"
+                    )
+                )
+                lines.append(
+                    (
+                        "adaptive_phase_program: "
+                        f"target={target_text} "
+                        f"completed_micro_total={completed_micro_total} "
+                        f"disabled={','.join(getattr(app, 'kernel_phase_disable_list', ()))}"
+                    )
+                )
         else:
             lines.append("adaptive_phase_program: disabled")
 

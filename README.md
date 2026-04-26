@@ -78,6 +78,14 @@ MAZE_BATCH_MICRO_PROGRESSION_STUCK_TRIGGER_REPEAT_BONUS=1
 # Optional: stronger unresolved-objective suppression and softer cycle-avoid override at later intra-batch ramps.
 MAZE_BATCH_MICRO_PROGRESSION_OBJECTIVE_UNRESOLVED_BONUS=1
 MAZE_BATCH_MICRO_PROGRESSION_CYCLE_AVOID_MARGIN_REDUCTION=0.5
+# Optional: if kernel-phase progression plateaus during batch execution,
+# automatically inject extra harder maze runs (default difficulty: very hard).
+MAZE_PLATEAU_EXTRA_HARD_ENABLE=1
+MAZE_PLATEAU_EXTRA_HARD_STREAK=2
+MAZE_PLATEAU_EXTRA_HARD_RUNS=1
+MAZE_PLATEAU_EXTRA_HARD_MAX_TRIGGERS=2
+MAZE_PLATEAU_EXTRA_HARD_MIN_BATCH_LOOP=2
+MAZE_PLATEAU_EXTRA_HARD_DIFFICULTY=very hard
 # Optional: persist micro progression between run sets/app restarts and require
 # stronger completion quality before progress is committed.
 MAZE_MICRO_PROGRESSION_PERSIST_ENABLE=1
@@ -377,6 +385,42 @@ TRAINING_PHASE1_PROJECTION_SCALE=0.4
 TRAINING_PHASE2_PROJECTION_SCALE=0.7
 TRAINING_PHASE3_PROJECTION_SCALE=1.0
 TRAINING_PHASE_OVERRIDE_MIN_PRED_GAP=0.015
+# Optional: early-kernel promotion target cap to prevent phase-1 target drift from
+# outrunning score EMA before initial micro promotions are established.
+# Global hard ceiling for adaptive promotion target (applies to all phases/stages).
+KERNEL_PHASE_PROMOTION_TARGET_HARD_MAX=0.90
+KERNEL_PHASE_EARLY_TARGET_CAP_ENABLE=1
+KERNEL_PHASE_EARLY_TARGET_CAP=0.58
+KERNEL_PHASE_EARLY_TARGET_CAP_PHASE_COUNT=1
+KERNEL_PHASE_EARLY_TARGET_CAP_MICRO_MAX=3
+# Optional: stage-entry adaptive weight rebasing (objective-aware) so each
+# micro-stage can re-center score composition without inheriting stale prior skews.
+KERNEL_PHASE_WEIGHT_REBASE_ENABLE=1
+KERNEL_PHASE_WEIGHT_REBASE_ALPHA=0.68
+KERNEL_PHASE_WEIGHT_REBASE_OBJECTIVE_BOOST=0.30
+# Optional: warmup target dampener for early observations in each micro-stage.
+# This lowers promotion target pressure early and tapers back to normal as
+# observation count approaches KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS.
+KERNEL_PHASE_WARMUP_TARGET_DAMPENER_ENABLE=1
+KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS=96
+KERNEL_PHASE_WARMUP_TARGET_DAMPENER_MAX_REDUCTION=0.14
+# Optional: hard-disable adaptive promotion-target movement to eliminate
+# goalpost drift (recommended default).
+KERNEL_PHASE_TARGET_ADAPT_ENABLE=0
+# Optional: blend rate used only when KERNEL_PHASE_TARGET_ADAPT_ENABLE=1.
+KERNEL_PHASE_TARGET_ADAPT_RATE=0.08
+# Optional (when target adaptation is enabled): once observation minimum is
+# reached, prevent promotion target from rising further unless score already
+# meets target, and allow gentle convergence toward score+margin to avoid
+# moving-goal stalls.
+KERNEL_PHASE_TARGET_RAISE_ONLY_WHEN_SCORE_READY=1
+# Optional: freeze promotion target entirely once minimum observations are met
+# so post-threshold quality gating is decided by score quality alone.
+KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE=1
+# Default is 0.0 (disabled) so quality threshold is not reduced automatically.
+# Use >0.0 only if you explicitly want a controlled deadlock-relief path.
+KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE=0.0
+KERNEL_PHASE_TARGET_DEFICIT_MARGIN=0.015
 # Optional: parallel reasoning engine (runs local-score, adaptive, and
 # deliberative evaluations in parallel and learns plan trust from outcomes).
 PARALLEL_REASONING_ENGINE_ENABLE=1
@@ -856,6 +900,7 @@ Game controls:
 - Use `Log Dump` in the Maze Memory Viewer to write a full memory export file (working/STM/semantic/structural + memory logs + current pipeline debug) into `Log Dump/`.
 - Use `Log Dump Full` in the Maze Memory Viewer when you need an untruncated export for long runs (disables export row/line caps and includes richer full-detail memory sections for that dump).
 - Prompt batch modifier: append `xN` to a counted maze-run instruction (for example, `run 15 mazes x6`) to execute N batches of the base run count; each batch auto-applies `Random #` before the run and writes a `Log Dump Full` file after completion.
+- Plateau extra-hard responder env vars: `MAZE_PLATEAU_EXTRA_HARD_ENABLE`, `MAZE_PLATEAU_EXTRA_HARD_STREAK`, `MAZE_PLATEAU_EXTRA_HARD_RUNS`, `MAZE_PLATEAU_EXTRA_HARD_MAX_TRIGGERS`, `MAZE_PLATEAU_EXTRA_HARD_MIN_BATCH_LOOP`, `MAZE_PLATEAU_EXTRA_HARD_DIFFICULTY` (during batch mode, if kernel phase progression stalls for the configured streak, the runtime injects extra runs at a higher difficulty and then restores the previous difficulty).
 - Use `Export Snapshot` in the Maze Memory Viewer to save a portable snapshot zip containing persistent memory (`maze_memory.sqlite3`) and adaptive neural pathways (`adaptive_brain.json`) when available.
 - Use `Import Snapshot` to restore memory/neural state from snapshot files (`.zip` or legacy `.json`); you can also select an extracted `snapshot_manifest.json` directly, and the app will load sibling `maze_memory.sqlite3` / `adaptive_brain.json` files when present. Older snapshots are imported in compatibility mode and migrated to the current DB schema automatically.
 - Use `Sleep Cycle` in the Maze Memory Viewer to run maintenance (usage-based reinforcement + pruning/compaction of volatile logs and high-churn run tables).
@@ -913,12 +958,18 @@ Then open `http://127.0.0.1:5050`.
 - Parallel reasoning engine env vars: `PARALLEL_REASONING_ENGINE_ENABLE`, `PARALLEL_REASONING_EMA_DECAY`, `PARALLEL_REASONING_WARMUP_STEPS`, `PARALLEL_REASONING_MIN_CONFIDENCE`, `PARALLEL_REASONING_LOCAL_WEIGHT`, `PARALLEL_REASONING_ADAPTIVE_WEIGHT`, `PARALLEL_REASONING_DELIBERATIVE_WEIGHT`, `PARALLEL_REASONING_DELIB_UNKNOWN_WEIGHT`, `PARALLEL_REASONING_DELIB_FRONTIER_WEIGHT`, `PARALLEL_REASONING_DELIB_LOOKAHEAD_WEIGHT`, `PARALLEL_REASONING_DELIB_LOOP_PENALTY_WEIGHT`, `PARALLEL_REASONING_DELIB_HAZARD_PENALTY_WEIGHT`, `PARALLEL_REASONING_DELIB_CONTRADICTION_PENALTY_WEIGHT`, `PARALLEL_REASONING_PROFILE`, `PARALLEL_REASONING_MAX_BRANCHES`, `PARALLEL_REASONING_MAX_DEPTH`, `PARALLEL_REASONING_TIME_BUDGET_MS`, `PARALLEL_REASONING_TOKEN_BUDGET` (evaluates local/adaptive/deliberative signals in parallel under an explicit reasoning-budget contract; branch pruning is surfaced in telemetry so resource tradeoffs are auditable).
 - Governance and contracts: shared controller contracts now define global error taxonomy (`TRANSIENT`, `PERMANENT`, `SAFETY_CRITICAL`, `POLICY_VIOLATION`, `RESOURCE_EXHAUSTION`), structured action-outcome events, autonomy transition events, module capability descriptors, developmental stages (`INFANT_KERNEL`, `JUVENILE_KERNEL`, `MATURE_KERNEL`, `RESEARCH_MODE`), and reasoning profiles (`FAST_APPROX`, `BALANCED`, `DEEP_AUDIT`). The Governance Orchestrator (`GOVERNANCE_ORCHESTRATOR_ENABLE`, `GOVERNANCE_POLICY_VERSION`, `KERNEL_DEVELOPMENT_STAGE`) collects these events into a unified introspection/audit stream.
 - Kernel phase policy env vars: `KERNEL_PHASE_POLICY_TRAIN_PROFILE`, `KERNEL_PHASE_POLICY_TRAIN_BRANCHES_SCALE`, `KERNEL_PHASE_POLICY_TRAIN_DEPTH_DELTA`, `KERNEL_PHASE_POLICY_TRAIN_TIME_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_TRAIN_TOKEN_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_TRAIN_STAGE`, `KERNEL_PHASE_POLICY_INTEGRATE_PROFILE`, `KERNEL_PHASE_POLICY_INTEGRATE_BRANCHES_SCALE`, `KERNEL_PHASE_POLICY_INTEGRATE_DEPTH_DELTA`, `KERNEL_PHASE_POLICY_INTEGRATE_TIME_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_INTEGRATE_TOKEN_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_INTEGRATE_STAGE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_PROFILE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_SAFETY_PROFILE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_BRANCHES_SCALE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_DEPTH_DELTA`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_TIME_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_TOKEN_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_STAGE`, `KERNEL_PHASE_POLICY_SAFETY_PROFILE_FLOOR` (centralized mode-level policy tuning for reasoning profile/budget scaling and development-stage promotion).
+- Kernel phase promotion-target ceiling env var: `KERNEL_PHASE_PROMOTION_TARGET_HARD_MAX` (global hard maximum for promotion target across all phases/stages; use this when you need target drift fully bounded to a fixed ceiling).
+- Kernel phase advancement cap env vars: `KERNEL_PHASE_EARLY_TARGET_CAP_ENABLE`, `KERNEL_PHASE_EARLY_TARGET_CAP`, `KERNEL_PHASE_EARLY_TARGET_CAP_PHASE_COUNT`, `KERNEL_PHASE_EARLY_TARGET_CAP_MICRO_MAX` (optionally caps adaptive promotion target growth for early phases/micro-stages so phase-1 advancement can establish before full strictness ramps in).
+- Kernel phase stage-rebase env vars: `KERNEL_PHASE_WEIGHT_REBASE_ENABLE`, `KERNEL_PHASE_WEIGHT_REBASE_ALPHA`, `KERNEL_PHASE_WEIGHT_REBASE_OBJECTIVE_BOOST` (re-centers adaptive score weights on stage entry using objective signals, which prevents earlier-stage weight skew from dominating later stages/phases).
+- Kernel phase warmup target dampener env vars: `KERNEL_PHASE_WARMUP_TARGET_DAMPENER_ENABLE`, `KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS`, `KERNEL_PHASE_WARMUP_TARGET_DAMPENER_MAX_REDUCTION` (softens promotion target pressure early in each micro-stage, then tapers back to full target as observations accumulate).
+- Kernel phase target-adaptation env vars: `KERNEL_PHASE_TARGET_ADAPT_ENABLE`, `KERNEL_PHASE_TARGET_ADAPT_RATE` (`KERNEL_PHASE_TARGET_ADAPT_ENABLE=0` fully disables adaptive target movement so the promotion bar cannot drift; set to `1` only when testing adaptive target behavior).
+- Kernel phase score-deficit target guard env vars: `KERNEL_PHASE_TARGET_RAISE_ONLY_WHEN_SCORE_READY`, `KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE`, `KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE`, `KERNEL_PHASE_TARGET_DEFICIT_MARGIN` (after minimum observations are met, blocks further target ratcheting while score is below target; with `KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE=1`, target is held stable after observation gate activation; with default `KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE=0.0`, target is not auto-lowered. Any relief behavior is opt-in and bounded).
 - Fast-solve treat env vars: `MAZE_FAST_SOLVE_TREAT_ENABLE`, `MAZE_FAST_SOLVE_TREAT_MAX_BONUS`, `MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER`, `MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS` (tracks wall-clock solve time for each maze episode and grants a metaphorical reward bonus when completion beats a dynamic target time derived from optimal path length and move cadence).
 - Adaptive telemetry env vars: `ADAPTIVE_PROGRESS_REPORT_ENABLE`, `ADAPTIVE_PROGRESS_REPORT_MODEL`, `ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS`, `ADAPTIVE_PROGRESS_AUTO_TUNE`, `ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS` (occasionally sends adaptive weight snapshots + kernel progress to a GPT reviewer and can softly auto-tune legacy blend drift over time).
 - Organism control env vars: `ORGANISM_CONTROL_ENABLE`, `ORGANISM_RECENT_WINDOW` (routes live maze move arbitration through `step_agent(...)` and `CandidateProjection` with policy switching, explicit `ESCAPE_LOOP` inhibition under loop pressure, and a catastrophic trap veto that removes cycle+terminal+boxed corridor moves from selection when alternatives exist).
 - Modular maze-agent env vars: `MAZE_AGENT_ENABLE`, `MAZE_AGENT_CYCLE_TABOO_DURATION`, `MAZE_AGENT_CORRIDOR_ESCAPE_THRESHOLD`, `MAZE_AGENT_ESCAPE_TIMEOUT`, `MAZE_AGENT_ESCAPE_EXIT_PRESSURE`, `MAZE_AGENT_CORRIDOR_OVERUSE_THRESHOLD`, `MAZE_AGENT_NOVELTY_WEIGHT`, `MAZE_AGENT_FRONTIER_WEIGHT`, `MAZE_AGENT_JUNCTION_BONUS`, `MAZE_AGENT_CORRIDOR_OVERUSE_PENALTY`, `MAZE_AGENT_DEAD_END_PENALTY`, `MAZE_AGENT_MOTIF_WEIGHT`, `MAZE_AGENT_LOOP_RISK_WEIGHT`, `MAZE_AGENT_CORRIDOR_FORWARD_BIAS`, `MAZE_AGENT_SIDE_OPEN_BIAS` (enables transition-level cycle vetoes plus corridor/side-wall structural biasing in the modular controller stack).
 - Exploration debug now includes `endocrine_event_last` (latest hormone delta event) so tuning can distinguish signature-driven drift vs outcome-driven shifts.
-- Memory export bundles (`Log Dump`) now include a `[HORMONE PANEL]` section with hormone state, derived controls, legacy batch status, and adaptive report/autotune summaries, plus a `[KERNEL PHASE POLICY]` JSON section with target/micro-mode/objective signals, module states, active reasoning budget profile, and the applied mode-policy payload.
+- Memory export bundles (`Log Dump`) now include a `[HORMONE PANEL]` section with hormone state, derived controls, legacy batch status, and adaptive report/autotune summaries, plus a `[KERNEL PHASE POLICY]` JSON section with target/micro-mode/objective signals, module states, active reasoning budget profile, applied mode-policy payload, and latest per-step `metric_debug` payload (base/module/blended metrics + adaptive weights + estimated score/target context).
 - Sleep-cycle maintenance env vars: `SLEEP_CYCLE_ENABLE`, `SLEEP_CYCLE_AUTO_INTERVAL_STEPS`, `SLEEP_CYCLE_AUTO_AFTER_MAZE_COMPLETION`, `SLEEP_CYCLE_AUTO_AFTER_RUN_SET`, `SLEEP_CYCLE_AUTO_AFTER_LOG_DUMP`, `SLEEP_CYCLE_HORMONE_PRUNE_ENABLE`, `SLEEP_CYCLE_HORMONE_DECAY_PASSES`, `SLEEP_CYCLE_HORMONE_PULL_STRENGTH`, `SLEEP_CYCLE_HORMONE_EXTREME_THRESHOLD`, `SLEEP_CYCLE_USAGE_BOOST`, `SLEEP_CYCLE_USAGE_RECENT_WINDOW_STEPS`, `SLEEP_CYCLE_MEMORY_EVENT_KEEP`, `SLEEP_CYCLE_ENDOCRINE_EVENT_KEEP`, `SLEEP_CYCLE_ACTION_OUTCOME_KEEP_ROWS`, `SLEEP_CYCLE_PREDICTION_KEEP_ROWS`, `SLEEP_CYCLE_VACUUM_ON_MANUAL`, `SLEEP_CYCLE_VACUUM_ON_AUTO` (adds a manual `Sleep Cycle` UI action and optional auto-maintenance passes to compact volatile logs, reinforce recently used memory traces, prune high-churn run tables during long sessions, and de-saturate hormone state between maze episodes).
 - Dead-end slap env vars: `DEAD_END_END_SLAP_PENALTY`, `DEAD_END_TIP_REVISIT_SLAP_PENALTY` (apply strong penalties when exploration commits into dead-end tip/pre-tip corridors, and even stronger penalties for revisits in the same maze episode).
 - Terminal-end suppression env vars: `VISIBLE_TERMINAL_END_PENALTY`, `TERMINAL_END_GUARD_MARGIN`, `TERMINAL_OVERRIDE_UNRESOLVED_MARGIN_REDUCTION`, `TERMINAL_OVERRIDE_REQUIRE_REPEAT_IMPROVEMENT_UNRESOLVED`, `TERMINAL_TRUST_ADAPT_ENABLE`, `TERMINAL_TRUST_EMA_DECAY`, `TERMINAL_TRUST_MIN_SCALE`, `TERMINAL_TRUST_MAX_SCALE`, `TERMINAL_TRUST_WARMUP_STEPS`, `TERMINAL_TRUST_HARD_AVOID_MIN_SCALE` (deprioritize branches with a visibly blocked terminal cap unless alternatives are clearly worse, while tightening replacement tolerance and repeat-pressure acceptance when uncertainty is still unresolved; trust gating scales this channel from observed utility and can automatically soften hard filtering).
