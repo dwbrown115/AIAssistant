@@ -40,6 +40,17 @@ load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 load_dotenv(os.path.join(BASE_DIR, '.env.secret'), override=True)
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = ((re.compile('\\bsk-[A-Za-z0-9_-]{12,}\\b'), '[REDACTED_API_KEY]'), (re.compile('(OPENAI_API_KEY\\s*=\\s*)([^\\s]+)'), '\\1[REDACTED_API_KEY]'), (re.compile('(Authorization:\\s*Bearer\\s+)([^\\s]+)', flags=re.IGNORECASE), '\\1[REDACTED_TOKEN]'))
 _PREDICTION_SHAPE_LABELS: tuple[str, ...] = ('wall', 'dead_end', 'corridor', 'corner', 'junction')
+_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS: dict[str, float | int] = {
+    'hidden_max': 128,
+    'growth_step': 4,
+    'growth_patience': 120,
+    'growth_error_threshold': 0.22,
+    'prune_interval': 500,
+    'prune_importance_threshold': 0.008,
+    'learning_rate': 0.018,
+    'l2': 0.0008,
+}
+_MAZE_PLATEAU_AUTO_VERY_HARD_ENABLE = False
 
 def redact_secrets(text: str) -> str:
     if not text:
@@ -363,7 +374,20 @@ class AIAssistantApp:
         self.adaptive_controller: AdaptiveNeuralController | None = None
         if self.adaptive_controller_enable:
             adaptive_seed = int(os.getenv('MAZE_SEED', '1337')) + 1723
-            self.adaptive_controller = AdaptiveNeuralController(input_dim=16, state_path=self.adaptive_brain_path, seed=adaptive_seed, hidden_min=max(8, int(os.getenv('ADAPTIVE_HIDDEN_MIN', '20'))), hidden_max=max(16, int(os.getenv('ADAPTIVE_HIDDEN_MAX', '128'))), growth_step=max(1, int(os.getenv('ADAPTIVE_GROWTH_STEP', '4'))), growth_patience=max(20, int(os.getenv('ADAPTIVE_GROWTH_PATIENCE', '120'))), growth_error_threshold=max(0.02, float(os.getenv('ADAPTIVE_GROWTH_ERROR_THRESHOLD', '0.22'))), prune_interval=max(50, int(os.getenv('ADAPTIVE_PRUNE_INTERVAL', '500'))), prune_importance_threshold=max(0.0, float(os.getenv('ADAPTIVE_PRUNE_IMPORTANCE_THRESHOLD', '0.008'))), learning_rate=max(1e-05, float(os.getenv('ADAPTIVE_LEARNING_RATE', '0.018'))), l2=max(0.0, float(os.getenv('ADAPTIVE_L2', '0.0008'))))
+            self.adaptive_controller = AdaptiveNeuralController(
+                input_dim=16,
+                state_path=self.adaptive_brain_path,
+                seed=adaptive_seed,
+                hidden_min=max(8, int(os.getenv('ADAPTIVE_HIDDEN_MIN', '20'))),
+                hidden_max=max(16, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['hidden_max'])),
+                growth_step=max(1, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['growth_step'])),
+                growth_patience=max(20, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['growth_patience'])),
+                growth_error_threshold=max(0.02, float(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['growth_error_threshold'])),
+                prune_interval=max(50, int(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['prune_interval'])),
+                prune_importance_threshold=max(0.0, float(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['prune_importance_threshold'])),
+                learning_rate=max(1e-05, float(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['learning_rate'])),
+                l2=max(0.0, float(_WAVE2_ADAPTIVE_GROWTH_LEGACY_DEFAULTS['l2'])),
+            )
         api_key = os.getenv('OPENAI_API_KEY')
         if api_key:
             self.client = OpenAI(api_key=api_key)
@@ -1155,7 +1179,7 @@ class AIAssistantApp:
         self.last_navigation_mode = (self.layout_mode.get() or 'grid').strip().lower()
         self.last_navigation_difficulty = (self.maze_difficulty.get() or 'medium').strip().lower()
         self.runtime_maze_difficulty_override = None
-        self.maze_plateau_extra_hard_enable = os.getenv('MAZE_PLATEAU_EXTRA_HARD_ENABLE', '1') == '1'
+        self.maze_plateau_extra_hard_enable = _MAZE_PLATEAU_AUTO_VERY_HARD_ENABLE
         self.maze_plateau_extra_hard_streak = max(1, min(12, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_STREAK', '2'))))
         self.maze_plateau_extra_hard_runs = max(0, min(self.max_repeat_executions, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_RUNS', '1'))))
         self.maze_plateau_extra_hard_max_triggers = max(1, min(self.max_repeat_executions, int(os.getenv('MAZE_PLATEAU_EXTRA_HARD_MAX_TRIGGERS', '2'))))

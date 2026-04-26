@@ -27,6 +27,7 @@ def redact_secrets(text: str) -> str:
     return redacted
 
 app = Flask(__name__)
+AUTO_OPEN_BROWSER_ON_DEBUG_RELOAD = True
 
 
 def ask_openai(user_prompt: str) -> str:
@@ -67,7 +68,7 @@ if __name__ == "__main__":
     url = f"http://127.0.0.1:{port}"
 
     # Open the app in the default browser once the debug reloader process starts.
-    if os.getenv("WERKZEUG_RUN_MAIN") == "true" and os.getenv("AUTO_OPEN_BROWSER", "1") == "1":
+    if os.getenv("WERKZEUG_RUN_MAIN") == "true" and AUTO_OPEN_BROWSER_ON_DEBUG_RELOAD:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     app.run(debug=True, port=port)

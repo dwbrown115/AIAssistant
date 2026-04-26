@@ -115,15 +115,82 @@ Migration pattern for each micro stage:
 4. Remove migrated keys from `.env` and `.env.example`.
 5. Re-run audit and validate stage gate.
 
+### Distinct Extraction Waves (What We Validate In Each Wave)
+
+Wave 1: `p2.m1_remove_startup_legacy_envs` (`R1_STARTUP_LEGACY`)
+- Env scope: startup legacy toggle (`AUTO_OPEN_BROWSER`).
+- What we are looking for:
+  - no app env read for this key;
+  - browser startup behavior still correct under debug reloader;
+  - no startup regression.
+
+Wave 2: `p2.m2_remove_adaptive_growth_legacy_envs` (`R2_ADAPTIVE_GROWTH_LEGACY`)
+- Env scope: adaptive growth legacy controls.
+- What we are looking for:
+  - no app env reads for removed adaptive-growth legacy keys;
+  - controller construction remains stable;
+  - no model-growth behavior regressions at startup.
+
+Wave 3: `p2.m3_remove_hormone_decay_legacy_envs` (`R3_HORMONE_LEGACY`)
+- Env scope: hormone legacy decay aliases.
+- What we are looking for:
+  - legacy hormone alias reads removed;
+  - hormone runtime continuity and decay behavior remain within expected range;
+  - no endocrine runtime initialization regressions.
+
+Wave 4: `p2.m4_remove_progression_override_legacy_envs` (`R4_PROGRESSION_OVERRIDE_LEGACY`)
+- Env scope: progression override legacy toggles.
+- What we are looking for:
+  - no env-driven override paths for retired progression flags;
+  - phase/micro progression control surface remains functional via runtime state;
+  - no stale override carryover.
+
+Wave 5: `p2.m5_kernel_manage_trust_memory_controls` (`K1_TRUST_MEMORY_CONTROLS`)
+- Env scope: trust and memory policy controls.
+- What we are looking for:
+  - trust/memory defaults come from kernel code only;
+  - app boundary no longer reads this key group;
+  - memory/trust scoring parity in run telemetry.
+
+Wave 6: `p2.m6_kernel_manage_learning_reasoning_controls` (`K2_LEARNING_REASONING_CONTROLS`)
+- Env scope: adaptive/learned-autonomy/parallel-reasoning controls.
+- What we are looking for:
+  - learning/reasoning policy moved to kernel default registry;
+  - no app env reads for this group;
+  - no regressions in reasoning profile and budget application.
+
+Wave 7: `p2.m7_kernel_manage_perception_endocrine_controls` (`K3_PERCEPTION_ENDOCRINE_CONTROLS`)
+- Env scope: perception + endocrine + sleep-cycle controls.
+- What we are looking for:
+  - perception/endocrine/sleep defaults are kernel-owned;
+  - app env reads removed for this group;
+  - no regression in perception confidence and endocrine event behavior.
+
+Wave 8: `p2.m8_kernel_manage_maze_policy_controls` (`K4_MAZE_POLICY_CONTROLS`)
+- Env scope: maze policy controls.
+- What we are looking for:
+  - maze controls are kernel-owned defaults;
+  - app env reads for maze policy keys removed;
+  - run stability and completion metrics remain within baseline tolerance.
+
+Wave 9: `p2.m9_kernel_manage_core_runtime_policy_controls` (`K5_CORE_RUNTIME_POLICY_CONTROLS`)
+- Env scope: remaining core runtime policy controls.
+- What we are looking for:
+  - app boundary reduced to keeper-only contract;
+  - all remaining handoff candidates resolve from kernel defaults;
+  - static audit passes (`section_C_app_only.txt` keeper-only and no ownership drift).
+
 ### Micro 2.1
 - Stage id: `p2.m1_remove_startup_legacy_envs`
 - Type: `R1_STARTUP_LEGACY`
 - System: `startup_legacy_toggle_removal_system`
+- Status: implemented (`AUTO_OPEN_BROWSER` env read removed from app startup path; code-owned default now used).
 
 ### Micro 2.2
 - Stage id: `p2.m2_remove_adaptive_growth_legacy_envs`
 - Type: `R2_ADAPTIVE_GROWTH_LEGACY`
 - System: `adaptive_growth_legacy_removal_system`
+- Status: implemented (legacy adaptive growth env reads removed for `ADAPTIVE_GROWTH_ERROR_THRESHOLD`, `ADAPTIVE_GROWTH_PATIENCE`, `ADAPTIVE_GROWTH_STEP`, `ADAPTIVE_HIDDEN_MAX`, `ADAPTIVE_L2`, `ADAPTIVE_LEARNING_RATE`, `ADAPTIVE_PRUNE_IMPORTANCE_THRESHOLD`, `ADAPTIVE_PRUNE_INTERVAL`; code-owned defaults now used).
 
 ### Micro 2.3
 - Stage id: `p2.m3_remove_hormone_decay_legacy_envs`
@@ -222,3 +289,12 @@ Exit criteria:
 ## Done Definition
 
 The handoff is complete when policy/tuning control keys are no longer env-driven from app runtime and exist only in kernel code, while app/us boundary controls remain explicitly app-owned.
+
+## Next Program (Standalone)
+
+The biologically inspired self-regulating cognition roadmap is tracked outside this env-handoff document:
+- `phase_plans/SELF_REGULATION_BRAIN_PHASE_PLAN_V1.md`
+
+This separation is intentional:
+- this file remains the env ownership and migration contract;
+- the standalone file governs autonomous self-regulation architecture and rollout.

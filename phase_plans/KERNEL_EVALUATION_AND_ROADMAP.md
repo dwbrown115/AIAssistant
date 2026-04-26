@@ -126,6 +126,22 @@ Add explicit gates for:
 Expected effect:
 - Better real adaptivity signal, less score gaming.
 
+### Priority F: Add bounded override challenge (not full override removal)
+- Split overrides into two classes:
+	- hard safety vetoes (never bypassable);
+	- soft policy overrides (challengeable under strict evidence).
+- Add an override challenge controller that can temporarily overcome soft overrides only when all conditions hold:
+	- high confidence calibration,
+	- low unresolved override pressure,
+	- positive recent intervention utility delta,
+	- stable safety and hazard signals.
+- Require automatic rollback to soft override control after fixed horizon or confidence drop.
+- Log every challenge decision with reason code and post-outcome label.
+
+Expected effect:
+- Preserves biological-like adaptive flexibility while keeping non-negotiable safety boundaries intact.
+- Reduces brittle dependence on permanent soft overrides.
+
 ## Practical 3-Phase Upgrade Plan
 
 ### Phase 1 (2-4 weeks): De-entangle and measure
@@ -163,6 +179,72 @@ For each major change, require:
 - Intervention frequency and utility delta.
 - Failure-mode histogram, not just aggregate averages.
 - Regression checks on unresolved override rate and learned-only rate.
+- For override challenge mode specifically:
+	- challenge success rate vs reversion rate,
+	- safety regression rate during challenge windows,
+	- net quality delta versus baseline soft-override policy.
+
+## Projected Evaluation At Wave 9 Env Extraction Completion
+
+Assumption for this projection:
+- Wave 9 (`p2.m9_kernel_manage_core_runtime_policy_controls`) exits cleanly with keeper-only app boundary, kernel-owned defaults for handoff keys, and static audit pass.
+
+### What materially improves vs current assessment
+
+- Control-surface governance improves from dispersed env tuning to centralized kernel-owned defaults.
+- Attribution clarity improves because policy authority is consolidated and app-boundary ownership is cleaner.
+- Configuration drift risk drops due to explicit ownership contract and CI gate potential.
+- Operational reproducibility improves because runtime policy shape is less dependent on external env variance.
+
+### What remains mostly unchanged after Wave 9
+
+- Learned arbitration depth: still limited if override weighting remains mostly hand-tuned.
+- Representation and world-model depth: still moderate without latent transition modeling.
+- Causal/counterfactual planning: still limited without model-based planning loop.
+- OOD confidence: still uncertain unless explicit OOD-first validation suite is added and enforced.
+
+### Updated maturity position (post-Wave-9)
+
+- Current phrasing: advanced adaptive control stack.
+- Projected post-Wave-9 phrasing: highly governed adaptive control stack with stronger architectural hygiene and lower pseudo-adaptivity risk.
+- Not yet equivalent to a high-level cognitive architecture until learned arbitration, latent modeling, and OOD transfer performance are demonstrably improved.
+
+### Risk Delta (Current -> Post-Wave-9)
+
+- Control-surface overload: high -> medium.
+- Intervention entanglement: medium-high -> medium.
+- Metric circularity: medium -> medium (requires validation redesign, not only ownership cleanup).
+- Limited abstraction bottleneck: high -> high (largely unaffected by env extraction).
+- Weak causal world modeling: high -> high (unaffected).
+- OOD testing gap: medium-high -> medium-high (requires dedicated protocol work).
+
+### Priority Impact vs Roadmap A-E
+
+- Priority A (learn arbitration): partial prep only. Better control ownership makes learned arbitration integration safer, but does not itself deliver learned arbitration.
+- Priority B (latent world model): no direct progress.
+- Priority C (fast/slow/sleep contracts): partial structural prep via cleaner ownership boundaries.
+- Priority D (partly learned hormone modulation): partial prep if hormone controls are kernel-owned, but not learned yet.
+- Priority E (transfer-first metric): minimal direct progress unless Wave 9 completion is followed by explicit OOD gates.
+
+### Post-Wave-9 scorecard (projected)
+
+- Architectural hygiene: 8.5/10 (up from ~6.5-7.0).
+- Operational governance: 8.5/10 (up from ~7.5).
+- True adaptivity depth: 6.0/10 (mostly unchanged).
+- Generalization robustness: 5.5/10 (mostly unchanged).
+- Causal/planning depth: 4.5/10 (unchanged).
+
+Interpretation:
+- Wave 9 is a major systems-engineering and governance milestone.
+- Wave 9 is not, by itself, the cognition leap.
+- It creates the clean substrate needed to execute that leap with lower risk.
+
+### Recommended immediate sequence after Wave 9
+
+1. Run the de-entangle/attribution phase first (mechanism attribution matrix + ablations + intervention utility buckets).
+2. Pilot constrained learned arbitration with hard safety veto retained.
+3. Add OOD-first validation gates before broadening actuator authority.
+4. Start compact latent world-model pilot only after arbitration metrics stabilize.
 
 ## Criteria for "More Primate-Like" in This Project
 
