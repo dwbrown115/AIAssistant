@@ -1,5 +1,13 @@
 # Env Handoff Phase + Micro Plan
 
+Superseded: This plan is retained for history only.
+
+Active replacement:
+- `phase_plans/ENV_HANDOFF_PHASE_MICRO_PLAN_V2.md`
+
+Runtime wiring replacement:
+- `adaptive_phase_program.py` phase `phase_2_impact_ranked_handoff_system` now uses impact-ranked env type systems from V2.
+
 ## Goal
 Complete env ownership handoff so kernel policy knobs are kernel-owned, app/security vars stay app-owned, and repository structure has one canonical kernel runtime path.
 
@@ -38,10 +46,8 @@ Rules:
 - LEARNED_AUTONOMY_*
 - TRAINING_PHASE_*
 - PARALLEL_REASONING_*
-- KERNEL_PHASE_POLICY_*
-- KERNEL_PHASE_DISABLE_LIST
-- KERNEL_PHASE_AUTOSTEP
-- KERNEL_PHASE_OBSERVATION_FLOOR
+- Kernel phase runtime policy presets (code-owned defaults in kernel integration)
+- Kernel phase disable/autostep/observation-floor runtime controls (app state + in-code defaults)
 - MACHINE_VISION_*
 - MAZE_MICRO_PROGRESSION_*
 - MAZE_BATCH_MICRO_PROGRESSION_*
@@ -114,9 +120,9 @@ Exit criteria:
 
 ### Micro 2.4: Adaptive Phase Control Surface Integrity
 - Validate runtime control surface for adaptive phase progression:
-  - KERNEL_PHASE_DISABLE_LIST
-  - KERNEL_PHASE_AUTOSTEP
-  - KERNEL_PHASE_OBSERVATION_FLOOR
+  - phase disable toggles (runtime state)
+  - autostep toggle (runtime state)
+  - observation-floor override (runtime state)
 - Enforce canonical phase-id examples in docs/config templates.
 - Correct reference example to use phase_4_metric_decoupler (not phase_4_metric_decoupling).
 

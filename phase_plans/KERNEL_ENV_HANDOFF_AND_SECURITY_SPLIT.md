@@ -8,7 +8,7 @@ This document defines:
 - how ownership is enforced,
 - and which kernel runtime folder is canonical.
 
-Execution plan: see `phase_plans/ENV_HANDOFF_PHASE_MICRO_PLAN.md` for phase/micro implementation sequencing and validation gates.
+Execution plan: see `phase_plans/ENV_HANDOFF_PHASE_MICRO_PLAN_V2.md` for phase/micro implementation sequencing and validation gates.
 
 ## Canonical Runtime Path
 

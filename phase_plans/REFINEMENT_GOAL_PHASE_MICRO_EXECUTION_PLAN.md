@@ -12,8 +12,8 @@ The goal is complete only when all are true:
    - m2_counterfactual_train
    - m3_advisory_integrate
    - m4_control_integrate
-3. `KERNEL_PHASE_AUTOSTEP` is implemented and verified.
-4. `KERNEL_PHASE_OBSERVATION_FLOOR` is implemented and verified.
+3. Runtime autostep control is implemented and verified.
+4. Runtime observation-floor override is implemented and verified.
 5. Disable/re-enable semantics are preserved.
 6. Governance payloads and dumps reflect active phase/micro policy state.
 7. Preflight gate passes on newest hard-15 dump (normal + strict).
@@ -71,8 +71,8 @@ Exit:
 
 ## Phase 2: Adaptive Gate Controls
 
-### Micro 2.1: Implement `KERNEL_PHASE_AUTOSTEP`
-- Add env control parsing with safe default `1`.
+### Micro 2.1: Implement runtime autostep control
+- Add autostep control with safe default `1`.
 - Behavior:
   - `1`: normal auto promotion.
   - `0`: collect metrics/EMAs, no automatic micro promotion.
@@ -80,7 +80,7 @@ Exit:
 Exit:
 - With autostep off, micro index remains stable while observations update.
 
-### Micro 2.2: Implement `KERNEL_PHASE_OBSERVATION_FLOOR`
+### Micro 2.2: Implement runtime observation-floor override
 - Add optional global observation floor override.
 - Effective gate:
   - `effective_min_observations = max(stage.min_observations, global_floor)` when set.

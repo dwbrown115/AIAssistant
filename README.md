@@ -372,55 +372,10 @@ LEARNED_AUTONOMY_EMA_DECAY=0.97
 LEARNED_AUTONOMY_PHASE1_SCORE=0.62
 LEARNED_AUTONOMY_PHASE2_SCORE=0.78
 LEARNED_AUTONOMY_UNRESOLVED_TARGET=0.10
-# Optional: phase-based training scaffold for adaptive learning migration.
-# Phase 1: shadow training + projection feature warmup.
-# Phase 2: learned gating for anti-oscillation hard overrides.
-# Phase 3: extends learned gating to cycle-avoid hard overrides.
-TRAINING_PHASE_ENABLE=1
-TRAINING_PHASE_LEVEL=1
-TRAINING_PHASE_AUTO_ADVANCE=1
-TRAINING_PHASE2_MIN_STEPS=2500
-TRAINING_PHASE3_MIN_STEPS=9000
-TRAINING_PHASE1_PROJECTION_SCALE=0.4
-TRAINING_PHASE2_PROJECTION_SCALE=0.7
-TRAINING_PHASE3_PROJECTION_SCALE=1.0
-TRAINING_PHASE_OVERRIDE_MIN_PRED_GAP=0.015
-# Optional: early-kernel promotion target cap to prevent phase-1 target drift from
-# outrunning score EMA before initial micro promotions are established.
-# Global hard ceiling for adaptive promotion target (applies to all phases/stages).
-KERNEL_PHASE_PROMOTION_TARGET_HARD_MAX=0.90
-KERNEL_PHASE_EARLY_TARGET_CAP_ENABLE=1
-KERNEL_PHASE_EARLY_TARGET_CAP=0.58
-KERNEL_PHASE_EARLY_TARGET_CAP_PHASE_COUNT=1
-KERNEL_PHASE_EARLY_TARGET_CAP_MICRO_MAX=3
-# Optional: stage-entry adaptive weight rebasing (objective-aware) so each
-# micro-stage can re-center score composition without inheriting stale prior skews.
-KERNEL_PHASE_WEIGHT_REBASE_ENABLE=1
-KERNEL_PHASE_WEIGHT_REBASE_ALPHA=0.68
-KERNEL_PHASE_WEIGHT_REBASE_OBJECTIVE_BOOST=0.30
-# Optional: warmup target dampener for early observations in each micro-stage.
-# This lowers promotion target pressure early and tapers back to normal as
-# observation count approaches KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS.
-KERNEL_PHASE_WARMUP_TARGET_DAMPENER_ENABLE=1
-KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS=96
-KERNEL_PHASE_WARMUP_TARGET_DAMPENER_MAX_REDUCTION=0.14
-# Optional: hard-disable adaptive promotion-target movement to eliminate
-# goalpost drift (recommended default).
-KERNEL_PHASE_TARGET_ADAPT_ENABLE=0
-# Optional: blend rate used only when KERNEL_PHASE_TARGET_ADAPT_ENABLE=1.
-KERNEL_PHASE_TARGET_ADAPT_RATE=0.08
-# Optional (when target adaptation is enabled): once observation minimum is
-# reached, prevent promotion target from rising further unless score already
-# meets target, and allow gentle convergence toward score+margin to avoid
-# moving-goal stalls.
-KERNEL_PHASE_TARGET_RAISE_ONLY_WHEN_SCORE_READY=1
-# Optional: freeze promotion target entirely once minimum observations are met
-# so post-threshold quality gating is decided by score quality alone.
-KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE=1
-# Default is 0.0 (disabled) so quality threshold is not reduced automatically.
-# Use >0.0 only if you explicitly want a controlled deadlock-relief path.
-KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE=0.0
-KERNEL_PHASE_TARGET_DEFICIT_MARGIN=0.015
+# Training-phase scaffold and kernel-phase progression tuning are now
+# kernel-owned code defaults in runtime_kernel integration modules.
+# The runtime no longer exposes TRAINING_PHASE_* or KERNEL_PHASE_* env knobs
+# for these controls.
 # Optional: parallel reasoning engine (runs local-score, adaptive, and
 # deliberative evaluations in parallel and learns plan trust from outcomes).
 PARALLEL_REASONING_ENGINE_ENABLE=1
@@ -954,16 +909,11 @@ Then open `http://127.0.0.1:5050`.
 - Endocrine modulation env vars use biologically-inspired hormone primitives (`H_curiosity`, `H_caution`, `H_persistence`, `H_mv_trust`, `H_boredom`, `H_confidence`) configured via `H_*_DECAY` and `HORMONE_*` weights; legacy `ENDOCRINE_*` / `HORMONE_STRESS|FATIGUE|REWARD_*` knobs remain available as deprecated bridge inputs.
 - Objective excitement env vars: `OBJECTIVE_EXCITEMENT_ENABLE`, `OBJECTIVE_EXCITEMENT_DECAY`, `OBJECTIVE_EXCITEMENT_EXIT_BOOST`, `OBJECTIVE_EXCITEMENT_PATH_BOOST`, `OBJECTIVE_EXCITEMENT_MAX`, `OBJECTIVE_EXCITEMENT_SCORE_WEIGHT`, `OBJECTIVE_EXCITEMENT_PROGRESS_WEIGHT`, `OBJECTIVE_EXCITEMENT_CONFIDENCE_BLEND` (adds adaptive soft capture pressure when exit evidence appears, so objective pursuit can ramp quickly without relying on hard objective override forcing).
 - Learned-autonomy subphase env vars: `LEARNED_AUTONOMY_SUBPHASE_ENABLE`, `LEARNED_AUTONOMY_WARMUP_STEPS`, `LEARNED_AUTONOMY_EMA_DECAY`, `LEARNED_AUTONOMY_PHASE1_SCORE`, `LEARNED_AUTONOMY_PHASE2_SCORE`, `LEARNED_AUTONOMY_UNRESOLVED_TARGET` (adds a runtime telemetry learner that now drives a formal autonomy lifecycle state machine: `MANUAL`, `ASSISTED`, `CONSTRAINED_AUTONOMY`, `SUPERVISED_AUTONOMY`, `SUSPENDED`; transitions are justification-tagged and can be externally overridden for governance/audit).
-- Phase-training scaffold env vars: `TRAINING_PHASE_ENABLE`, `TRAINING_PHASE_LEVEL`, `TRAINING_PHASE_AUTO_ADVANCE`, `TRAINING_PHASE2_MIN_STEPS`, `TRAINING_PHASE3_MIN_STEPS`, `TRAINING_PHASE1_PROJECTION_SCALE`, `TRAINING_PHASE2_PROJECTION_SCALE`, `TRAINING_PHASE3_PROJECTION_SCALE`, `TRAINING_PHASE_OVERRIDE_MIN_PRED_GAP` (sets up a 1->3 staged training path where projection features are blended into adaptive learning first, then learned gating progressively replaces anti-oscillation and cycle-avoid hard overrides).
+- Phase-training scaffold controls are now kernel-owned code defaults in `runtime_kernel/integration/kernel_phase_policy_runtime.py` (no `TRAINING_PHASE_*` env surface).
 - Parallel reasoning engine env vars: `PARALLEL_REASONING_ENGINE_ENABLE`, `PARALLEL_REASONING_EMA_DECAY`, `PARALLEL_REASONING_WARMUP_STEPS`, `PARALLEL_REASONING_MIN_CONFIDENCE`, `PARALLEL_REASONING_LOCAL_WEIGHT`, `PARALLEL_REASONING_ADAPTIVE_WEIGHT`, `PARALLEL_REASONING_DELIBERATIVE_WEIGHT`, `PARALLEL_REASONING_DELIB_UNKNOWN_WEIGHT`, `PARALLEL_REASONING_DELIB_FRONTIER_WEIGHT`, `PARALLEL_REASONING_DELIB_LOOKAHEAD_WEIGHT`, `PARALLEL_REASONING_DELIB_LOOP_PENALTY_WEIGHT`, `PARALLEL_REASONING_DELIB_HAZARD_PENALTY_WEIGHT`, `PARALLEL_REASONING_DELIB_CONTRADICTION_PENALTY_WEIGHT`, `PARALLEL_REASONING_PROFILE`, `PARALLEL_REASONING_MAX_BRANCHES`, `PARALLEL_REASONING_MAX_DEPTH`, `PARALLEL_REASONING_TIME_BUDGET_MS`, `PARALLEL_REASONING_TOKEN_BUDGET` (evaluates local/adaptive/deliberative signals in parallel under an explicit reasoning-budget contract; branch pruning is surfaced in telemetry so resource tradeoffs are auditable).
 - Governance and contracts: shared controller contracts now define global error taxonomy (`TRANSIENT`, `PERMANENT`, `SAFETY_CRITICAL`, `POLICY_VIOLATION`, `RESOURCE_EXHAUSTION`), structured action-outcome events, autonomy transition events, module capability descriptors, developmental stages (`INFANT_KERNEL`, `JUVENILE_KERNEL`, `MATURE_KERNEL`, `RESEARCH_MODE`), and reasoning profiles (`FAST_APPROX`, `BALANCED`, `DEEP_AUDIT`). The Governance Orchestrator (`GOVERNANCE_ORCHESTRATOR_ENABLE`, `GOVERNANCE_POLICY_VERSION`, `KERNEL_DEVELOPMENT_STAGE`) collects these events into a unified introspection/audit stream.
-- Kernel phase policy env vars: `KERNEL_PHASE_POLICY_TRAIN_PROFILE`, `KERNEL_PHASE_POLICY_TRAIN_BRANCHES_SCALE`, `KERNEL_PHASE_POLICY_TRAIN_DEPTH_DELTA`, `KERNEL_PHASE_POLICY_TRAIN_TIME_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_TRAIN_TOKEN_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_TRAIN_STAGE`, `KERNEL_PHASE_POLICY_INTEGRATE_PROFILE`, `KERNEL_PHASE_POLICY_INTEGRATE_BRANCHES_SCALE`, `KERNEL_PHASE_POLICY_INTEGRATE_DEPTH_DELTA`, `KERNEL_PHASE_POLICY_INTEGRATE_TIME_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_INTEGRATE_TOKEN_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_INTEGRATE_STAGE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_PROFILE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_SAFETY_PROFILE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_BRANCHES_SCALE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_DEPTH_DELTA`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_TIME_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_TOKEN_BUDGET_SCALE`, `KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_STAGE`, `KERNEL_PHASE_POLICY_SAFETY_PROFILE_FLOOR` (centralized mode-level policy tuning for reasoning profile/budget scaling and development-stage promotion).
-- Kernel phase promotion-target ceiling env var: `KERNEL_PHASE_PROMOTION_TARGET_HARD_MAX` (global hard maximum for promotion target across all phases/stages; use this when you need target drift fully bounded to a fixed ceiling).
-- Kernel phase advancement cap env vars: `KERNEL_PHASE_EARLY_TARGET_CAP_ENABLE`, `KERNEL_PHASE_EARLY_TARGET_CAP`, `KERNEL_PHASE_EARLY_TARGET_CAP_PHASE_COUNT`, `KERNEL_PHASE_EARLY_TARGET_CAP_MICRO_MAX` (optionally caps adaptive promotion target growth for early phases/micro-stages so phase-1 advancement can establish before full strictness ramps in).
-- Kernel phase stage-rebase env vars: `KERNEL_PHASE_WEIGHT_REBASE_ENABLE`, `KERNEL_PHASE_WEIGHT_REBASE_ALPHA`, `KERNEL_PHASE_WEIGHT_REBASE_OBJECTIVE_BOOST` (re-centers adaptive score weights on stage entry using objective signals, which prevents earlier-stage weight skew from dominating later stages/phases).
-- Kernel phase warmup target dampener env vars: `KERNEL_PHASE_WARMUP_TARGET_DAMPENER_ENABLE`, `KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS`, `KERNEL_PHASE_WARMUP_TARGET_DAMPENER_MAX_REDUCTION` (softens promotion target pressure early in each micro-stage, then tapers back to full target as observations accumulate).
-- Kernel phase target-adaptation env vars: `KERNEL_PHASE_TARGET_ADAPT_ENABLE`, `KERNEL_PHASE_TARGET_ADAPT_RATE` (`KERNEL_PHASE_TARGET_ADAPT_ENABLE=0` fully disables adaptive target movement so the promotion bar cannot drift; set to `1` only when testing adaptive target behavior).
-- Kernel phase score-deficit target guard env vars: `KERNEL_PHASE_TARGET_RAISE_ONLY_WHEN_SCORE_READY`, `KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE`, `KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE`, `KERNEL_PHASE_TARGET_DEFICIT_MARGIN` (after minimum observations are met, blocks further target ratcheting while score is below target; with `KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE=1`, target is held stable after observation gate activation; with default `KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE=0.0`, target is not auto-lowered. Any relief behavior is opt-in and bounded).
+- Kernel phase runtime policy knobs are now code-owned defaults inside `runtime_kernel/integration/kernel_phase_policy_runtime.py` (no environment-variable surface for train/integrate/control-integrate policy presets).
+- Kernel phase progression controls are now code-owned defaults in `runtime_kernel/integration/kernel_phase_policy_runtime.py` (promotion caps, stage rebase, warmup dampener, target adaptation, and deficit guards no longer have a `KERNEL_PHASE_*` env surface).
 - Fast-solve treat env vars: `MAZE_FAST_SOLVE_TREAT_ENABLE`, `MAZE_FAST_SOLVE_TREAT_MAX_BONUS`, `MAZE_FAST_SOLVE_TREAT_TARGET_MULTIPLIER`, `MAZE_FAST_SOLVE_TREAT_MIN_TARGET_SECONDS` (tracks wall-clock solve time for each maze episode and grants a metaphorical reward bonus when completion beats a dynamic target time derived from optimal path length and move cadence).
 - Adaptive telemetry env vars: `ADAPTIVE_PROGRESS_REPORT_ENABLE`, `ADAPTIVE_PROGRESS_REPORT_MODEL`, `ADAPTIVE_PROGRESS_REPORT_INTERVAL_STEPS`, `ADAPTIVE_PROGRESS_AUTO_TUNE`, `ADAPTIVE_PROGRESS_REPORT_MAX_NOTES_CHARS` (occasionally sends adaptive weight snapshots + kernel progress to a GPT reviewer and can softly auto-tune legacy blend drift over time).
 - Organism control env vars: `ORGANISM_CONTROL_ENABLE`, `ORGANISM_RECENT_WINDOW` (routes live maze move arbitration through `step_agent(...)` and `CandidateProjection` with policy switching, explicit `ESCAPE_LOOP` inhibition under loop pressure, and a catastrophic trap veto that removes cycle+terminal+boxed corridor moves from selection when alternatives exist).

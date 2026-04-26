@@ -1,8 +1,74 @@
 from __future__ import annotations
 
-import os
-
 from kernel_contracts import DevelopmentStage, ReasoningBudgetContract, ReasoningProfile
+
+
+DEFAULT_KERNEL_PHASE_AUTOSTEP_ENABLE = True
+DEFAULT_KERNEL_PHASE_OBSERVATION_FLOOR_OVERRIDE: int | None = None
+DEFAULT_KERNEL_PHASE_CAUSAL_COUNTERFACTUAL_ENABLE = True
+DEFAULT_KERNEL_PHASE_PROGRAM_ENABLE = True
+DEFAULT_KERNEL_PHASE_PROGRAM_KWARGS = {
+    "ema_decay": 0.93,
+    "base_promotion_target": 0.62,
+    "target_adapt_enable": False,
+    "target_adapt_rate": 0.08,
+    "weight_adapt_rate": 0.06,
+    "promotion_target_hard_max": 0.90,
+    "early_target_cap_enable": True,
+    "early_target_cap": 0.58,
+    "early_target_cap_phase_count": 1,
+    "early_target_cap_micro_max": 3,
+    "weight_rebase_enable": True,
+    "weight_rebase_alpha": 0.68,
+    "weight_rebase_objective_boost": 0.30,
+    "warmup_target_dampener_enable": True,
+    "warmup_target_dampener_observations": 96,
+    "warmup_target_dampener_max_reduction": 0.14,
+    "target_raise_only_when_score_ready": True,
+    "target_freeze_after_observation_gate": True,
+    "target_deficit_relief_rate": 0.0,
+    "target_deficit_margin": 0.015,
+}
+DEFAULT_KERNEL_PHASE_FORCE_SAFETY_CORE_ENABLE = True
+DEFAULT_TRAINING_PHASE_SETTINGS = {
+    "enable": True,
+    "level": 1,
+    "auto_advance": True,
+    "phase2_min_steps": 2500,
+    "phase3_min_steps": 9000,
+    "phase1_projection_scale": 0.4,
+    "phase2_projection_scale": 0.7,
+    "phase3_projection_scale": 1.0,
+    "override_min_pred_gap": 0.015,
+}
+DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP = {
+    "train": {
+        "reasoning_profile": "FAST_APPROX",
+        "branches_scale": 0.75,
+        "depth_delta": -1,
+        "time_budget_scale": 0.7,
+        "token_budget_scale": 0.75,
+        "development_stage": "JUVENILE_KERNEL",
+    },
+    "integrate": {
+        "reasoning_profile": "BALANCED",
+        "branches_scale": 1.0,
+        "depth_delta": 0,
+        "time_budget_scale": 1.0,
+        "token_budget_scale": 1.0,
+        "development_stage": "MATURE_KERNEL",
+    },
+    "control_integrate": {
+        "reasoning_profile": "BALANCED",
+        "reasoning_profile_if_safety": "DEEP_AUDIT",
+        "branches_scale": 1.25,
+        "depth_delta": 1,
+        "time_budget_scale": 1.4,
+        "token_budget_scale": 1.3,
+        "development_stage": "MATURE_KERNEL",
+    },
+}
+DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR = "BALANCED"
 
 
 def _parse_reasoning_profile(value: object, *, fallback: ReasoningProfile) -> ReasoningProfile:
@@ -23,30 +89,6 @@ def _parse_development_stage(value: object, *, fallback: DevelopmentStage) -> De
     except Exception:
         pass
     return fallback
-
-
-def _parse_bool_env(name: str, *, default: bool) -> bool:
-    raw = os.getenv(name, "1" if default else "0")
-    token = str(raw or "").strip().lower()
-    if token in {"1", "true", "yes", "on"}:
-        return True
-    if token in {"0", "false", "no", "off"}:
-        return False
-    return bool(default)
-
-
-def _parse_optional_nonnegative_int_env(name: str) -> int | None:
-    raw = os.getenv(name, "")
-    token = str(raw or "").strip()
-    if not token:
-        return None
-    try:
-        value = int(float(token))
-    except Exception:
-        return None
-    if value < 0:
-        return None
-    return int(value)
 
 
 def _scaled_budget(
@@ -82,9 +124,9 @@ def _scaled_budget(
 
 
 def init_kernel_phase_policy_runtime(app: object) -> None:
-    app.kernel_phase_autostep_enable = _parse_bool_env("KERNEL_PHASE_AUTOSTEP", default=True)
-    app.kernel_phase_observation_floor_override = _parse_optional_nonnegative_int_env("KERNEL_PHASE_OBSERVATION_FLOOR")
-    app.kernel_phase_causal_counterfactual_enable = _parse_bool_env("KERNEL_PHASE_CAUSAL_COUNTERFACTUAL_ENABLE", default=True)
+    app.kernel_phase_autostep_enable = DEFAULT_KERNEL_PHASE_AUTOSTEP_ENABLE
+    app.kernel_phase_observation_floor_override = DEFAULT_KERNEL_PHASE_OBSERVATION_FLOOR_OVERRIDE
+    app.kernel_phase_causal_counterfactual_enable = DEFAULT_KERNEL_PHASE_CAUSAL_COUNTERFACTUAL_ENABLE
     app.kernel_phase_module_base_enable = {
         "learned_autonomy_controller": bool(getattr(app, "learned_autonomy_subphase_enable", False)),
         "parallel_reasoning_engine": bool(getattr(app, "parallel_reasoning_enable", False)),
@@ -104,34 +146,8 @@ def init_kernel_phase_policy_runtime(app: object) -> None:
         },
         "development_stage": str(getattr(getattr(getattr(app, "governance_orchestrator", None), "development_stage", DevelopmentStage.JUVENILE_KERNEL), "value", "JUVENILE_KERNEL")),
     }
-    app.kernel_phase_mode_policy_map = {
-        "train": {
-            "reasoning_profile": str(os.getenv("KERNEL_PHASE_POLICY_TRAIN_PROFILE", "FAST_APPROX")).strip().upper(),
-            "branches_scale": max(0.25, min(2.0, float(os.getenv("KERNEL_PHASE_POLICY_TRAIN_BRANCHES_SCALE", "0.75")))),
-            "depth_delta": max(-4, min(4, int(float(os.getenv("KERNEL_PHASE_POLICY_TRAIN_DEPTH_DELTA", "-1"))))),
-            "time_budget_scale": max(0.25, min(2.5, float(os.getenv("KERNEL_PHASE_POLICY_TRAIN_TIME_BUDGET_SCALE", "0.7")))),
-            "token_budget_scale": max(0.25, min(2.5, float(os.getenv("KERNEL_PHASE_POLICY_TRAIN_TOKEN_BUDGET_SCALE", "0.75")))),
-            "development_stage": str(os.getenv("KERNEL_PHASE_POLICY_TRAIN_STAGE", "JUVENILE_KERNEL")).strip(),
-        },
-        "integrate": {
-            "reasoning_profile": str(os.getenv("KERNEL_PHASE_POLICY_INTEGRATE_PROFILE", "BALANCED")).strip().upper(),
-            "branches_scale": max(0.25, min(2.0, float(os.getenv("KERNEL_PHASE_POLICY_INTEGRATE_BRANCHES_SCALE", "1.0")))),
-            "depth_delta": max(-4, min(4, int(float(os.getenv("KERNEL_PHASE_POLICY_INTEGRATE_DEPTH_DELTA", "0"))))),
-            "time_budget_scale": max(0.25, min(2.5, float(os.getenv("KERNEL_PHASE_POLICY_INTEGRATE_TIME_BUDGET_SCALE", "1.0")))),
-            "token_budget_scale": max(0.25, min(2.5, float(os.getenv("KERNEL_PHASE_POLICY_INTEGRATE_TOKEN_BUDGET_SCALE", "1.0")))),
-            "development_stage": str(os.getenv("KERNEL_PHASE_POLICY_INTEGRATE_STAGE", "MATURE_KERNEL")).strip(),
-        },
-        "control_integrate": {
-            "reasoning_profile": str(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_PROFILE", "BALANCED")).strip().upper(),
-            "reasoning_profile_if_safety": str(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_SAFETY_PROFILE", "DEEP_AUDIT")).strip().upper(),
-            "branches_scale": max(0.25, min(2.0, float(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_BRANCHES_SCALE", "1.25")))),
-            "depth_delta": max(-4, min(4, int(float(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_DEPTH_DELTA", "1"))))),
-            "time_budget_scale": max(0.25, min(2.5, float(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_TIME_BUDGET_SCALE", "1.4")))),
-            "token_budget_scale": max(0.25, min(2.5, float(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_TOKEN_BUDGET_SCALE", "1.3")))),
-            "development_stage": str(os.getenv("KERNEL_PHASE_POLICY_CONTROL_INTEGRATE_STAGE", "MATURE_KERNEL")).strip(),
-        },
-    }
-    app.kernel_phase_safety_profile_floor = str(os.getenv("KERNEL_PHASE_POLICY_SAFETY_PROFILE_FLOOR", "BALANCED")).strip().upper()
+    app.kernel_phase_mode_policy_map = {mode: dict(payload) for mode, payload in DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP.items()}
+    app.kernel_phase_safety_profile_floor = DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR
     app.kernel_phase_runtime_module_signature = None
     app.kernel_phase_last_metric_debug = {}
 

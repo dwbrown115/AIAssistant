@@ -27,7 +27,7 @@ from organism_control import CandidateProjection, ControlState as OrganismContro
 from maze.projection_module import ProjectionConfig, ProjectionModule
 from maze.runner import CandidateInput, MazeAgent, StepOutput as MazeStepOutput
 from runtime.config import load_model_runtime_config
-from runtime_kernel.integration.kernel_phase_policy_runtime import apply_kernel_phase_runtime_integration as kernel_apply_kernel_phase_runtime_integration, build_kernel_phase_step_context as kernel_build_kernel_phase_step_context_runtime, init_kernel_phase_policy_runtime as kernel_init_kernel_phase_policy_runtime, kernel_phase_active_module_targets as kernel_phase_active_module_targets_runtime, kernel_phase_active_specs as kernel_phase_active_specs_runtime, kernel_phase_blend_metrics as kernel_phase_blend_metrics_runtime, kernel_phase_module_metrics as kernel_phase_module_metrics_runtime, kernel_phase_runtime_module_enabled as kernel_phase_runtime_module_enabled_runtime, kernel_phase_runtime_policy_snapshot as kernel_phase_runtime_policy_snapshot_runtime, observe_kernel_adaptive_step as kernel_observe_kernel_adaptive_step_runtime
+from runtime_kernel.integration.kernel_phase_policy_runtime import DEFAULT_KERNEL_PHASE_FORCE_SAFETY_CORE_ENABLE as KERNEL_PHASE_FORCE_SAFETY_CORE_DEFAULT_ENABLE_RUNTIME, DEFAULT_KERNEL_PHASE_PROGRAM_ENABLE as KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME, DEFAULT_KERNEL_PHASE_PROGRAM_KWARGS as KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME, DEFAULT_TRAINING_PHASE_SETTINGS as TRAINING_PHASE_DEFAULT_SETTINGS_RUNTIME, apply_kernel_phase_runtime_integration as kernel_apply_kernel_phase_runtime_integration, build_kernel_phase_step_context as kernel_build_kernel_phase_step_context_runtime, init_kernel_phase_policy_runtime as kernel_init_kernel_phase_policy_runtime, kernel_phase_active_module_targets as kernel_phase_active_module_targets_runtime, kernel_phase_active_specs as kernel_phase_active_specs_runtime, kernel_phase_blend_metrics as kernel_phase_blend_metrics_runtime, kernel_phase_module_metrics as kernel_phase_module_metrics_runtime, kernel_phase_runtime_module_enabled as kernel_phase_runtime_module_enabled_runtime, kernel_phase_runtime_policy_snapshot as kernel_phase_runtime_policy_snapshot_runtime, observe_kernel_adaptive_step as kernel_observe_kernel_adaptive_step_runtime
 from runtime_kernel.maintenance.sleep_cycle_runtime import maybe_run_sleep_cycle as kernel_maybe_run_sleep_cycle_runtime, maybe_run_step_hygiene as kernel_maybe_run_step_hygiene_runtime, run_sleep_cycle as kernel_run_sleep_cycle_runtime, run_step_hygiene as kernel_run_step_hygiene_runtime
 from runtime_kernel.persistence.memory_db_runtime import ensure_action_outcome_memory_schema as kernel_ensure_action_outcome_memory_schema_runtime, ensure_pattern_catalog_uncertainty_schema as kernel_ensure_pattern_catalog_uncertainty_schema_runtime, ensure_prediction_memory_schema as kernel_ensure_prediction_memory_schema_runtime, init_memory_db as kernel_init_memory_db_runtime
 from runtime_kernel.pipeline.request_flow_runtime import request_response as kernel_request_response_runtime
@@ -370,8 +370,8 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='Kernel phase program: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: app runtime micro controller')
+        self.kernel_phase_program_status_var = tk.StringVar(value='Kernel phase progression v2: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (v2)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
@@ -707,33 +707,14 @@ class AIAssistantApp:
         self.learned_autonomy_hard_phase_bonus = 0
         self.learned_autonomy_objective_phase_bonus = 0
         self.learned_autonomy_soft_override_scale = 1.0
-        self.kernel_phase_program_enable = os.getenv('KERNEL_PHASE_PROGRAM_ENABLE', '1') == '1'
+        self.kernel_phase_program_enable = KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME
         self.kernel_phase_specs = build_default_kernel_phase_specs() if self.kernel_phase_program_enable else ()
+        kernel_phase_program_defaults = dict(KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME)
         self.kernel_phase_program = AdaptiveKernelPhaseProgram(
             phase_specs=self.kernel_phase_specs,
-            ema_decay=max(0.5, min(0.999, float(os.getenv('KERNEL_PHASE_EMA_DECAY', '0.93')))),
-            base_promotion_target=max(0.45, min(0.9, float(os.getenv('KERNEL_PHASE_BASE_PROMOTION_TARGET', '0.62')))),
-            target_adapt_enable=os.getenv('KERNEL_PHASE_TARGET_ADAPT_ENABLE', '0') == '1',
-            target_adapt_rate=max(0.001, min(0.25, float(os.getenv('KERNEL_PHASE_TARGET_ADAPT_RATE', '0.08')))),
-            weight_adapt_rate=max(0.001, min(0.25, float(os.getenv('KERNEL_PHASE_WEIGHT_ADAPT_RATE', '0.06')))),
-            promotion_target_hard_max=max(0.45, min(0.9, float(os.getenv('KERNEL_PHASE_PROMOTION_TARGET_HARD_MAX', '0.90')))),
-            early_target_cap_enable=os.getenv('KERNEL_PHASE_EARLY_TARGET_CAP_ENABLE', '1') == '1',
-            early_target_cap=max(0.45, min(0.9, float(os.getenv('KERNEL_PHASE_EARLY_TARGET_CAP', '0.58')))),
-            early_target_cap_phase_count=max(0, int(float(os.getenv('KERNEL_PHASE_EARLY_TARGET_CAP_PHASE_COUNT', '1')))),
-            early_target_cap_micro_max=max(0, int(float(os.getenv('KERNEL_PHASE_EARLY_TARGET_CAP_MICRO_MAX', '3')))),
-            weight_rebase_enable=os.getenv('KERNEL_PHASE_WEIGHT_REBASE_ENABLE', '1') == '1',
-            weight_rebase_alpha=max(0.05, min(0.95, float(os.getenv('KERNEL_PHASE_WEIGHT_REBASE_ALPHA', '0.68')))),
-            weight_rebase_objective_boost=max(0.0, min(0.75, float(os.getenv('KERNEL_PHASE_WEIGHT_REBASE_OBJECTIVE_BOOST', '0.30')))),
-            warmup_target_dampener_enable=os.getenv('KERNEL_PHASE_WARMUP_TARGET_DAMPENER_ENABLE', '1') == '1',
-            warmup_target_dampener_observations=max(8, int(float(os.getenv('KERNEL_PHASE_WARMUP_TARGET_DAMPENER_OBSERVATIONS', '96')))),
-            warmup_target_dampener_max_reduction=max(0.0, min(0.4, float(os.getenv('KERNEL_PHASE_WARMUP_TARGET_DAMPENER_MAX_REDUCTION', '0.14')))),
-            target_raise_only_when_score_ready=os.getenv('KERNEL_PHASE_TARGET_RAISE_ONLY_WHEN_SCORE_READY', '1') == '1',
-            target_freeze_after_observation_gate=os.getenv('KERNEL_PHASE_TARGET_FREEZE_AFTER_OBSERVATION_GATE', '1') == '1',
-            target_deficit_relief_rate=max(0.0, min(0.75, float(os.getenv('KERNEL_PHASE_TARGET_DEFICIT_RELIEF_RATE', '0.0')))),
-            target_deficit_margin=max(0.0, min(0.12, float(os.getenv('KERNEL_PHASE_TARGET_DEFICIT_MARGIN', '0.015')))),
+            **kernel_phase_program_defaults,
         ) if self.kernel_phase_program_enable else None
-        _phase_disable_tokens = [token.strip() for token in str(os.getenv('KERNEL_PHASE_DISABLE_LIST', '')).split(',') if token.strip()]
-        self.kernel_phase_disable_list = tuple(dict.fromkeys(_phase_disable_tokens))
+        self.kernel_phase_disable_list: tuple[str, ...] = ()
         if self.kernel_phase_program is not None and self.kernel_phase_disable_list:
             self.kernel_phase_program.set_disabled_phase_ids(self.kernel_phase_disable_list)
         self.kernel_phase_last_target = ''
@@ -801,7 +782,7 @@ class AIAssistantApp:
         self.maze_agent_corridor_forward_bias = max(0.0, float(os.getenv('MAZE_AGENT_CORRIDOR_FORWARD_BIAS', '1.2')))
         self.maze_agent_side_open_bias = max(0.0, float(os.getenv('MAZE_AGENT_SIDE_OPEN_BIAS', '0.8')))
         self.maze_agent = self._build_maze_agent()
-        self.kernel_phase_force_safety_core_enable = os.getenv('KERNEL_PHASE_FORCE_SAFETY_CORE_ENABLE', '1') == '1'
+        self.kernel_phase_force_safety_core_enable = KERNEL_PHASE_FORCE_SAFETY_CORE_DEFAULT_ENABLE_RUNTIME
         kernel_init_kernel_phase_policy_runtime(self)
         self._apply_kernel_phase_runtime_integration()
         self.bio_nav_enable = os.getenv('BIO_NAV_ENABLE', '1') == '1'
@@ -982,15 +963,16 @@ class AIAssistantApp:
         self.adaptive_guard_hysteresis_steps = max(0, int(os.getenv('ADAPTIVE_GUARD_HYSTERESIS_STEPS', '3')))
         self.long_run_runtime_normalize_enable = os.getenv('LONG_RUN_RUNTIME_NORMALIZE_ENABLE', '1') == '1'
         self.long_run_runtime_guard_blend = max(0.0, min(1.0, float(os.getenv('LONG_RUN_RUNTIME_GUARD_BLEND', '0.22'))))
-        self.training_phase_enable = os.getenv('TRAINING_PHASE_ENABLE', '1') == '1'
-        self.training_phase_level = max(1, min(3, int(os.getenv('TRAINING_PHASE_LEVEL', '1'))))
-        self.training_phase_auto_advance = os.getenv('TRAINING_PHASE_AUTO_ADVANCE', '1') == '1'
-        self.training_phase2_min_steps = max(120, int(os.getenv('TRAINING_PHASE2_MIN_STEPS', '2500')))
-        self.training_phase3_min_steps = max(self.training_phase2_min_steps + 120, int(os.getenv('TRAINING_PHASE3_MIN_STEPS', '9000')))
-        self.training_phase1_projection_scale = max(0.0, min(1.0, float(os.getenv('TRAINING_PHASE1_PROJECTION_SCALE', '0.4'))))
-        self.training_phase2_projection_scale = max(self.training_phase1_projection_scale, min(1.0, float(os.getenv('TRAINING_PHASE2_PROJECTION_SCALE', '0.7'))))
-        self.training_phase3_projection_scale = max(self.training_phase2_projection_scale, min(1.0, float(os.getenv('TRAINING_PHASE3_PROJECTION_SCALE', '1.0'))))
-        self.training_phase_override_min_pred_gap = max(0.0, min(0.25, float(os.getenv('TRAINING_PHASE_OVERRIDE_MIN_PRED_GAP', '0.015'))))
+        training_phase_defaults = dict(TRAINING_PHASE_DEFAULT_SETTINGS_RUNTIME)
+        self.training_phase_enable = bool(training_phase_defaults.get('enable', True))
+        self.training_phase_level = max(1, min(3, int(training_phase_defaults.get('level', 1))))
+        self.training_phase_auto_advance = bool(training_phase_defaults.get('auto_advance', True))
+        self.training_phase2_min_steps = max(120, int(training_phase_defaults.get('phase2_min_steps', 2500)))
+        self.training_phase3_min_steps = max(self.training_phase2_min_steps + 120, int(training_phase_defaults.get('phase3_min_steps', 9000)))
+        self.training_phase1_projection_scale = max(0.0, min(1.0, float(training_phase_defaults.get('phase1_projection_scale', 0.4))))
+        self.training_phase2_projection_scale = max(self.training_phase1_projection_scale, min(1.0, float(training_phase_defaults.get('phase2_projection_scale', 0.7))))
+        self.training_phase3_projection_scale = max(self.training_phase2_projection_scale, min(1.0, float(training_phase_defaults.get('phase3_projection_scale', 1.0))))
+        self.training_phase_override_min_pred_gap = max(0.0, min(0.25, float(training_phase_defaults.get('override_min_pred_gap', 0.015))))
         self.runtime_batch_micro_progress_active = False
         self.runtime_batch_micro_progress = 0.0
         self.runtime_batch_micro_ramp = 0.0
@@ -1653,7 +1635,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='Phase Progression', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='Phase Progression (V2)', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -1663,7 +1645,7 @@ class AIAssistantApp:
         tk.Label(panel, textvariable=self.kernel_phase_program_modules_var, anchor='w', justify=tk.LEFT, wraplength=560).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
         controls_row = tk.Frame(panel)
         controls_row.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(controls_row, text='Manual').pack(side=tk.LEFT)
+        tk.Label(controls_row, text='Manual override').pack(side=tk.LEFT)
         self.kernel_phase_regress_phase_button = tk.Button(controls_row, text='Phase -', command=self._on_kernel_phase_regress_phase)
         self.kernel_phase_regress_phase_button.pack(side=tk.LEFT, padx=(8, 4))
         self.kernel_phase_advance_phase_button = tk.Button(controls_row, text='Phase +', command=self._on_kernel_phase_advance_phase)
@@ -1674,10 +1656,10 @@ class AIAssistantApp:
         self.kernel_phase_advance_micro_button.pack(side=tk.LEFT)
         runtime_row = tk.Frame(panel)
         runtime_row.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(runtime_row, text='Runtime').pack(side=tk.LEFT)
-        self.kernel_phase_autostep_checkbutton = tk.Checkbutton(runtime_row, text='Autostep', variable=self.kernel_phase_autostep_var, command=self._on_kernel_phase_autostep_toggle)
+        tk.Label(runtime_row, text='Runtime override').pack(side=tk.LEFT)
+        self.kernel_phase_autostep_checkbutton = tk.Checkbutton(runtime_row, text='Autostep override', variable=self.kernel_phase_autostep_var, command=self._on_kernel_phase_autostep_toggle)
         self.kernel_phase_autostep_checkbutton.pack(side=tk.LEFT, padx=(8, 8))
-        tk.Label(runtime_row, text='Obs floor').pack(side=tk.LEFT)
+        tk.Label(runtime_row, text='Obs floor override').pack(side=tk.LEFT)
         self.kernel_phase_observation_floor_entry = tk.Entry(runtime_row, textvariable=self.kernel_phase_observation_floor_text_var, width=6)
         self.kernel_phase_observation_floor_entry.pack(side=tk.LEFT, padx=(4, 4))
         self.kernel_phase_observation_floor_apply_button = tk.Button(runtime_row, text='Apply', command=self._on_kernel_phase_observation_floor_apply)
@@ -1687,9 +1669,9 @@ class AIAssistantApp:
         self.kernel_phase_toggle_vars = {}
         self.kernel_phase_toggle_buttons = {}
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='Kernel phase program disabled').pack(anchor='w')
-            self.kernel_phase_program_status_var.set('Kernel phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: app runtime micro controller')
+            tk.Label(toggle_grid, text='Kernel phase progression v2 disabled').pack(anchor='w')
+            self.kernel_phase_program_status_var.set('Kernel phase progression v2: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (v2)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1722,13 +1704,13 @@ class AIAssistantApp:
 
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('Kernel phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: app runtime micro controller')
+            self.kernel_phase_program_status_var.set('Kernel phase progression v2: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (v2)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: app runtime micro controller')
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (v2)')
         self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', True)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
@@ -1739,7 +1721,7 @@ class AIAssistantApp:
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('Kernel phase program: no phases loaded')
+            self.kernel_phase_program_status_var.set('Kernel phase progression v2: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1787,6 +1769,10 @@ class AIAssistantApp:
             stage_index = max(0, min(micro_total - 1, micro_state_index))
             stage_spec = spec.micro_stages[stage_index] if spec.micro_stages else None
             stage_label = str(getattr(stage_spec, 'label', '') or getattr(stage_spec, 'stage_id', '') or '--')
+            stage_impact_label = str(getattr(stage_spec, 'impact_label', '') or '').strip()
+            stage_env_key_count = int(getattr(stage_spec, 'env_key_count', 0) or 0)
+            if stage_impact_label and stage_env_key_count > 0:
+                stage_label = f'{stage_label} | {stage_impact_label}:{stage_env_key_count}'
             label = f'{phase_label} -> {stage_label} [{micro_position}]'
             if is_active:
                 label = f'{label} (active)'
@@ -1809,7 +1795,7 @@ class AIAssistantApp:
         runtime_floor_override = getattr(self, 'kernel_phase_observation_floor_override', None)
         runtime_floor_text = str(int(runtime_floor_override)) if isinstance(runtime_floor_override, int) and runtime_floor_override >= 0 else 'none'
         runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text}'
-        self.kernel_phase_program_status_var.set(f'Kernel phase progression: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        self.kernel_phase_program_status_var.set(f'Kernel phase progression v2: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -1820,6 +1806,13 @@ class AIAssistantApp:
             min_observations = '--'
             min_observations_value = 0
             observation_position = '--/--'
+            env_impact_rank = 0
+            env_impact_label = '--'
+            env_type_group = '--'
+            env_key_count = 0
+            env_ownership_action = '--'
+            env_execution_system = '--'
+            env_prefixes_text = '--'
             active_state = phase_map.get(active_phase_id, {})
             active_observations = int(active_state.get('observations', 0) or 0)
             effective_min_observations = int(active_state.get('effective_min_observations', 0) or 0)
@@ -1833,6 +1826,14 @@ class AIAssistantApp:
                     objective_signals = ', '.join(objective_values) if objective_values else '--'
                     module_targets = ', '.join(module_values) if module_values else '--'
                     baseline_min_obs = int(getattr(micro_spec, 'min_observations', 0) or 0)
+                    env_impact_rank = int(getattr(micro_spec, 'impact_rank', 0) or 0)
+                    env_impact_label = str(getattr(micro_spec, 'impact_label', '--') or '--')
+                    env_type_group = str(getattr(micro_spec, 'env_type_group', '--') or '--')
+                    env_key_count = int(getattr(micro_spec, 'env_key_count', 0) or 0)
+                    env_ownership_action = str(getattr(micro_spec, 'ownership_action', '--') or '--')
+                    env_execution_system = str(getattr(micro_spec, 'execution_system', '--') or '--')
+                    env_prefix_values = tuple((str(prefix).strip() for prefix in tuple(getattr(micro_spec, 'env_prefixes', ()) or ()) if str(prefix).strip()))
+                    env_prefixes_text = ', '.join(env_prefix_values) if env_prefix_values else '--'
                     if effective_min_observations <= 0:
                         effective_min_observations = baseline_min_obs
                     min_observations_value = int(max(baseline_min_obs, effective_min_observations))
@@ -1855,7 +1856,10 @@ class AIAssistantApp:
             obs_gap = max(0, int(max(0, int(min_observations_value)) - int(active_observations)))
             self.kernel_phase_program_current_var.set(f'Current: {active_spec.label} | {micro_label} ({micro_position})')
             self.kernel_phase_program_details_var.set(f'Stage mode: {micro_mode} | objective signals: {objective_signals} | observations: {observation_position} (gap={obs_gap}) | {runtime_controls_text} | score: {round(score_ema, 4)}/{round(promotion_target, 4)} (gap={round(score_gap, 4)}) | gate: ready={promotion_gate_ready},met={promotion_gate_met} | blocked={blocked_reason} | profile: {reasoning_profile} | budget: b={budget_branches},d={budget_depth},ms={budget_time},tok={budget_tokens} | dev stage: {development_stage}')
-            self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets}')
+            if active_phase_id == 'phase_2_impact_ranked_handoff_system':
+                self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets} | env system: {env_type_group}/{env_ownership_action} | impact={env_impact_label}({env_impact_rank}) | keys={env_key_count} | prefixes={env_prefixes_text} | executor={env_execution_system}')
+            else:
+                self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets}')
         else:
             self.kernel_phase_program_current_var.set('Current: complete')
             self.kernel_phase_program_details_var.set(f'Stage: complete | {runtime_controls_text}')
@@ -1946,7 +1950,7 @@ class AIAssistantApp:
                 },
             )
         state_text = 'enabled' if self.kernel_phase_autostep_enable else 'disabled'
-        self.status_var.set(f'Kernel phase autostep {state_text}')
+        self.status_var.set(f'Kernel phase autostep override {state_text}')
         self._save_window_geometry()
 
     def _on_kernel_phase_observation_floor_apply(self) -> None:
@@ -1958,11 +1962,11 @@ class AIAssistantApp:
             try:
                 parsed_value = int(float(raw_value))
             except Exception:
-                self.status_var.set('Kernel phase observation floor: invalid value')
+                self.status_var.set('Kernel phase observation floor override: invalid value')
                 self._schedule_kernel_phase_controls_refresh()
                 return
             if parsed_value < 0:
-                self.status_var.set('Kernel phase observation floor: must be >= 0')
+                self.status_var.set('Kernel phase observation floor override: must be >= 0')
                 self._schedule_kernel_phase_controls_refresh()
                 return
             floor_value = int(parsed_value)
@@ -1984,9 +1988,9 @@ class AIAssistantApp:
                 },
             )
         if floor_value is None:
-            self.status_var.set('Kernel phase observation floor cleared')
+            self.status_var.set('Kernel phase observation floor override cleared')
         else:
-            self.status_var.set(f'Kernel phase observation floor set to {floor_value}')
+            self.status_var.set(f'Kernel phase observation floor override set to {floor_value}')
         self._save_window_geometry()
 
     def _handle_kernel_phase_manual_transition(self, *, action: str, transition: object | None) -> None:
@@ -1994,7 +1998,7 @@ class AIAssistantApp:
         self._schedule_kernel_phase_controls_refresh()
         self._schedule_micro_progress_header_update(announce_transition=False)
         if transition is None:
-            self.status_var.set('Kernel phase manual control: no change')
+            self.status_var.set('Kernel phase manual override: no change')
             return
         self._save_window_geometry()
         if hasattr(self, 'governance_orchestrator'):
@@ -6626,6 +6630,21 @@ class AIAssistantApp:
         if candidate_dict is None:
             return baseline_dict
 
+        active_signature = ''
+        if self.kernel_phase_program is not None:
+            active_signature = str(getattr(self.kernel_phase_program, 'phase_set_signature', '') or '').strip()
+        if active_signature:
+            baseline_signature = str(baseline_dict.get('phase_set_signature', '') or '').strip()
+            candidate_signature = str(candidate_dict.get('phase_set_signature', '') or '').strip()
+            baseline_match = baseline_signature == active_signature
+            candidate_match = candidate_signature == active_signature
+            if (not baseline_match) and (not candidate_match):
+                return None
+            if baseline_match and (not candidate_match):
+                return baseline_dict
+            if candidate_match and (not baseline_match):
+                return candidate_dict
+
         baseline_phases = baseline_dict.get('phases')
         candidate_phases = candidate_dict.get('phases')
         if not isinstance(baseline_phases, list) and not isinstance(candidate_phases, list):
@@ -6687,6 +6706,7 @@ class AIAssistantApp:
 
         weights = baseline_weight_source.get('adaptive_weights') if baseline_progress_score >= candidate_progress_score else candidate_weight_source.get('adaptive_weights')
         merged: dict[str, object] = {
+            'phase_set_signature': active_signature,
             'phases': merged_phases,
         }
         if isinstance(weights, dict):

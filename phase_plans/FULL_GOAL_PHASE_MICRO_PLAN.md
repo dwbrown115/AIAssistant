@@ -10,9 +10,7 @@ Fully achieve the target kernel adaptive phase program defined in `phase_plans/N
 ## Current Gap Summary
 Known gaps from audit:
 - Runtime default phase map still uses legacy 5 phases in `adaptive_phase_program.py`.
-- Missing control-surface knobs:
-  - `KERNEL_PHASE_AUTOSTEP`
-  - `KERNEL_PHASE_OBSERVATION_FLOOR`
+- Missing runtime control-surface completion for autostep and observation-floor overrides.
 - Core adaptive progression and governance emission are already present.
 
 ## Delivery Phases
@@ -54,19 +52,19 @@ Exit criteria:
 - App can start with old window/persistence state files without exceptions.
 
 ## Phase 2: Control-Surface Completion
-Objective: Implement missing env controls and ensure behavior is observable.
+Objective: Implement missing runtime controls and ensure behavior is observable.
 
-### m1: `KERNEL_PHASE_OBSERVATION_FLOOR`
+### m1: Observation floor override
 - Add optional global floor override in progression gating path.
 - Effective min observations per stage:
-  - `max(stage.min_observations, KERNEL_PHASE_OBSERVATION_FLOOR)` when override is set.
+  - `max(stage.min_observations, global_observation_floor_override)` when override is set.
 
 Exit criteria:
 - Gate thresholds change when env var is set.
 - Behavior visible in debug/governance payload (effective floor included).
 
-### m2: `KERNEL_PHASE_AUTOSTEP`
-- Implement `KERNEL_PHASE_AUTOSTEP` runtime flag:
+### m2: Autostep toggle
+- Implement runtime autostep flag:
   - `1`: current automatic observe/promote behavior (default).
   - `0`: freeze automatic progression promotions while still collecting EMAs/metrics.
 - Manual phase/micro controls must continue to work when autostep is off.
@@ -132,8 +130,8 @@ Exit criteria:
 All must be true:
 - Six-phase capability map live in runtime defaults.
 - Four micro stages per phase with target ids.
-- `KERNEL_PHASE_AUTOSTEP` implemented and validated.
-- `KERNEL_PHASE_OBSERVATION_FLOOR` implemented and validated.
+- Runtime autostep control implemented and validated.
+- Runtime observation-floor override implemented and validated.
 - Kernel policy snapshot exposes new control-surface fields.
 - Governance events and dumps reflect new map and runtime policy.
 

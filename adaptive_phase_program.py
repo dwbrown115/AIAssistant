@@ -19,6 +19,13 @@ class MicroStageSpec:
     module_targets: tuple[str, ...]
     objective_signals: tuple[str, ...]
     min_observations: int = 64
+    impact_rank: int = 0
+    impact_label: str = ""
+    env_type_group: str = ""
+    env_key_count: int = 0
+    ownership_action: str = ""
+    execution_system: str = ""
+    env_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,7 @@ class AdaptiveKernelPhaseProgram:
             phase_id: idx for idx, phase_id in enumerate(self.phase_order)
         }
         self.phase_spec_by_id = {spec.phase_id: spec for spec in phase_specs}
+        self.phase_set_signature = self._build_phase_set_signature()
         self.early_target_cap_enable = bool(early_target_cap_enable)
         self.early_target_cap = _clamp(float(early_target_cap), 0.45, 0.90)
         self.early_target_cap_phase_count = max(0, int(early_target_cap_phase_count))
@@ -149,6 +157,13 @@ class AdaptiveKernelPhaseProgram:
             "introspection": 0.04,
         }
         self.completed_micro_total = 0
+
+    def _build_phase_set_signature(self) -> str:
+        chunks: list[str] = []
+        for spec in self.phase_specs:
+            stage_ids = ",".join((str(stage.stage_id) for stage in spec.micro_stages))
+            chunks.append(f"{spec.phase_id}[{stage_ids}]")
+        return "||".join(chunks)
 
     def _resolve_manual_phase_id(self, phase_id: str | None=None) -> str | None:
         if phase_id is not None:
@@ -681,6 +696,14 @@ class AdaptiveKernelPhaseProgram:
                     "completed": int(state.completed),
                     "micro_index": int(state.micro_index),
                     "current_stage_id": stage.stage_id,
+                    "current_stage_label": str(stage.label),
+                    "current_stage_impact_rank": int(getattr(stage, "impact_rank", 0) or 0),
+                    "current_stage_impact_label": str(getattr(stage, "impact_label", "") or ""),
+                    "current_stage_env_type_group": str(getattr(stage, "env_type_group", "") or ""),
+                    "current_stage_env_key_count": int(getattr(stage, "env_key_count", 0) or 0),
+                    "current_stage_ownership_action": str(getattr(stage, "ownership_action", "") or ""),
+                    "current_stage_execution_system": str(getattr(stage, "execution_system", "") or ""),
+                    "current_stage_env_prefixes": list(tuple(getattr(stage, "env_prefixes", ()) or ())),
                     "observations": int(state.observations),
                     "score_ema": round(state.score_ema, 4),
                     "promotion_target": round(state.promotion_target, 4),
@@ -702,6 +725,7 @@ class AdaptiveKernelPhaseProgram:
                 }
             )
         return {
+            "phase_set_signature": str(self.phase_set_signature),
             "completed_micro_total": int(self.completed_micro_total),
             "completed_phase_count": int(completed_phase_count),
             "active_target": self.current_active_target(),
@@ -731,6 +755,9 @@ class AdaptiveKernelPhaseProgram:
 
     def restore_snapshot(self, payload: dict[str, object]) -> bool:
         if not isinstance(payload, dict):
+            return False
+        payload_signature = str(payload.get("phase_set_signature", "") or "").strip()
+        if payload_signature != str(self.phase_set_signature):
             return False
         phases = payload.get("phases")
         if not isinstance(phases, list):
@@ -827,6 +854,13 @@ def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
         module_targets: tuple[str, ...],
         objective_signals: tuple[str, ...],
         min_observations: int,
+        impact_rank: int=0,
+        impact_label: str="",
+        env_type_group: str="",
+        env_key_count: int=0,
+        ownership_action: str="",
+        execution_system: str="",
+        env_prefixes: tuple[str, ...]=(),
     ) -> MicroStageSpec:
         return MicroStageSpec(
             stage_id=str(stage_id),
@@ -835,6 +869,13 @@ def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
             module_targets=tuple(module_targets),
             objective_signals=tuple(objective_signals),
             min_observations=max(16, int(min_observations)),
+            impact_rank=max(0, int(impact_rank)),
+            impact_label=str(impact_label),
+            env_type_group=str(env_type_group),
+            env_key_count=max(0, int(env_key_count)),
+            ownership_action=str(ownership_action),
+            execution_system=str(execution_system),
+            env_prefixes=tuple((str(prefix).strip() for prefix in tuple(env_prefixes) if str(prefix).strip())),
         )
 
     common_module_targets = (
@@ -849,134 +890,245 @@ def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
 
     return (
         AdaptivePhaseSpec(
-            phase_id="phase_1_ownership_inventory_freeze",
-            label="Phase 1 - Ownership Inventory Freeze",
-            capability="freeze env ownership inventory and classification boundaries",
-            module_id="ownership_inventory_freeze",
+            phase_id="phase_0_baseline_lock",
+            label="Phase 0 - Baseline Lock",
+            capability="freeze audit baseline artifacts and protect app boundary keeper controls",
+            module_id="baseline_lock",
             micro_stages=(
                 _stage(
-                    "p1.m1_build_canonical_inventory",
-                    "1.1 Build canonical inventory",
-                    mode="train",
+                    "p0.m1_freeze_audit_baseline",
+                    "0.1 Freeze audit baseline",
+                    mode="integrate",
                     module_targets=common_module_targets,
-                    objective_signals=("train_quality", "stability", "introspection_gain"),
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=48,
+                ),
+                _stage(
+                    "p0.m2_protect_boundary_keepers",
+                    "0.2 Protect boundary keepers",
+                    mode="control_integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=64,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_1_immediate_cleanup",
+            label="Phase 1 - Immediate Cleanup",
+            capability="remove dead env definitions and lock read-not-defined migration debt",
+            module_id="immediate_cleanup",
+            micro_stages=(
+                _stage(
+                    "p1.m1_remove_dead_env_definitions",
+                    "1.1 Remove dead env definitions",
+                    mode="integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
                     min_observations=56,
                 ),
                 _stage(
-                    "p1.m2_classify_every_var",
-                    "1.2 Classify every variable",
+                    "p1.m2_lock_read_not_defined_migration_debt",
+                    "1.2 Lock read-not-defined migration debt",
+                    mode="control_integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=72,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_2_impact_ranked_handoff_system",
+            label="Phase 2 - Env Handoff Systems (Impact Ranked)",
+            capability="replace app env ownership with impact-ranked removal and kernel-managed systems",
+            module_id="impact_ranked_handoff_system",
+            micro_stages=(
+                _stage(
+                    "p2.m1_remove_startup_legacy_envs",
+                    "2.1 Remove startup legacy envs (1)",
+                    mode="integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=56,
+                    impact_rank=1,
+                    impact_label="least",
+                    env_type_group="R1_STARTUP_LEGACY",
+                    env_key_count=1,
+                    ownership_action="remove_from_env_files",
+                    execution_system="startup_legacy_toggle_removal_system",
+                    env_prefixes=("AUTO_OPEN_BROWSER",),
+                ),
+                _stage(
+                    "p2.m2_remove_adaptive_growth_legacy_envs",
+                    "2.2 Remove adaptive growth legacy envs (8)",
+                    mode="integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=68,
+                    impact_rank=2,
+                    impact_label="low",
+                    env_type_group="R2_ADAPTIVE_GROWTH_LEGACY",
+                    env_key_count=8,
+                    ownership_action="remove_from_env_files",
+                    execution_system="adaptive_growth_legacy_removal_system",
+                    env_prefixes=("ADAPTIVE_",),
+                ),
+                _stage(
+                    "p2.m3_remove_hormone_decay_legacy_envs",
+                    "2.3 Remove hormone decay legacy envs (7)",
+                    mode="integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "transfer", "safety"),
+                    min_observations=80,
+                    impact_rank=3,
+                    impact_label="medium",
+                    env_type_group="R3_HORMONE_LEGACY",
+                    env_key_count=7,
+                    ownership_action="remove_from_env_files",
+                    execution_system="hormone_decay_legacy_removal_system",
+                    env_prefixes=("HORMONE_",),
+                ),
+                _stage(
+                    "p2.m4_remove_progression_override_legacy_envs",
+                    "2.4 Remove progression override legacy envs (2)",
+                    mode="control_integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=92,
+                    impact_rank=4,
+                    impact_label="high",
+                    env_type_group="R4_PROGRESSION_OVERRIDE_LEGACY",
+                    env_key_count=2,
+                    ownership_action="remove_from_env_files",
+                    execution_system="progression_override_legacy_removal_system",
+                    env_prefixes=("MAZE_", "PHASE2_"),
+                ),
+                _stage(
+                    "p2.m5_kernel_manage_trust_memory_controls",
+                    "2.5 Kernel-manage trust/memory controls (34)",
+                    mode="integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=104,
+                    impact_rank=5,
+                    impact_label="low",
+                    env_type_group="K1_TRUST_MEMORY_CONTROLS",
+                    env_key_count=34,
+                    ownership_action="handoff_to_kernel_code_defaults",
+                    execution_system="trust_memory_kernel_management_system",
+                    env_prefixes=("TERMINAL_TRUST_", "PROJECTION_TRUST_", "HAZARD_PREPAREDNESS_", "STM_", "SEMANTIC_", "ENDOCRINE_"),
+                ),
+                _stage(
+                    "p2.m6_kernel_manage_learning_reasoning_controls",
+                    "2.6 Kernel-manage learning/reasoning controls (53)",
+                    mode="integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "transfer", "stability"),
+                    min_observations=116,
+                    impact_rank=6,
+                    impact_label="medium",
+                    env_type_group="K2_LEARNING_REASONING_CONTROLS",
+                    env_key_count=53,
+                    ownership_action="handoff_to_kernel_code_defaults",
+                    execution_system="learning_reasoning_kernel_management_system",
+                    env_prefixes=("ADAPTIVE_", "LEARNED_AUTONOMY_", "PARALLEL_REASONING_"),
+                ),
+                _stage(
+                    "p2.m7_kernel_manage_perception_endocrine_controls",
+                    "2.7 Kernel-manage perception/endocrine controls (64)",
+                    mode="control_integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=128,
+                    impact_rank=7,
+                    impact_label="high",
+                    env_type_group="K3_PERCEPTION_ENDOCRINE_CONTROLS",
+                    env_key_count=64,
+                    ownership_action="handoff_to_kernel_code_defaults",
+                    execution_system="perception_endocrine_kernel_management_system",
+                    env_prefixes=("MACHINE_VISION_", "HORMONE_", "SLEEP_CYCLE_"),
+                ),
+                _stage(
+                    "p2.m8_kernel_manage_maze_policy_controls",
+                    "2.8 Kernel-manage maze policy controls (99)",
+                    mode="control_integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "transfer", "safety"),
+                    min_observations=140,
+                    impact_rank=8,
+                    impact_label="high",
+                    env_type_group="K4_MAZE_POLICY_CONTROLS",
+                    env_key_count=99,
+                    ownership_action="handoff_to_kernel_code_defaults",
+                    execution_system="maze_policy_kernel_management_system",
+                    env_prefixes=("MAZE_",),
+                ),
+                _stage(
+                    "p2.m9_kernel_manage_core_runtime_policy_controls",
+                    "2.9 Kernel-manage core runtime policy controls (324)",
+                    mode="control_integrate",
+                    module_targets=common_module_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=152,
+                    impact_rank=9,
+                    impact_label="critical",
+                    env_type_group="K5_CORE_RUNTIME_POLICY_CONTROLS",
+                    env_key_count=324,
+                    ownership_action="handoff_to_kernel_code_defaults",
+                    execution_system="core_runtime_policy_kernel_management_system",
+                    env_prefixes=("OTHER",),
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_3_app_boundary_hardening",
+            label="Phase 3 - App Boundary Hardening",
+            capability="reduce app env reads to keeper-only and enforce kernel-owned defaults",
+            module_id="app_boundary_hardening",
+            micro_stages=(
+                _stage(
+                    "p3.m1_reduce_app_env_surface_to_keepers",
+                    "3.1 Reduce app env surface to keepers",
                     mode="integrate",
                     module_targets=common_module_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
                     min_observations=72,
                 ),
                 _stage(
-                    "p1.m3_drift_gate",
-                    "1.3 Enforce ownership drift gate",
-                    mode="control_integrate",
-                    module_targets=common_module_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=88,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_2_runtime_handoff_enforcement",
-            label="Phase 2 - Runtime Handoff Enforcement",
-            capability="enforce kernel/app env ownership in active runtime paths",
-            module_id="runtime_handoff_enforcement",
-            micro_stages=(
-                _stage(
-                    "p2.m1_kernel_consumption_pass",
-                    "2.1 Kernel consumption pass",
-                    mode="train",
-                    module_targets=common_module_targets,
-                    objective_signals=("train_quality", "stability", "transfer"),
-                    min_observations=64,
-                ),
-                _stage(
-                    "p2.m2_security_boundary_pass",
-                    "2.2 Security boundary pass",
+                    "p3.m2_establish_kernel_only_default_registry",
+                    "3.2 Establish kernel-only default registry",
                     mode="integrate",
                     module_targets=common_module_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=80,
-                ),
-                _stage(
-                    "p2.m3_shared_ops_boundary",
-                    "2.3 Shared operations boundary",
-                    mode="integrate",
-                    module_targets=common_module_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=96,
-                ),
-                _stage(
-                    "p2.m4_adaptive_phase_control_surface_integrity",
-                    "2.4 Adaptive phase control-surface integrity",
-                    mode="control_integrate",
-                    module_targets=common_module_targets,
-                    objective_signals=("integration_quality", "safety", "introspection_gain"),
-                    min_observations=112,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_3_single_folder_kernel_runtime_convergence",
-            label="Phase 3 - Single-Folder Kernel Runtime Convergence",
-            capability="converge active runtime to a single canonical kernel folder",
-            module_id="single_folder_kernel_runtime_convergence",
-            micro_stages=(
-                _stage(
-                    "p3.m1_path_hygiene",
-                    "3.1 Path hygiene",
-                    mode="train",
-                    module_targets=common_module_targets,
-                    objective_signals=("train_quality", "stability", "safety"),
-                    min_observations=64,
-                ),
-                _stage(
-                    "p3.m2_archive_boundary",
-                    "3.2 Archive boundary",
-                    mode="integrate",
-                    module_targets=common_module_targets,
-                    objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=84,
-                ),
-                _stage(
-                    "p3.m3_communication_update",
-                    "3.3 Communication update",
-                    mode="control_integrate",
-                    module_targets=common_module_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=100,
+                    min_observations=92,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
             phase_id="phase_4_validation_gates",
             label="Phase 4 - Validation Gates",
-            capability="validate compile health, runtime telemetry, and completion checklist",
+            capability="validate static ownership gates, runtime parity, and drift prevention",
             module_id="validation_gates",
             micro_stages=(
                 _stage(
-                    "p4.m1_static_validation",
-                    "4.1 Static validation",
+                    "p4.m1_static_ownership_gate",
+                    "4.1 Static ownership gate",
                     mode="integrate",
                     module_targets=common_module_targets,
                     objective_signals=("integration_quality", "stability", "safety"),
                     min_observations=72,
                 ),
                 _stage(
-                    "p4.m2_runtime_health_gate",
-                    "4.2 Runtime health gate",
+                    "p4.m2_runtime_parity_gate",
+                    "4.2 Runtime parity gate",
                     mode="control_integrate",
                     module_targets=common_module_targets,
                     objective_signals=("integration_quality", "transfer", "safety"),
                     min_observations=96,
                 ),
                 _stage(
-                    "p4.m3_completion_checklist",
-                    "4.3 Completion checklist",
+                    "p4.m3_drift_prevention_gate",
+                    "4.3 Drift prevention gate",
                     mode="control_integrate",
                     module_targets=common_module_targets,
                     objective_signals=("integration_quality", "transfer", "stability"),

@@ -83,9 +83,8 @@ Required behavior:
 - History and completed micro count remain monotonic.
 
 Control surface:
-- `KERNEL_PHASE_DISABLE_LIST=phase_2_contradiction_accounting,phase_4_metric_decoupler`
-- `KERNEL_PHASE_AUTOSTEP=1`
-- `KERNEL_PHASE_OBSERVATION_FLOOR` (optional global minimum override)
+- Runtime phase toggles are controlled in-app and persisted with window/runtime state.
+- Kernel phase autostep/observation-floor policy is code-owned in kernel integration defaults.
 
 ## Integration Notes
 - The runtime controller is implemented in `adaptive_phase_program.py`.
