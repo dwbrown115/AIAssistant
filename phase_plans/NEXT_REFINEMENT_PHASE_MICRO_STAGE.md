@@ -83,7 +83,7 @@ Required behavior:
 - History and completed micro count remain monotonic.
 
 Control surface:
-- `KERNEL_PHASE_DISABLE_LIST=phase_2_contradiction_accounting,phase_4_metric_decoupling`
+- `KERNEL_PHASE_DISABLE_LIST=phase_2_contradiction_accounting,phase_4_metric_decoupler`
 - `KERNEL_PHASE_AUTOSTEP=1`
 - `KERNEL_PHASE_OBSERVATION_FLOOR` (optional global minimum override)
 

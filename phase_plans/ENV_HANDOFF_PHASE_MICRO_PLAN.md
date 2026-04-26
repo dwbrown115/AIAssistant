@@ -39,6 +39,9 @@ Rules:
 - TRAINING_PHASE_*
 - PARALLEL_REASONING_*
 - KERNEL_PHASE_POLICY_*
+- KERNEL_PHASE_DISABLE_LIST
+- KERNEL_PHASE_AUTOSTEP
+- KERNEL_PHASE_OBSERVATION_FLOOR
 - MACHINE_VISION_*
 - MAZE_MICRO_PROGRESSION_*
 - MAZE_BATCH_MICRO_PROGRESSION_*
@@ -52,6 +55,7 @@ Rules:
 Rules:
 - Policy/tuning vars are consumed in kernel modules under runtime_kernel/.
 - New kernel behavior knobs use kernel-oriented namespaces only.
+- Disable-list values must use canonical phase ids from adaptive_phase_program phase specs.
 
 ### Shared Operational
 - LOCAL_NAVIGATION_KERNEL
@@ -88,9 +92,12 @@ Exit criteria:
 ### Micro 2.1: Kernel Consumption Pass
 - Ensure kernel-owned knobs are read in runtime_kernel/ modules or kernel controller files.
 - Keep app runtime as adapter/delegator where possible.
+- Verify disable-list config ingestion occurs before phase target selection.
+- Verify current active target resolution continues to skip disabled/completed phases.
 
 Exit criteria:
 - Kernel-owned vars are not introduced as new app-only control logic.
+- Disable-list/app adapter ordering is preserved during runtime initialization.
 
 ### Micro 2.2: Security Boundary Pass
 - Keep secret-bearing vars at app boundary only.
@@ -104,6 +111,18 @@ Exit criteria:
 
 Exit criteria:
 - Shared operational vars do not leak into unrelated kernel policy branching.
+
+### Micro 2.4: Adaptive Phase Control Surface Integrity
+- Validate runtime control surface for adaptive phase progression:
+  - KERNEL_PHASE_DISABLE_LIST
+  - KERNEL_PHASE_AUTOSTEP
+  - KERNEL_PHASE_OBSERVATION_FLOOR
+- Enforce canonical phase-id examples in docs/config templates.
+- Correct reference example to use phase_4_metric_decoupler (not phase_4_metric_decoupling).
+
+Exit criteria:
+- All adaptive phase control vars are classified kernel-owned and wired.
+- Control surface examples map to real phase ids in active specs.
 
 ## Phase 3: Single-Folder Kernel Runtime Convergence
 
@@ -140,15 +159,20 @@ Exit criteria:
 
 ### Micro 4.2: Runtime Health Gate
 - Run latest dump preflight normal + strict.
+- Validate governance/introspection payloads include adaptive phase runtime policy, target, and transition telemetry.
+- Track utility stability while phase progression remains data-driven (avoid treating phase completion alone as success).
 
 Exit criteria:
 - Preflight passes after env ownership and path hygiene updates.
+- Runtime snapshots include adaptive phase policy + metric debug + transition visibility.
+- Utility volatility is explicitly recorded for follow-up tuning if present.
 
 ### Micro 4.3: Completion Checklist
 - One canonical active kernel runtime folder confirmed.
 - Env ownership split documented and enforced.
 - Security boundary retained for secret/process vars.
 - No stale kernel_runtime live references in active tooling.
+- Adaptive phase control surface uses canonical phase ids and is reflected in runtime policy snapshots.
 
 Exit criteria:
 - Checklist complete.

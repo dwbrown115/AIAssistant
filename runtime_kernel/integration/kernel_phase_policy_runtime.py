@@ -831,6 +831,175 @@ def kernel_phase_blend_metrics(*, base_metrics: dict[str, float], module_metrics
     return blended
 
 
+def build_kernel_phase_step_context(
+    app: object,
+    *,
+    telemetry_channel: str,
+    intervention_types: list[str],
+    unresolved_objective_override: bool,
+    progress_delta: int,
+    reward_signal: float,
+    penalty_signal: float,
+) -> dict[str, object] | None:
+    if not getattr(app, "kernel_phase_program_enable", False):
+        return None
+    if getattr(app, "kernel_phase_program", None) is None:
+        return None
+    active_target = app.kernel_phase_program.current_active_target()
+    if active_target is None:
+        return None
+    phase_id, stage_id = active_target
+    _, active_micro_spec = kernel_phase_active_specs(app, phase_id=phase_id, stage_id=stage_id)
+    micro_mode = str(getattr(active_micro_spec, "mode", "integrate") or "integrate")
+    module_targets = tuple(getattr(active_micro_spec, "module_targets", ()) or ())
+    objective_signals = tuple(getattr(active_micro_spec, "objective_signals", ()) or ())
+    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", True))
+    observation_floor = getattr(app, "kernel_phase_observation_floor_override", None)
+    if (not isinstance(observation_floor, int)) or observation_floor < 0:
+        observation_floor = None
+    effective_min_observations = int(getattr(active_micro_spec, "min_observations", 0) or 0)
+    if isinstance(observation_floor, int):
+        effective_min_observations = max(effective_min_observations, observation_floor)
+    autonomy_snapshot = app.learned_autonomy_controller.snapshot() if getattr(app, "learned_autonomy_subphase_enable", False) else {}
+    reasoning_snapshot = app._parallel_reasoning_snapshot() if getattr(app, "parallel_reasoning_enable", False) else {}
+    utility_anchor = max(0.0, min(1.0, float(getattr(app, "guard_utility_ema", 0.5) or 0.5)))
+    intervention_ema = max(0.0, min(1.0, float(getattr(app, "guard_intervention_ema", 0.0) or 0.0)))
+    learned_score = max(0.0, min(1.0, float(autonomy_snapshot.get("score_ema", utility_anchor))))
+    learned_only = max(0.0, min(1.0, float(autonomy_snapshot.get("learned_only_ema", learned_score))))
+    channel_signal = {"learned_only": 1.0, "mixed": 0.66, "hardcoded_only": 0.34}.get(str(telemetry_channel or "unknown"), 0.5)
+    progress_norm = max(-1.0, min(1.0, float(progress_delta)))
+    progress_signal = 1.0 if progress_norm > 0.0 else (0.08 if progress_norm == 0.0 else 0.0)
+    reward_norm = max(0.0, min(1.0, float(reward_signal) / 200.0))
+    earned_reward_norm = reward_norm if progress_norm > 0.0 else 0.0
+    unearned_reward_norm = reward_norm if progress_norm <= 0.0 else 0.0
+    penalty_norm = max(0.0, min(1.0, float(penalty_signal) / 260.0))
+    earned_progress_integrity = max(0.0, min(1.0, 1.0 - min(1.0, (0.55 * unearned_reward_norm) + (0.45 if progress_norm <= 0.0 else 0.0))))
+    unresolved_signal = 1.0 if unresolved_objective_override else 0.0
+    intervention_flag = 1.0 if intervention_types else 0.0
+    reasoning_conf = max(0.0, min(1.0, float(reasoning_snapshot.get("last_confidence", 0.0))))
+    reasoning_margin = max(0.0, min(1.0, 0.5 + (0.5 * float(reasoning_snapshot.get("last_confidence_margin", 0.0)))))
+
+    base_metrics = {
+        "train_quality": max(0.0, min(1.0, (0.52 * learned_score) + (0.23 * learned_only) + (0.15 * progress_signal) + (0.10 * earned_progress_integrity))),
+        "integration_quality": max(0.0, min(1.0, (0.60 * utility_anchor) + (0.25 * (1.0 - intervention_ema)) + (0.15 * channel_signal))),
+        "stability": max(0.0, min(1.0, (0.52 * utility_anchor) + (0.28 * (1.0 - penalty_norm)) + (0.12 * (1.0 - unresolved_signal)) + (0.08 * earned_progress_integrity))),
+        "transfer": max(0.0, min(1.0, ((0.72 * progress_signal) + (0.22 * earned_reward_norm) + (0.06 * channel_signal)) * earned_progress_integrity)),
+        "safety": max(0.0, min(1.0, (0.65 * (1.0 - penalty_norm)) + (0.20 * (1.0 - unresolved_signal)) + (0.15 * (1.0 - intervention_flag)))),
+        "introspection_gain": max(0.0, min(1.0, (0.65 * reasoning_conf) + (0.35 * reasoning_margin))),
+    }
+    module_metrics = kernel_phase_module_metrics(
+        app,
+        module_targets=module_targets,
+        telemetry_channel=telemetry_channel,
+        micro_mode=micro_mode,
+        objective_signals=objective_signals,
+        phase_id=str(phase_id),
+        stage_id=str(stage_id),
+    )
+    blended_metrics = kernel_phase_blend_metrics(
+        base_metrics=base_metrics,
+        module_metrics=module_metrics,
+        micro_mode=micro_mode,
+        objective_signals=objective_signals,
+    )
+
+    raw_weights = dict(getattr(app.kernel_phase_program, "adaptive_weights", {}) or {})
+    score_weights = {
+        "train_quality": max(0.0, float(raw_weights.get("train", 0.0) or 0.0)),
+        "integration_quality": max(0.0, float(raw_weights.get("integrate", 0.0) or 0.0)),
+        "stability": max(0.0, float(raw_weights.get("stability", 0.0) or 0.0)),
+        "transfer": max(0.0, float(raw_weights.get("transfer", 0.0) or 0.0)),
+        "safety": max(0.0, float(raw_weights.get("safety", 0.0) or 0.0)),
+        "introspection_gain": max(0.0, float(raw_weights.get("introspection", 0.0) or 0.0)),
+    }
+    estimated_score = 0.0
+    for key, weight in score_weights.items():
+        estimated_score += float(weight) * float(blended_metrics.get(key, base_metrics.get(key, 0.5)))
+    phase_runtime = (getattr(app.kernel_phase_program, "phase_state", {}) or {}).get(str(phase_id))
+    promotion_target = float(getattr(phase_runtime, "promotion_target", 0.0) or 0.0)
+    observations = int(getattr(phase_runtime, "observations", 0) or 0)
+    target_controls = {
+        "target_adapt_enable": int(bool(getattr(app.kernel_phase_program, "target_adapt_enable", False))),
+        "target_adapt_rate": round(float(getattr(app.kernel_phase_program, "target_adapt_rate", 0.0) or 0.0), 4),
+        "target_raise_only_when_score_ready": int(bool(getattr(app.kernel_phase_program, "target_raise_only_when_score_ready", True))),
+        "target_freeze_after_observation_gate": int(bool(getattr(app.kernel_phase_program, "target_freeze_after_observation_gate", True))),
+        "target_deficit_relief_rate": round(float(getattr(app.kernel_phase_program, "target_deficit_relief_rate", 0.0) or 0.0), 4),
+        "target_deficit_margin": round(float(getattr(app.kernel_phase_program, "target_deficit_margin", 0.0) or 0.0), 4),
+        "base_promotion_target": round(float(getattr(app.kernel_phase_program, "base_promotion_target", 0.0) or 0.0), 4),
+        "promotion_target_hard_max": round(float(getattr(app.kernel_phase_program, "promotion_target_hard_max", 0.0) or 0.0), 4),
+    }
+
+    metric_debug_payload = {
+        "phase_id": str(phase_id),
+        "stage_id": str(stage_id),
+        "micro_mode": str(micro_mode),
+        "telemetry_channel": str(telemetry_channel or "unknown"),
+        "module_targets": [str(token or "") for token in tuple(module_targets or ())],
+        "objective_signals": [str(token or "") for token in tuple(objective_signals or ())],
+        "base_metrics": {key: round(float(value), 4) for key, value in base_metrics.items()},
+        "module_metrics": {key: round(float(value), 4) for key, value in module_metrics.items()},
+        "blended_metrics": {key: round(float(value), 4) for key, value in blended_metrics.items()},
+        "adaptive_weights": {key: round(float(value), 4) for key, value in raw_weights.items()},
+        "estimated_score": round(float(estimated_score), 4),
+        "promotion_target": round(float(promotion_target), 4),
+        "observations": int(observations),
+        "progress_signal": round(float(progress_signal), 4),
+        "earned_reward_norm": round(float(earned_reward_norm), 4),
+        "unearned_reward_norm": round(float(unearned_reward_norm), 4),
+        "earned_progress_integrity": round(float(earned_progress_integrity), 4),
+        "autostep_enabled": int(autostep_enabled),
+        "effective_min_observations": int(effective_min_observations),
+        "target_controls": dict(target_controls),
+    }
+    app.kernel_phase_last_metric_debug = dict(metric_debug_payload)
+    if getattr(app, "governance_orchestrator", None) is not None and app.governance_orchestrator.enabled:
+        app.governance_orchestrator.record_runtime_event(
+            kind="adaptive_phase_step_metrics",
+            payload=dict(metric_debug_payload),
+        )
+
+    return {
+        "phase_id": str(phase_id),
+        "stage_id": str(stage_id),
+        "micro_mode": str(micro_mode),
+        "module_targets": tuple(module_targets),
+        "objective_signals": tuple(objective_signals),
+        "autostep_enabled": bool(autostep_enabled),
+        "observation_floor": observation_floor,
+        "effective_min_observations": int(effective_min_observations),
+        "blended_metrics": dict(blended_metrics),
+        "base_metrics": dict(base_metrics),
+        "train_quality": float(blended_metrics.get("train_quality", base_metrics["train_quality"])),
+        "integration_quality": float(blended_metrics.get("integration_quality", base_metrics["integration_quality"])),
+        "stability": float(blended_metrics.get("stability", base_metrics["stability"])),
+        "transfer": float(blended_metrics.get("transfer", base_metrics["transfer"])),
+        "safety": float(blended_metrics.get("safety", base_metrics["safety"])),
+        "introspection_gain": float(blended_metrics.get("introspection_gain", base_metrics["introspection_gain"])),
+    }
+
+
+def observe_kernel_adaptive_step(
+    app: object,
+    *,
+    telemetry_channel: str,
+    intervention_types: list[str],
+    unresolved_objective_override: bool,
+    progress_delta: int,
+    reward_signal: float,
+    penalty_signal: float,
+) -> None:
+    if bool(getattr(app, "learned_autonomy_subphase_enable", False)):
+        transition_event = app.learned_autonomy_controller.observe_step(
+            telemetry_channel=str(telemetry_channel or "unknown"),
+            intervention_applied=bool(intervention_types),
+            utility_anchor=float(getattr(app, "guard_utility_ema", 0.0) or 0.0),
+            unresolved_objective_override=bool(unresolved_objective_override),
+        )
+        app._refresh_learned_autonomy_subphase_state()
+        if transition_event is not None and getattr(app, "governance_orchestrator", None) is not None:
+            app.governance_orchestrator.record_autonomy_transition(transition_event)
+
+
 def observe_kernel_phase_program_step(
     app: object,
     *,
@@ -841,6 +1010,90 @@ def observe_kernel_phase_program_step(
     reward_signal: float,
     penalty_signal: float,
 ) -> None:
+    context = build_kernel_phase_step_context(
+        app,
+        telemetry_channel=telemetry_channel,
+        intervention_types=intervention_types,
+        unresolved_objective_override=unresolved_objective_override,
+        progress_delta=progress_delta,
+        reward_signal=reward_signal,
+        penalty_signal=penalty_signal,
+    )
+    if not isinstance(context, dict):
+        return
+
+    phase_id = str(context.get("phase_id", "") or "")
+    stage_id = str(context.get("stage_id", "") or "")
+    micro_mode = str(context.get("micro_mode", "") or "")
+    module_targets = tuple(context.get("module_targets", ()) or ())
+    objective_signals = tuple(context.get("objective_signals", ()) or ())
+    autostep_enabled = bool(context.get("autostep_enabled", True))
+    observation_floor = context.get("observation_floor")
+    effective_min_observations = int(context.get("effective_min_observations", 0) or 0)
+    blended_metrics = dict(context.get("blended_metrics", {}) or {})
+
+    transition = app.kernel_phase_program.observe_micro_metrics(
+        phase_id,
+        train_quality=float(context.get("train_quality", 0.0) or 0.0),
+        integration_quality=float(context.get("integration_quality", 0.0) or 0.0),
+        stability=float(context.get("stability", 0.0) or 0.0),
+        transfer=float(context.get("transfer", 0.0) or 0.0),
+        safety=float(context.get("safety", 0.0) or 0.0),
+        introspection_gain=float(context.get("introspection_gain", 0.0) or 0.0),
+        autostep_enabled=autostep_enabled,
+        observation_floor=observation_floor,
+    )
+    current_target = app.kernel_phase_program.current_active_target()
+    target_label = f"{current_target[0]}::{current_target[1]}" if current_target else "complete"
+    apply_kernel_phase_runtime_integration(app)
+
+    governance = getattr(app, "governance_orchestrator", None)
+    if (governance is not None) and governance.enabled and target_label != getattr(app, "kernel_phase_last_target", None):
+        governance.record_runtime_event(
+            kind="adaptive_phase_target",
+            payload={
+                "target": target_label,
+                "phase_id": phase_id,
+                "stage_id": stage_id,
+                "stage_mode": micro_mode,
+                "module_targets": list(module_targets),
+                "objective_signals": list(objective_signals),
+                "disabled_phases": list(getattr(app, "kernel_phase_disable_list", ())),
+                "completed_micro_total": int(app.kernel_phase_program.snapshot().get("completed_micro_total", 0)),
+                "autostep_enabled": int(autostep_enabled),
+                "observation_floor_override": (int(observation_floor) if isinstance(observation_floor, int) else None),
+                "effective_min_observations": int(effective_min_observations),
+            },
+        )
+        app.kernel_phase_last_target = target_label
+        app._schedule_kernel_phase_controls_refresh()
+        app._schedule_micro_progress_header_update(announce_transition=False)
+
+    if (governance is not None) and governance.enabled and (transition is not None):
+        governance.record_runtime_event(
+            kind="adaptive_phase_transition",
+            payload={
+                "phase_id": transition.phase_id,
+                "from_micro": int(transition.from_micro),
+                "to_micro": int(transition.to_micro),
+                "completed_phase": int(transition.completed_phase),
+                "reason": transition.reason,
+                "stage_mode": micro_mode,
+                "module_targets": list(module_targets),
+                "objective_signals": list(objective_signals),
+                "blended_metrics": {key: round(float(value), 4) for key, value in blended_metrics.items()},
+                "autostep_enabled": int(autostep_enabled),
+                "observation_floor_override": (int(observation_floor) if isinstance(observation_floor, int) else None),
+                "effective_min_observations": int(effective_min_observations),
+            },
+        )
+        app._schedule_kernel_phase_controls_refresh()
+        app._schedule_micro_progress_header_update(announce_transition=True)
+        app._save_window_geometry()
+
+    app._schedule_kernel_phase_controls_refresh()
+    return
+
     if not getattr(app, "kernel_phase_program_enable", False):
         return
     if getattr(app, "kernel_phase_program", None) is None:
