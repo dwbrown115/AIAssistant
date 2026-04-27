@@ -388,8 +388,8 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='Kernel phase progression v2: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (v2)')
+        self.kernel_phase_program_status_var = tk.StringVar(value='Self-regulation phase program: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (SR V1)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
@@ -1084,7 +1084,7 @@ class AIAssistantApp:
         self.last_uncertainty_score_margin = max(0, int(os.getenv('LAST_UNCERTAINTY_SCORE_MARGIN', '64')))
         self.terminal_corridor_hard_veto_penalty = int(os.getenv('TERMINAL_CORRIDOR_HARD_VETO_PENALTY', '220'))
         self.high_risk_frontier_override_bonus = int(os.getenv('HIGH_RISK_FRONTIER_OVERRIDE_BONUS', '26'))
-        self.maze_step_limit_reset_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STEP_LIMIT_RESET_ENABLE']) == '1'
+        self.maze_step_limit_reset_enable = os.getenv('MAZE_STEP_LIMIT_RESET_ENABLE', str(_WAVE8_MAZE_POLICY_DEFAULTS['MAZE_STEP_LIMIT_RESET_ENABLE'])) == '1'
         self.branch_tightening_abort_threshold = max(2, int(os.getenv('BRANCH_TIGHTENING_ABORT_THRESHOLD', '6')))
         self.branch_tightening_abort_penalty = max(0, int(os.getenv('BRANCH_TIGHTENING_ABORT_PENALTY', '240')))
         self.branch_tightening_escape_bonus = max(0, int(os.getenv('BRANCH_TIGHTENING_ESCAPE_BONUS', '36')))
@@ -1653,7 +1653,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='Phase Progression (V2)', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='Self-Regulation Phase Program (SR V1)', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -1682,28 +1682,51 @@ class AIAssistantApp:
         self.kernel_phase_observation_floor_entry.pack(side=tk.LEFT, padx=(4, 4))
         self.kernel_phase_observation_floor_apply_button = tk.Button(runtime_row, text='Apply', command=self._on_kernel_phase_observation_floor_apply)
         self.kernel_phase_observation_floor_apply_button.pack(side=tk.LEFT)
-        toggle_grid = tk.Frame(panel)
-        toggle_grid.pack(fill=tk.X)
+        toggle_container = tk.Frame(panel)
+        toggle_container.pack(fill=tk.BOTH, expand=True)
+        toggle_canvas = tk.Canvas(toggle_container, height=176, highlightthickness=0, borderwidth=0)
+        toggle_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        toggle_scrollbar = tk.Scrollbar(toggle_container, orient=tk.VERTICAL, command=toggle_canvas.yview)
+        toggle_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        toggle_canvas.configure(yscrollcommand=toggle_scrollbar.set)
+        toggle_grid = tk.Frame(toggle_canvas)
+        toggle_window_id = toggle_canvas.create_window((0, 0), window=toggle_grid, anchor='nw')
+
         self.kernel_phase_toggle_vars = {}
         self.kernel_phase_toggle_buttons = {}
+
+        def _sync_toggle_canvas_layout(_event: tk.Event | None = None) -> None:
+            try:
+                width = max(220, int(toggle_canvas.winfo_width()) - 10)
+                toggle_canvas.itemconfigure(toggle_window_id, width=width)
+                toggle_canvas.configure(scrollregion=toggle_canvas.bbox('all'))
+                wraplength = max(180, width - 26)
+                for button in self.kernel_phase_toggle_buttons.values():
+                    button.config(wraplength=wraplength, justify=tk.LEFT)
+            except Exception:
+                pass
+
+        toggle_grid.bind('<Configure>', _sync_toggle_canvas_layout)
+        toggle_canvas.bind('<Configure>', _sync_toggle_canvas_layout)
+
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='Kernel phase progression v2 disabled').pack(anchor='w')
-            self.kernel_phase_program_status_var.set('Kernel phase progression v2: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (v2)')
+            tk.Label(toggle_grid, text='Self-regulation phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
+            self.kernel_phase_program_status_var.set('Self-regulation phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (SR V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
+        toggle_grid.grid_columnconfigure(0, weight=1)
         for idx, spec in enumerate(self.kernel_phase_specs):
             phase_id = str(spec.phase_id)
             is_enabled = phase_id not in set(self.kernel_phase_disable_list)
             var = tk.BooleanVar(value=is_enabled)
             self.kernel_phase_toggle_vars[phase_id] = var
-            button = tk.Checkbutton(toggle_grid, text=str(spec.label), variable=var, anchor='w', command=lambda pid=phase_id: self._on_kernel_phase_toggle(pid))
-            row = idx // 3
-            col = idx % 3
-            button.grid(row=row, column=col, sticky='w', padx=(0, 12), pady=(0, 2))
+            button = tk.Checkbutton(toggle_grid, text=str(spec.label), variable=var, anchor='w', justify=tk.LEFT, command=lambda pid=phase_id: self._on_kernel_phase_toggle(pid))
+            button.grid(row=idx, column=0, sticky='ew', padx=(0, 8), pady=(0, 3))
             self.kernel_phase_toggle_buttons[phase_id] = button
+        _sync_toggle_canvas_layout()
         self._refresh_kernel_phase_toggle_controls()
 
     def _apply_kernel_phase_disable_list(self, phase_ids: tuple[str, ...], *, persist: bool=False, refresh_controls: bool=True) -> None:
@@ -1722,13 +1745,13 @@ class AIAssistantApp:
 
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('Kernel phase progression v2: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (v2)')
+            self.kernel_phase_program_status_var.set('Self-regulation phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (SR V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (v2)')
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (SR V1)')
         self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', True)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
@@ -1739,7 +1762,7 @@ class AIAssistantApp:
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('Kernel phase progression v2: no phases loaded')
+            self.kernel_phase_program_status_var.set('Self-regulation phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1812,8 +1835,14 @@ class AIAssistantApp:
         runtime_autostep_text = 'on' if runtime_autostep_enabled else 'off'
         runtime_floor_override = getattr(self, 'kernel_phase_observation_floor_override', None)
         runtime_floor_text = str(int(runtime_floor_override)) if isinstance(runtime_floor_override, int) and runtime_floor_override >= 0 else 'none'
-        runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text}'
-        self.kernel_phase_program_status_var.set(f'Kernel phase progression v2: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        immune_state = dict(getattr(self, 'kernel_phase_sr_immune_state', {}) or {})
+        clamp_active = bool(immune_state.get('clamp_active', False))
+        clamp_cooldown_remaining = int(immune_state.get('cooldown_remaining', 0) or 0)
+        challenge_state = dict(getattr(self, 'kernel_phase_sr_override_challenge_state', {}) or {})
+        challenge_active = bool(challenge_state.get('active', False))
+        challenge_remaining = int(challenge_state.get('remaining_steps', 0) or 0)
+        runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text},clamp={(1 if clamp_active else 0)}/{clamp_cooldown_remaining},challenge={(1 if challenge_active else 0)}/{challenge_remaining}'
+        self.kernel_phase_program_status_var.set(f'Self-regulation phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -1824,13 +1853,6 @@ class AIAssistantApp:
             min_observations = '--'
             min_observations_value = 0
             observation_position = '--/--'
-            env_impact_rank = 0
-            env_impact_label = '--'
-            env_type_group = '--'
-            env_key_count = 0
-            env_ownership_action = '--'
-            env_execution_system = '--'
-            env_prefixes_text = '--'
             active_state = phase_map.get(active_phase_id, {})
             active_observations = int(active_state.get('observations', 0) or 0)
             effective_min_observations = int(active_state.get('effective_min_observations', 0) or 0)
@@ -1844,14 +1866,6 @@ class AIAssistantApp:
                     objective_signals = ', '.join(objective_values) if objective_values else '--'
                     module_targets = ', '.join(module_values) if module_values else '--'
                     baseline_min_obs = int(getattr(micro_spec, 'min_observations', 0) or 0)
-                    env_impact_rank = int(getattr(micro_spec, 'impact_rank', 0) or 0)
-                    env_impact_label = str(getattr(micro_spec, 'impact_label', '--') or '--')
-                    env_type_group = str(getattr(micro_spec, 'env_type_group', '--') or '--')
-                    env_key_count = int(getattr(micro_spec, 'env_key_count', 0) or 0)
-                    env_ownership_action = str(getattr(micro_spec, 'ownership_action', '--') or '--')
-                    env_execution_system = str(getattr(micro_spec, 'execution_system', '--') or '--')
-                    env_prefix_values = tuple((str(prefix).strip() for prefix in tuple(getattr(micro_spec, 'env_prefixes', ()) or ()) if str(prefix).strip()))
-                    env_prefixes_text = ', '.join(env_prefix_values) if env_prefix_values else '--'
                     if effective_min_observations <= 0:
                         effective_min_observations = baseline_min_obs
                     min_observations_value = int(max(baseline_min_obs, effective_min_observations))
@@ -1874,10 +1888,7 @@ class AIAssistantApp:
             obs_gap = max(0, int(max(0, int(min_observations_value)) - int(active_observations)))
             self.kernel_phase_program_current_var.set(f'Current: {active_spec.label} | {micro_label} ({micro_position})')
             self.kernel_phase_program_details_var.set(f'Stage mode: {micro_mode} | objective signals: {objective_signals} | observations: {observation_position} (gap={obs_gap}) | {runtime_controls_text} | score: {round(score_ema, 4)}/{round(promotion_target, 4)} (gap={round(score_gap, 4)}) | gate: ready={promotion_gate_ready},met={promotion_gate_met} | blocked={blocked_reason} | profile: {reasoning_profile} | budget: b={budget_branches},d={budget_depth},ms={budget_time},tok={budget_tokens} | dev stage: {development_stage}')
-            if active_phase_id == 'phase_2_impact_ranked_handoff_system':
-                self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets} | env system: {env_type_group}/{env_ownership_action} | impact={env_impact_label}({env_impact_rank}) | keys={env_key_count} | prefixes={env_prefixes_text} | executor={env_execution_system}')
-            else:
-                self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets}')
+            self.kernel_phase_program_modules_var.set(f'Module targets: {module_targets} | phase capability: {active_spec.capability}')
         else:
             self.kernel_phase_program_current_var.set('Current: complete')
             self.kernel_phase_program_details_var.set(f'Stage: complete | {runtime_controls_text}')
@@ -2358,6 +2369,12 @@ class AIAssistantApp:
         autostep_enabled = bool(context.get('autostep_enabled', True))
         observation_floor = context.get('observation_floor')
         effective_min_observations = int(context.get('effective_min_observations', 0) or 0)
+        observability_only_active = int(context.get('observability_only_active', 0) or 0)
+        immune_clamp_active = int(context.get('immune_clamp_active', 0) or 0)
+        immune_cooldown_remaining = int(context.get('immune_cooldown_remaining', 0) or 0)
+        override_challenge_active = int(context.get('override_challenge_active', 0) or 0)
+        override_challenge_remaining_steps = int(context.get('override_challenge_remaining_steps', 0) or 0)
+        hard_veto_bypass_allowed = int(context.get('hard_veto_bypass_allowed', 0) or 0)
         blended_metrics = dict(context.get('blended_metrics', {}) or {})
 
         transition = self.kernel_phase_program.observe_micro_metrics(
@@ -2390,6 +2407,12 @@ class AIAssistantApp:
                     'autostep_enabled': int(autostep_enabled),
                     'observation_floor_override': (int(observation_floor) if isinstance(observation_floor, int) else None),
                     'effective_min_observations': int(effective_min_observations),
+                    'observability_only_active': int(observability_only_active),
+                    'immune_clamp_active': int(immune_clamp_active),
+                    'immune_cooldown_remaining': int(immune_cooldown_remaining),
+                    'override_challenge_active': int(override_challenge_active),
+                    'override_challenge_remaining_steps': int(override_challenge_remaining_steps),
+                    'hard_veto_bypass_allowed': int(hard_veto_bypass_allowed),
                 },
             )
             self.kernel_phase_last_target = target_label
@@ -2412,6 +2435,12 @@ class AIAssistantApp:
                     'autostep_enabled': int(autostep_enabled),
                     'observation_floor_override': (int(observation_floor) if isinstance(observation_floor, int) else None),
                     'effective_min_observations': int(effective_min_observations),
+                    'observability_only_active': int(observability_only_active),
+                    'immune_clamp_active': int(immune_clamp_active),
+                    'immune_cooldown_remaining': int(immune_cooldown_remaining),
+                    'override_challenge_active': int(override_challenge_active),
+                    'override_challenge_remaining_steps': int(override_challenge_remaining_steps),
+                    'hard_veto_bypass_allowed': int(hard_veto_bypass_allowed),
                 },
             )
             self._schedule_kernel_phase_controls_refresh()

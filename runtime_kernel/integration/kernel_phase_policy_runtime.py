@@ -69,6 +69,181 @@ DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP = {
     },
 }
 DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR = "BALANCED"
+DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS = (
+    "phase_sr0_baseline_instrumentation_contract",
+    "phase_sr1_homeostatic_core",
+    "phase_sr2_allostatic_forecasting",
+)
+DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER = 0.72
+DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS = 28
+DEFAULT_KERNEL_PHASE_SR_IMMUNE_RELEASE_PRESSURE_MAX = 0.45
+DEFAULT_KERNEL_PHASE_SR_CHALLENGE_HORIZON_STEPS = 64
+DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_CONFIDENCE = 0.74
+DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_SAFETY = 0.72
+DEFAULT_KERNEL_PHASE_SR_DERIVATIVE_EMA_ALPHA = 0.40
+
+
+def _clip(value: object, lower: float = 0.0, upper: float = 1.0) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        numeric = lower
+    if numeric < lower:
+        return lower
+    if numeric > upper:
+        return upper
+    return numeric
+
+
+def _sr_phase_index(phase_id: object) -> int:
+    token = str(phase_id or "").strip().lower()
+    marker = "phase_sr"
+    idx = token.find(marker)
+    if idx < 0:
+        return -1
+    suffix = token[idx + len(marker):]
+    digits: list[str] = []
+    for char in suffix:
+        if char.isdigit():
+            digits.append(char)
+        else:
+            break
+    if not digits:
+        return -1
+    try:
+        return int("".join(digits))
+    except Exception:
+        return -1
+
+
+def _sr_is_observability_only_phase(phase_id: object, observability_phase_ids: tuple[str, ...]) -> bool:
+    token = str(phase_id or "").strip()
+    if not token:
+        return False
+    return token in set(tuple(observability_phase_ids or ()))
+
+
+def _sr_update_runtime_planes(
+    app: object,
+    *,
+    phase_id: str,
+    stage_id: str,
+    utility_anchor: float,
+    intervention_ema: float,
+    unresolved_signal: float,
+    intervention_flag: float,
+    penalty_norm: float,
+    reasoning_conf: float,
+    confidence_ema: float,
+    progress_signal: float,
+    reward_norm: float,
+    telemetry_channel: str,
+) -> dict[str, object]:
+    registry = dict(getattr(app, "kernel_phase_sr_state_registry", {}) or {})
+    homeostasis = dict(registry.get("homeostasis", {}) or {})
+    allostasis = dict(registry.get("allostasis", {}) or {})
+    plasticity = dict(registry.get("plasticity", {}) or {})
+    executive = dict(registry.get("executive", {}) or {})
+
+    tracker = dict(getattr(app, "kernel_phase_sr_derivative_tracker", {}) or {})
+    alpha = _clip(
+        getattr(app, "kernel_phase_sr_derivative_ema_alpha", DEFAULT_KERNEL_PHASE_SR_DERIVATIVE_EMA_ALPHA),
+        0.05,
+        0.95,
+    )
+    prior_utility = _clip(tracker.get("utility_prev", utility_anchor))
+    prior_conf = _clip(tracker.get("confidence_prev", confidence_ema))
+    adaptive_error = 1.0
+    try:
+        if getattr(app, "adaptive_controller", None) is not None:
+            adaptive_error = _clip(getattr(app.adaptive_controller, "error_ema", 1.0), 0.0, 1.0)
+    except Exception:
+        adaptive_error = 1.0
+    prior_error = _clip(tracker.get("error_prev", adaptive_error))
+
+    d_utility = _clip(utility_anchor - prior_utility, -1.0, 1.0)
+    d_confidence = _clip(confidence_ema - prior_conf, -1.0, 1.0)
+    d_error = _clip(adaptive_error - prior_error, -1.0, 1.0)
+    utility_trend = ((1.0 - alpha) * float(tracker.get("utility_trend", 0.0) or 0.0)) + (alpha * d_utility)
+    confidence_trend = ((1.0 - alpha) * float(tracker.get("confidence_trend", 0.0) or 0.0)) + (alpha * d_confidence)
+    error_trend = ((1.0 - alpha) * float(tracker.get("error_trend", 0.0) or 0.0)) + (alpha * d_error)
+
+    pressure = _clip(max(intervention_ema, unresolved_signal, penalty_norm, 1.0 - utility_anchor))
+    homeostasis_stability = _clip((0.48 * utility_anchor) + (0.32 * (1.0 - penalty_norm)) + (0.20 * (1.0 - intervention_ema)))
+    homeostasis_safety = _clip((0.55 * (1.0 - penalty_norm)) + (0.25 * (1.0 - unresolved_signal)) + (0.20 * (1.0 - intervention_flag)))
+    homeostasis_confidence_quality = _clip((0.55 * confidence_ema) + (0.25 * reasoning_conf) + (0.20 * (1.0 - adaptive_error)))
+
+    allostatic_risk = _clip(
+        (0.40 * _clip(-utility_trend, 0.0, 1.0))
+        + (0.20 * _clip(-confidence_trend, 0.0, 1.0))
+        + (0.24 * _clip(error_trend, 0.0, 1.0))
+        + (0.16 * pressure)
+    )
+    plasticity_gain = _clip((0.46 * homeostasis_stability) + (0.34 * homeostasis_safety) + (0.20 * (1.0 - pressure)))
+
+    explore_scale = _clip((0.25 + (0.75 * (1.0 - pressure))) * (0.65 + (0.35 * max(progress_signal, reward_norm))))
+    effort_scale = _clip(0.35 + (0.65 * (1.0 - allostatic_risk)))
+    safety_strictness = _clip(0.45 + (0.55 * max(pressure, allostatic_risk)))
+
+    homeostasis.update(
+        {
+            "stability": round(float(homeostasis_stability), 4),
+            "safety": round(float(homeostasis_safety), 4),
+            "pressure": round(float(pressure), 4),
+            "confidence_quality": round(float(homeostasis_confidence_quality), 4),
+            "telemetry_channel": str(telemetry_channel or "unknown"),
+        }
+    )
+    allostasis.update(
+        {
+            "risk_forecast": round(float(allostatic_risk), 4),
+            "utility_trend": round(float(utility_trend), 4),
+            "confidence_trend": round(float(confidence_trend), 4),
+            "error_trend": round(float(error_trend), 4),
+        }
+    )
+    plasticity.update(
+        {
+            "gain": round(float(plasticity_gain), 4),
+            "adaptive_error": round(float(adaptive_error), 4),
+        }
+    )
+    executive.update(
+        {
+            "explore_scale": round(float(explore_scale), 4),
+            "effort_scale": round(float(effort_scale), 4),
+            "safety_strictness": round(float(safety_strictness), 4),
+            "phase_id": str(phase_id),
+            "stage_id": str(stage_id),
+        }
+    )
+
+    tracker.update(
+        {
+            "utility_prev": float(utility_anchor),
+            "confidence_prev": float(confidence_ema),
+            "error_prev": float(adaptive_error),
+            "utility_trend": float(utility_trend),
+            "confidence_trend": float(confidence_trend),
+            "error_trend": float(error_trend),
+        }
+    )
+    app.kernel_phase_sr_derivative_tracker = dict(tracker)
+    app.kernel_phase_sr_state_registry = {
+        "homeostasis": dict(homeostasis),
+        "allostasis": dict(allostasis),
+        "plasticity": dict(plasticity),
+        "executive": dict(executive),
+    }
+    return {
+        "homeostasis": dict(homeostasis),
+        "allostasis": dict(allostasis),
+        "plasticity": dict(plasticity),
+        "executive": dict(executive),
+        "pressure": float(pressure),
+        "allostatic_risk": float(allostatic_risk),
+        "plasticity_gain": float(plasticity_gain),
+    }
 
 
 def _parse_reasoning_profile(value: object, *, fallback: ReasoningProfile) -> ReasoningProfile:
@@ -150,6 +325,44 @@ def init_kernel_phase_policy_runtime(app: object) -> None:
     app.kernel_phase_safety_profile_floor = DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR
     app.kernel_phase_runtime_module_signature = None
     app.kernel_phase_last_metric_debug = {}
+    app.kernel_phase_sr_observability_only_phase_ids = tuple(DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS)
+    app.kernel_phase_sr_observability_only_active = False
+    app.kernel_phase_sr_derivative_ema_alpha = float(DEFAULT_KERNEL_PHASE_SR_DERIVATIVE_EMA_ALPHA)
+    app.kernel_phase_sr_derivative_tracker = {
+        "utility_prev": 0.0,
+        "confidence_prev": 0.0,
+        "error_prev": 1.0,
+        "utility_trend": 0.0,
+        "confidence_trend": 0.0,
+        "error_trend": 0.0,
+    }
+    app.kernel_phase_sr_state_registry = {
+        "homeostasis": {},
+        "allostasis": {},
+        "plasticity": {},
+        "executive": {},
+    }
+    app.kernel_phase_sr_immune_clamp_trigger = float(DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER)
+    app.kernel_phase_sr_immune_cooldown_steps = int(DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS)
+    app.kernel_phase_sr_immune_release_pressure_max = float(DEFAULT_KERNEL_PHASE_SR_IMMUNE_RELEASE_PRESSURE_MAX)
+    app.kernel_phase_sr_immune_state = {
+        "clamp_active": False,
+        "cooldown_remaining": 0,
+        "last_reason": "",
+        "event_count": 0,
+    }
+    app.kernel_phase_sr_challenge_horizon_steps = int(DEFAULT_KERNEL_PHASE_SR_CHALLENGE_HORIZON_STEPS)
+    app.kernel_phase_sr_challenge_min_confidence = float(DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_CONFIDENCE)
+    app.kernel_phase_sr_challenge_min_safety = float(DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_SAFETY)
+    app.kernel_phase_sr_override_challenge_state = {
+        "active": False,
+        "remaining_steps": 0,
+        "start_step": -1,
+        "revert_count": 0,
+        "success_count": 0,
+        "last_reason": "",
+        "hard_veto_bypass_allowed": False,
+    }
 
 
 def kernel_phase_active_specs(app: object, *, phase_id: str, stage_id: str) -> tuple[object | None, object | None]:
@@ -250,13 +463,27 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
         desired_stage = DevelopmentStage.JUVENILE_KERNEL
     desired_budget = base_budget
 
-    active_targets = kernel_phase_active_module_targets(app)
+    active_targets_raw = kernel_phase_active_module_targets(app)
+    active_targets = active_targets_raw
     active_target = app.kernel_phase_program.current_active_target() if ((app.kernel_phase_program_enable) and (app.kernel_phase_program is not None)) else None
     target_label = f"{active_target[0]}::{active_target[1]}" if active_target else ("complete" if app.kernel_phase_program_enable else "disabled")
     active_micro_mode = ""
     objective_signals: tuple[str, ...] = ()
     mode_policy_payload: dict[str, object] = {}
     safety_signal_active = False
+    observability_phase_ids = tuple(
+        getattr(
+            app,
+            "kernel_phase_sr_observability_only_phase_ids",
+            DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS,
+        )
+        or ()
+    )
+    observability_only_active = bool(
+        (active_target is not None)
+        and _sr_is_observability_only_phase(str(active_target[0]), observability_phase_ids)
+    )
+    app.kernel_phase_sr_observability_only_active = bool(observability_only_active)
     if active_target is not None:
         _, active_micro_spec = kernel_phase_active_specs(app, phase_id=str(active_target[0]), stage_id=str(active_target[1]))
         if active_micro_spec is not None:
@@ -270,36 +497,87 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
                 if signal
             )
             safety_signal_active = bool("safety" in set(objective_signals))
-            mode_map = dict(getattr(app, "kernel_phase_mode_policy_map", {}) or {})
-            mode_policy_payload = dict(mode_map.get(active_micro_mode, {}) or {})
-            if mode_policy_payload:
-                desired_profile = _parse_reasoning_profile(mode_policy_payload.get("reasoning_profile"), fallback=desired_profile)
-                if safety_signal_active and mode_policy_payload.get("reasoning_profile_if_safety"):
-                    desired_profile = _parse_reasoning_profile(mode_policy_payload.get("reasoning_profile_if_safety"), fallback=desired_profile)
-                desired_budget = _scaled_budget(
-                    base_budget,
-                    branches_scale=mode_policy_payload.get("branches_scale", 1.0),
-                    depth_delta=mode_policy_payload.get("depth_delta", 0),
-                    time_budget_scale=mode_policy_payload.get("time_budget_scale", 1.0),
-                    token_budget_scale=mode_policy_payload.get("token_budget_scale", 1.0),
-                )
-                desired_stage = _parse_development_stage(mode_policy_payload.get("development_stage"), fallback=desired_stage)
+            if not observability_only_active:
+                mode_map = dict(getattr(app, "kernel_phase_mode_policy_map", {}) or {})
+                mode_policy_payload = dict(mode_map.get(active_micro_mode, {}) or {})
+                if mode_policy_payload:
+                    desired_profile = _parse_reasoning_profile(mode_policy_payload.get("reasoning_profile"), fallback=desired_profile)
+                    if safety_signal_active and mode_policy_payload.get("reasoning_profile_if_safety"):
+                        desired_profile = _parse_reasoning_profile(mode_policy_payload.get("reasoning_profile_if_safety"), fallback=desired_profile)
+                    desired_budget = _scaled_budget(
+                        base_budget,
+                        branches_scale=mode_policy_payload.get("branches_scale", 1.0),
+                        depth_delta=mode_policy_payload.get("depth_delta", 0),
+                        time_budget_scale=mode_policy_payload.get("time_budget_scale", 1.0),
+                        token_budget_scale=mode_policy_payload.get("token_budget_scale", 1.0),
+                    )
+                    desired_stage = _parse_development_stage(mode_policy_payload.get("development_stage"), fallback=desired_stage)
+
+    immune_state = dict(getattr(app, "kernel_phase_sr_immune_state", {}) or {})
+    clamp_active = bool(immune_state.get("clamp_active", False))
+    challenge_state = dict(getattr(app, "kernel_phase_sr_override_challenge_state", {}) or {})
+    challenge_active = bool(challenge_state.get("active", False))
+    if observability_only_active:
+        active_targets = ()
+        mode_policy_payload = {}
+    if clamp_active:
+        desired_profile = _parse_reasoning_profile(
+            getattr(app, "kernel_phase_safety_profile_floor", "BALANCED"),
+            fallback=ReasoningProfile.BALANCED,
+        )
+        desired_budget = _scaled_budget(
+            base_budget,
+            branches_scale=0.65,
+            depth_delta=-1,
+            time_budget_scale=0.72,
+            token_budget_scale=0.78,
+        )
+    elif challenge_active:
+        desired_budget = _scaled_budget(
+            desired_budget,
+            branches_scale=1.12,
+            depth_delta=0,
+            time_budget_scale=1.10,
+            token_budget_scale=1.08,
+        )
+        desired_stage = DevelopmentStage.MATURE_KERNEL
 
     if safety_signal_active and desired_profile == ReasoningProfile.FAST_APPROX:
         desired_profile = _parse_reasoning_profile(getattr(app, "kernel_phase_safety_profile_floor", "BALANCED"), fallback=ReasoningProfile.BALANCED)
 
-    desired_states = {
-        "learned_autonomy_controller": kernel_phase_runtime_module_enabled(app, "learned_autonomy_controller", base_enabled=bool(base_map.get("learned_autonomy_controller", False)), active_targets=active_targets),
-        "parallel_reasoning_engine": kernel_phase_runtime_module_enabled(app, "parallel_reasoning_engine", base_enabled=bool(base_map.get("parallel_reasoning_engine", False)), active_targets=active_targets),
-        "adaptive_controller": kernel_phase_runtime_module_enabled(app, "adaptive_controller", base_enabled=bool(base_map.get("adaptive_controller", False)), active_targets=active_targets),
-        "organism_control": kernel_phase_runtime_module_enabled(app, "organism_control", base_enabled=bool(base_map.get("organism_control", False)), active_targets=active_targets),
-        "maze_agent": kernel_phase_runtime_module_enabled(app, "maze_agent", base_enabled=bool(base_map.get("maze_agent", False)), active_targets=active_targets),
-        "causal_counterfactual_planner": kernel_phase_runtime_module_enabled(app, "causal_counterfactual_planner", base_enabled=bool(base_map.get("causal_counterfactual_planner", True)), active_targets=active_targets),
-        "governance_orchestrator": kernel_phase_runtime_module_enabled(app, "governance_orchestrator", base_enabled=bool(base_map.get("governance_orchestrator", False)), active_targets=active_targets),
-    }
+    if observability_only_active:
+        desired_states = {
+            "learned_autonomy_controller": bool(base_map.get("learned_autonomy_controller", False)),
+            "parallel_reasoning_engine": bool(base_map.get("parallel_reasoning_engine", False)),
+            "adaptive_controller": bool(base_map.get("adaptive_controller", False)),
+            "organism_control": bool(base_map.get("organism_control", False)),
+            "maze_agent": bool(base_map.get("maze_agent", False)),
+            "causal_counterfactual_planner": bool(base_map.get("causal_counterfactual_planner", True)),
+            "governance_orchestrator": bool(base_map.get("governance_orchestrator", False)),
+        }
+    else:
+        desired_states = {
+            "learned_autonomy_controller": kernel_phase_runtime_module_enabled(app, "learned_autonomy_controller", base_enabled=bool(base_map.get("learned_autonomy_controller", False)), active_targets=active_targets),
+            "parallel_reasoning_engine": kernel_phase_runtime_module_enabled(app, "parallel_reasoning_engine", base_enabled=bool(base_map.get("parallel_reasoning_engine", False)), active_targets=active_targets),
+            "adaptive_controller": kernel_phase_runtime_module_enabled(app, "adaptive_controller", base_enabled=bool(base_map.get("adaptive_controller", False)), active_targets=active_targets),
+            "organism_control": kernel_phase_runtime_module_enabled(app, "organism_control", base_enabled=bool(base_map.get("organism_control", False)), active_targets=active_targets),
+            "maze_agent": kernel_phase_runtime_module_enabled(app, "maze_agent", base_enabled=bool(base_map.get("maze_agent", False)), active_targets=active_targets),
+            "causal_counterfactual_planner": kernel_phase_runtime_module_enabled(app, "causal_counterfactual_planner", base_enabled=bool(base_map.get("causal_counterfactual_planner", True)), active_targets=active_targets),
+            "governance_orchestrator": kernel_phase_runtime_module_enabled(app, "governance_orchestrator", base_enabled=bool(base_map.get("governance_orchestrator", False)), active_targets=active_targets),
+        }
+    if clamp_active:
+        desired_states["learned_autonomy_controller"] = False
+        desired_states["adaptive_controller"] = False
+        desired_states["causal_counterfactual_planner"] = False
+        desired_states["parallel_reasoning_engine"] = bool(base_map.get("parallel_reasoning_engine", False))
+        desired_states["organism_control"] = bool(base_map.get("organism_control", False)) or bool(getattr(app, "kernel_phase_force_safety_core_enable", True))
+        desired_states["maze_agent"] = bool(base_map.get("maze_agent", False)) or bool(getattr(app, "kernel_phase_force_safety_core_enable", True))
 
     signature = (
         str(target_label),
+        int(observability_only_active),
+        int(clamp_active),
+        int(challenge_active),
         int(desired_states["learned_autonomy_controller"]),
         int(desired_states["parallel_reasoning_engine"]),
         int(desired_states["adaptive_controller"]),
@@ -373,7 +651,11 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
                     "micro_mode": str(active_micro_mode or "--"),
                     "objective_signals": list(objective_signals),
                     "module_targets": list(active_targets),
+                    "module_targets_raw": list(active_targets_raw),
                     "module_states": {key: int(value) for key, value in desired_states.items()},
+                    "observability_only_active": int(observability_only_active),
+                    "immune_clamp_active": int(clamp_active),
+                    "override_challenge_active": int(challenge_active),
                     "reasoning_profile": str(desired_profile.value),
                     "reasoning_budget": {
                         "max_branches": int(desired_budget.max_branches),
@@ -894,6 +1176,245 @@ def build_kernel_phase_step_context(
     intervention_flag = 1.0 if intervention_types else 0.0
     reasoning_conf = max(0.0, min(1.0, float(reasoning_snapshot.get("last_confidence", 0.0))))
     reasoning_margin = max(0.0, min(1.0, 0.5 + (0.5 * float(reasoning_snapshot.get("last_confidence_margin", 0.0)))))
+    confidence_ema = max(0.0, min(1.0, float(reasoning_snapshot.get("confidence_ema", reasoning_conf))))
+
+    sr_planes = _sr_update_runtime_planes(
+        app,
+        phase_id=str(phase_id),
+        stage_id=str(stage_id),
+        utility_anchor=float(utility_anchor),
+        intervention_ema=float(intervention_ema),
+        unresolved_signal=float(unresolved_signal),
+        intervention_flag=float(intervention_flag),
+        penalty_norm=float(penalty_norm),
+        reasoning_conf=float(reasoning_conf),
+        confidence_ema=float(confidence_ema),
+        progress_signal=float(progress_signal),
+        reward_norm=float(reward_norm),
+        telemetry_channel=str(telemetry_channel or "unknown"),
+    )
+    homeostasis = dict(sr_planes.get("homeostasis", {}) or {})
+    allostasis = dict(sr_planes.get("allostasis", {}) or {})
+    plasticity_plane = dict(sr_planes.get("plasticity", {}) or {})
+    executive_plane = dict(sr_planes.get("executive", {}) or {})
+    pressure_signal = _clip(sr_planes.get("pressure", max(intervention_ema, unresolved_signal, penalty_norm)))
+    allostatic_risk = _clip(sr_planes.get("allostatic_risk", 0.0))
+    plasticity_gain = _clip(sr_planes.get("plasticity_gain", 0.0))
+
+    observability_only_active = _sr_is_observability_only_phase(
+        str(phase_id),
+        tuple(
+            getattr(
+                app,
+                "kernel_phase_sr_observability_only_phase_ids",
+                DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS,
+            )
+            or ()
+        ),
+    )
+    app.kernel_phase_sr_observability_only_active = bool(observability_only_active)
+
+    sr_phase_index = _sr_phase_index(phase_id)
+    immune_state = dict(getattr(app, "kernel_phase_sr_immune_state", {}) or {})
+    prior_clamp_active = bool(immune_state.get("clamp_active", False))
+    clamp_trigger = _clip(getattr(app, "kernel_phase_sr_immune_clamp_trigger", DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER), 0.35, 0.99)
+    clamp_release_pressure = _clip(
+        getattr(
+            app,
+            "kernel_phase_sr_immune_release_pressure_max",
+            DEFAULT_KERNEL_PHASE_SR_IMMUNE_RELEASE_PRESSURE_MAX,
+        ),
+        0.15,
+        0.95,
+    )
+    clamp_cooldown_default = max(
+        4,
+        int(
+            getattr(
+                app,
+                "kernel_phase_sr_immune_cooldown_steps",
+                DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS,
+            )
+            or DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS
+        ),
+    )
+    clamp_trigger_signal = _clip(
+        max(
+            pressure_signal,
+            allostatic_risk,
+            1.0 - _clip(homeostasis.get("safety", 0.0)),
+        )
+    )
+    clamp_reason = str(immune_state.get("last_reason", "") or "")
+    if sr_phase_index >= 5:
+        if clamp_trigger_signal >= clamp_trigger:
+            immune_state["clamp_active"] = True
+            immune_state["cooldown_remaining"] = max(
+                clamp_cooldown_default,
+                int(immune_state.get("cooldown_remaining", 0) or 0),
+            )
+            clamp_reason = (
+                f"immune_clamp_trigger(signal={round(clamp_trigger_signal, 4)},"
+                f"threshold={round(clamp_trigger, 4)})"
+            )
+            immune_state["last_reason"] = clamp_reason
+            if not prior_clamp_active:
+                immune_state["event_count"] = int(immune_state.get("event_count", 0) or 0) + 1
+        elif prior_clamp_active:
+            cooldown_remaining = max(
+                0, int(immune_state.get("cooldown_remaining", clamp_cooldown_default) or clamp_cooldown_default) - 1
+            )
+            immune_state["cooldown_remaining"] = cooldown_remaining
+            if cooldown_remaining <= 0 and pressure_signal <= clamp_release_pressure:
+                immune_state["clamp_active"] = False
+                clamp_reason = (
+                    f"immune_clamp_released(pressure={round(pressure_signal, 4)},"
+                    f"release_max={round(clamp_release_pressure, 4)})"
+                )
+                immune_state["last_reason"] = clamp_reason
+    else:
+        immune_state["clamp_active"] = False
+        immune_state["cooldown_remaining"] = 0
+    clamp_active = bool(immune_state.get("clamp_active", False))
+    app.kernel_phase_sr_immune_state = dict(immune_state)
+
+    challenge_state = dict(getattr(app, "kernel_phase_sr_override_challenge_state", {}) or {})
+    prior_challenge_active = bool(challenge_state.get("active", False))
+    challenge_horizon = max(
+        8,
+        int(
+            getattr(
+                app,
+                "kernel_phase_sr_challenge_horizon_steps",
+                DEFAULT_KERNEL_PHASE_SR_CHALLENGE_HORIZON_STEPS,
+            )
+            or DEFAULT_KERNEL_PHASE_SR_CHALLENGE_HORIZON_STEPS
+        ),
+    )
+    challenge_min_conf = _clip(
+        getattr(
+            app,
+            "kernel_phase_sr_challenge_min_confidence",
+            DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_CONFIDENCE,
+        ),
+        0.35,
+        0.99,
+    )
+    challenge_min_safety = _clip(
+        getattr(
+            app,
+            "kernel_phase_sr_challenge_min_safety",
+            DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_SAFETY,
+        ),
+        0.35,
+        0.99,
+    )
+    challenge_reason = str(challenge_state.get("last_reason", "") or "")
+    challenge_active = bool(challenge_state.get("active", False))
+    if challenge_active:
+        remaining_steps = max(0, int(challenge_state.get("remaining_steps", challenge_horizon) or challenge_horizon) - 1)
+        challenge_state["remaining_steps"] = remaining_steps
+        revert_reason = ""
+        if clamp_active:
+            revert_reason = "immune_clamp_active"
+        elif reasoning_conf < max(0.0, challenge_min_conf - 0.08):
+            revert_reason = f"confidence_decay({round(reasoning_conf, 4)}<{round(challenge_min_conf - 0.08, 4)})"
+        elif _clip(homeostasis.get("safety", 0.0)) < max(0.0, challenge_min_safety - 0.08):
+            revert_reason = f"safety_degraded({round(_clip(homeostasis.get('safety', 0.0)), 4)}<{round(challenge_min_safety - 0.08, 4)})"
+        elif pressure_signal > 0.76:
+            revert_reason = f"pressure_spike({round(pressure_signal, 4)}>0.76)"
+
+        if revert_reason:
+            challenge_state["active"] = False
+            challenge_state["remaining_steps"] = 0
+            challenge_state["revert_count"] = int(challenge_state.get("revert_count", 0) or 0) + 1
+            challenge_reason = f"challenge_reverted({revert_reason})"
+            challenge_state["last_reason"] = challenge_reason
+        elif remaining_steps <= 0:
+            challenge_state["active"] = False
+            challenge_state["remaining_steps"] = 0
+            challenge_state["success_count"] = int(challenge_state.get("success_count", 0) or 0) + 1
+            challenge_reason = "challenge_horizon_complete"
+            challenge_state["last_reason"] = challenge_reason
+
+    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 6 and str(stage_id) == "sr6.m4_bounded_override_challenge":
+        safety_signal = _clip(homeostasis.get("safety", 0.0))
+        start_allowed = (
+            (not clamp_active)
+            and (reasoning_conf >= challenge_min_conf)
+            and (safety_signal >= challenge_min_safety)
+            and (allostatic_risk <= 0.52)
+        )
+        if start_allowed:
+            challenge_state["active"] = True
+            challenge_state["remaining_steps"] = int(challenge_horizon)
+            challenge_state["start_step"] = int(getattr(app, "memory_step_index", -1) or -1)
+            challenge_reason = "challenge_started"
+            challenge_state["last_reason"] = challenge_reason
+
+    challenge_state["hard_veto_bypass_allowed"] = False
+    challenge_active = bool(challenge_state.get("active", False))
+    app.kernel_phase_sr_override_challenge_state = dict(challenge_state)
+
+    if getattr(app, "governance_orchestrator", None) is not None and app.governance_orchestrator.enabled:
+        if prior_clamp_active != clamp_active:
+            app.governance_orchestrator.record_runtime_event(
+                kind="adaptive_phase_immune_clamp",
+                payload={
+                    "phase_id": str(phase_id),
+                    "stage_id": str(stage_id),
+                    "clamp_active": int(clamp_active),
+                    "reason": str(clamp_reason or immune_state.get("last_reason", "")),
+                    "cooldown_remaining": int(immune_state.get("cooldown_remaining", 0) or 0),
+                    "trigger_signal": round(float(clamp_trigger_signal), 4),
+                },
+            )
+        if prior_challenge_active != challenge_active:
+            app.governance_orchestrator.record_runtime_event(
+                kind="adaptive_phase_override_challenge",
+                payload={
+                    "phase_id": str(phase_id),
+                    "stage_id": str(stage_id),
+                    "challenge_active": int(challenge_active),
+                    "reason": str(challenge_reason or challenge_state.get("last_reason", "")),
+                    "remaining_steps": int(challenge_state.get("remaining_steps", 0) or 0),
+                    "hard_veto_bypass_allowed": 0,
+                },
+            )
+
+    if getattr(app, "kernel_phase_program", None) is not None:
+        if (sr_phase_index >= 4) and (not clamp_active):
+            safety_factor = _clip(homeostasis.get("safety", 0.0))
+            stability_factor = _clip(homeostasis.get("stability", 0.0))
+            enable_plasticity = bool(
+                (safety_factor >= 0.64)
+                and (stability_factor >= 0.60)
+                and (pressure_signal <= 0.55)
+            )
+            app.kernel_phase_program.target_adapt_enable = bool(enable_plasticity)
+            app.kernel_phase_program.target_adapt_rate = _clip(
+                0.02 + (0.12 * plasticity_gain),
+                0.01,
+                0.16,
+            )
+            app.kernel_phase_program.target_deficit_relief_rate = _clip(
+                0.01 + (0.12 * (1.0 - pressure_signal)),
+                0.0,
+                0.20,
+            )
+            app.kernel_phase_program.target_deficit_margin = _clip(
+                0.01 + (0.05 * pressure_signal),
+                0.005,
+                0.08,
+            )
+        else:
+            app.kernel_phase_program.target_adapt_enable = False
+            app.kernel_phase_program.target_deficit_relief_rate = 0.0
+
+    # Observability-only stages should restrict actuator authority, not freeze
+    # phase progression. Keep autostep enabled unless an immune clamp is active.
+    if clamp_active:
+        autostep_enabled = False
 
     base_metrics = {
         "train_quality": max(0.0, min(1.0, (0.52 * learned_score) + (0.23 * learned_only) + (0.15 * progress_signal) + (0.10 * earned_progress_integrity))),
@@ -965,6 +1486,16 @@ def build_kernel_phase_step_context(
         "earned_progress_integrity": round(float(earned_progress_integrity), 4),
         "autostep_enabled": int(autostep_enabled),
         "effective_min_observations": int(effective_min_observations),
+        "observability_only_active": int(observability_only_active),
+        "immune_clamp_active": int(clamp_active),
+        "immune_cooldown_remaining": int(immune_state.get("cooldown_remaining", 0) or 0),
+        "override_challenge_active": int(challenge_active),
+        "override_challenge_remaining_steps": int(challenge_state.get("remaining_steps", 0) or 0),
+        "hard_veto_bypass_allowed": 0,
+        "homeostasis": dict(homeostasis),
+        "allostasis": dict(allostasis),
+        "plasticity": dict(plasticity_plane),
+        "executive": dict(executive_plane),
         "target_controls": dict(target_controls),
     }
     app.kernel_phase_last_metric_debug = dict(metric_debug_payload)
@@ -983,6 +1514,16 @@ def build_kernel_phase_step_context(
         "autostep_enabled": bool(autostep_enabled),
         "observation_floor": observation_floor,
         "effective_min_observations": int(effective_min_observations),
+        "observability_only_active": int(observability_only_active),
+        "immune_clamp_active": int(clamp_active),
+        "immune_cooldown_remaining": int(immune_state.get("cooldown_remaining", 0) or 0),
+        "override_challenge_active": int(challenge_active),
+        "override_challenge_remaining_steps": int(challenge_state.get("remaining_steps", 0) or 0),
+        "hard_veto_bypass_allowed": 0,
+        "homeostasis": dict(homeostasis),
+        "allostasis": dict(allostasis),
+        "plasticity": dict(plasticity_plane),
+        "executive": dict(executive_plane),
         "blended_metrics": dict(blended_metrics),
         "base_metrics": dict(base_metrics),
         "train_quality": float(blended_metrics.get("train_quality", base_metrics["train_quality"])),
@@ -1313,6 +1854,10 @@ def kernel_phase_runtime_policy_snapshot(app: object) -> dict[str, object]:
                 if signal
             )
     autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", True))
+    observability_only_active = bool(getattr(app, "kernel_phase_sr_observability_only_active", False))
+    immune_state = dict(getattr(app, "kernel_phase_sr_immune_state", {}) or {})
+    challenge_state = dict(getattr(app, "kernel_phase_sr_override_challenge_state", {}) or {})
+    sr_registry = dict(getattr(app, "kernel_phase_sr_state_registry", {}) or {})
     observation_floor = getattr(app, "kernel_phase_observation_floor_override", None)
     if (not isinstance(observation_floor, int)) or observation_floor < 0:
         observation_floor = None
@@ -1354,8 +1899,30 @@ def kernel_phase_runtime_policy_snapshot(app: object) -> dict[str, object]:
         "safety_profile_floor": str(getattr(app, "kernel_phase_safety_profile_floor", "BALANCED")),
         "disabled_phases": list(getattr(app, "kernel_phase_disable_list", ())),
         "autostep_enabled": int(autostep_enabled),
+        "observability_only_active": int(observability_only_active),
         "observation_floor_override": (int(observation_floor) if isinstance(observation_floor, int) else None),
         "effective_min_observations": int(effective_min_observations),
+        "immune_clamp": {
+            "active": int(bool(immune_state.get("clamp_active", False))),
+            "cooldown_remaining": int(immune_state.get("cooldown_remaining", 0) or 0),
+            "last_reason": str(immune_state.get("last_reason", "") or ""),
+            "event_count": int(immune_state.get("event_count", 0) or 0),
+        },
+        "override_challenge": {
+            "active": int(bool(challenge_state.get("active", False))),
+            "remaining_steps": int(challenge_state.get("remaining_steps", 0) or 0),
+            "start_step": int(challenge_state.get("start_step", -1) or -1),
+            "success_count": int(challenge_state.get("success_count", 0) or 0),
+            "revert_count": int(challenge_state.get("revert_count", 0) or 0),
+            "last_reason": str(challenge_state.get("last_reason", "") or ""),
+            "hard_veto_bypass_allowed": 0,
+        },
+        "state_planes": {
+            "homeostasis": dict(sr_registry.get("homeostasis", {}) or {}),
+            "allostasis": dict(sr_registry.get("allostasis", {}) or {}),
+            "plasticity": dict(sr_registry.get("plasticity", {}) or {}),
+            "executive": dict(sr_registry.get("executive", {}) or {}),
+        },
     }
     last_metric_debug = getattr(app, "kernel_phase_last_metric_debug", {})
     if isinstance(last_metric_debug, dict) and last_metric_debug:
