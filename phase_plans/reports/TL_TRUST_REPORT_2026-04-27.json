@@ -1,0 +1,231 @@
+{
+  "report_path": "phase_plans/reports/TL_TRUST_REPORT_2026-04-27.md",
+  "compare": {
+    "generated_at_utc": "2026-04-27T12:15:58.067701+00:00",
+    "contract": {
+      "status_source": "preflight_dump_gate.py --json",
+      "id_pattern": "Log Dump/15_mazes_hard_*.txt",
+      "ood_pattern": "Log Dump/15_mazes_very_hard_*.txt",
+      "count": 2,
+      "timeout_seconds": 90
+    },
+    "thresholds": {
+      "trust_drop_warn": 0.1,
+      "trust_mean_min": 0.82,
+      "trust_floor_min": 0.72,
+      "trust_id_ood_delta_max": 0.1,
+      "autonomy_drop_warn": 0.05,
+      "guard_drop_warn": 0.03
+    },
+    "id_files": [
+      "15_mazes_hard_20260427_050233.txt",
+      "15_mazes_hard_20260427_045228.txt"
+    ],
+    "ood_files": [],
+    "id_rows": [
+      {
+        "file": "15_mazes_hard_20260427_050233.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.7765,
+        "hardcoded_only_rate": 0.0112,
+        "mixed_rate": 0.0279,
+        "phase1_intervention_utility_win3": -1.111,
+        "projection_effectiveness_score": 0.7281,
+        "autonomy_mean": 0.8002458100558659,
+        "trust_delib_mean": 0.6810381750465548,
+        "trust_delib_floor": 0.5874,
+        "guard_utility_mean": 0.5081378026070763,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": null,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      },
+      {
+        "file": "15_mazes_hard_20260427_045228.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.805,
+        "hardcoded_only_rate": 0.0094,
+        "mixed_rate": 0.0252,
+        "phase1_intervention_utility_win3": 0.0098,
+        "projection_effectiveness_score": 0.9057,
+        "autonomy_mean": 0.807419182389937,
+        "trust_delib_mean": 0.708593396226415,
+        "trust_delib_floor": 0.6489,
+        "guard_utility_mean": 0.5217798742138365,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": null,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      }
+    ],
+    "ood_rows": [],
+    "id_group": {
+      "autonomy_mean": 0.8038324962229015,
+      "trust_delib_mean": 0.6948157856364849,
+      "trust_delib_floor": 0.5874,
+      "guard_utility_mean": 0.5149588384104564,
+      "learned_only_rate_mean": 0.7907500000000001,
+      "hardcoded_only_rate_mean": 0.0103,
+      "mixed_rate_mean": 0.02655,
+      "phase1_intervention_utility_win3_mean": -0.5506,
+      "projection_effectiveness_score_mean": 0.8169,
+      "status_counts": {
+        "PASS": 2
+      },
+      "drift_count": 0,
+      "total_warnings": 0,
+      "total_failures": 0,
+      "mean_phase_count": 7.0,
+      "mean_micro_count": 18.0
+    },
+    "ood_group": {
+      "autonomy_mean": 0.0,
+      "trust_delib_mean": 0.0,
+      "trust_delib_floor": 0.0,
+      "guard_utility_mean": 0.0,
+      "learned_only_rate_mean": 0.0,
+      "hardcoded_only_rate_mean": 0.0,
+      "mixed_rate_mean": 0.0,
+      "phase1_intervention_utility_win3_mean": 0.0,
+      "projection_effectiveness_score_mean": 0.0,
+      "status_counts": {},
+      "drift_count": 0,
+      "total_warnings": 0,
+      "total_failures": 0,
+      "mean_phase_count": 0.0,
+      "mean_micro_count": 0.0
+    },
+    "deltas_id_minus_ood": {
+      "autonomy_mean": 0.8038324962229015,
+      "trust_delib_mean": 0.6948157856364849,
+      "trust_id_ood_delta": 0.6948157856364849,
+      "guard_utility_mean": 0.5149588384104564,
+      "learned_only_rate_mean": 0.7907500000000001,
+      "hardcoded_only_rate_mean": 0.0103,
+      "mixed_rate_mean": 0.02655,
+      "phase1_intervention_utility_win3_mean": -0.5506,
+      "projection_effectiveness_score_mean": 0.8169
+    },
+    "regressions": {
+      "status_not_all_pass": false,
+      "drift_detected": false,
+      "trust_drop_exceeds_threshold": true,
+      "trust_mean_below_target": true,
+      "trust_floor_below_target": true,
+      "trust_id_ood_delta_exceeds_target": true,
+      "autonomy_drop_exceeds_threshold": true,
+      "guard_drop_exceeds_threshold": true
+    }
+  },
+  "progression": {
+    "generated_at_utc": "2026-04-27T12:16:03.998187+00:00",
+    "pattern": "Log Dump/15_mazes_*.txt",
+    "count": 15,
+    "files": [
+      "15_mazes_hard_20260427_050233.txt",
+      "15_mazes_hard_20260427_045228.txt",
+      "15_mazes_hard_20260427_044728.txt",
+      "15_mazes_hard_20260427_043533.txt",
+      "15_mazes_hard_20260427_043106.txt",
+      "15_mazes_hard_20260427_042052.txt",
+      "15_mazes_hard_20260427_041728.txt",
+      "15_mazes_hard_20260427_040601.txt",
+      "15_mazes_hard_20260427_040157.txt",
+      "15_mazes_hard_20260427_035807.txt"
+    ],
+    "rows": [
+      {
+        "file": "15_mazes_hard_20260427_050233.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_045228.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_044728.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_043533.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_043106.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_042052.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_041728.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_040601.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_040157.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260427_035807.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      }
+    ],
+    "summary": {
+      "files_checked": 10,
+      "files_with_issues": 0,
+      "issues_total": 0,
+      "status": "PASS"
+    }
+  }
+}

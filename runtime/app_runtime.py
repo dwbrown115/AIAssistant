@@ -18,7 +18,7 @@ from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
 from runtime_kernel.adaptive_controller import AdaptiveNeuralController
-from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_default_kernel_phase_specs
+from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_trust_lift_phase_specs
 from runtime_kernel.governance_orchestrator import GovernanceOrchestrator
 from runtime_kernel.kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
 from runtime_kernel.learned_autonomy_controller import LearnedAutonomyController
@@ -388,8 +388,8 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='Self-regulation phase program: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (SR V1)')
+        self.kernel_phase_program_status_var = tk.StringVar(value='Trust lift phase program: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (Trust Lift V2)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
@@ -461,6 +461,9 @@ class AIAssistantApp:
         self.micro_progress_regression_fail_streak = 0
         self.runtime_batch_requested_count = 0
         self.runtime_batch_completed_count = 0
+        self.runtime_batch_session_active = False
+        self.runtime_batch_session_requested_count = 0
+        self.runtime_batch_session_completed_count = 0
         self.runtime_micro_progress_stage_index = 0
         self.runtime_micro_progress_series_anchor = float(self.micro_progress_persisted_series_value)
         self.runtime_micro_progress_series_value = float(self.micro_progress_persisted_series_value)
@@ -726,7 +729,7 @@ class AIAssistantApp:
         self.learned_autonomy_objective_phase_bonus = 0
         self.learned_autonomy_soft_override_scale = 1.0
         self.kernel_phase_program_enable = KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME
-        self.kernel_phase_specs = build_default_kernel_phase_specs() if self.kernel_phase_program_enable else ()
+        self.kernel_phase_specs = build_trust_lift_phase_specs() if self.kernel_phase_program_enable else ()
         kernel_phase_program_defaults = dict(KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME)
         self.kernel_phase_program = AdaptiveKernelPhaseProgram(
             phase_specs=self.kernel_phase_specs,
@@ -1615,6 +1618,11 @@ class AIAssistantApp:
         completed = max(0, int(getattr(self, 'runtime_batch_completed_count', 0) or 0))
         if requested > 0:
             header_text += f' | Runs {completed}/{requested}'
+        session_requested = max(0, int(getattr(self, 'runtime_batch_session_requested_count', 0) or 0))
+        session_completed = max(0, int(getattr(self, 'runtime_batch_session_completed_count', 0) or 0))
+        if bool(getattr(self, 'runtime_batch_session_active', False)) and session_requested > 0:
+            session_completed = max(0, min(session_requested, session_completed))
+            header_text += f' | Session {session_completed}/{session_requested} completed'
         self.micro_progress_header_var.set(header_text)
 
     def _schedule_micro_progress_header_update(self, *, announce_transition: bool=False) -> None:
@@ -1653,7 +1661,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='Self-Regulation Phase Program (SR V1)', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='Trust Lift Phase Program (TL V2)', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -1710,9 +1718,9 @@ class AIAssistantApp:
         toggle_canvas.bind('<Configure>', _sync_toggle_canvas_layout)
 
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='Self-regulation phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
-            self.kernel_phase_program_status_var.set('Self-regulation phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (SR V1)')
+            tk.Label(toggle_grid, text='Trust lift phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
+            self.kernel_phase_program_status_var.set('Trust lift phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (Trust Lift V2)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1745,13 +1753,13 @@ class AIAssistantApp:
 
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('Self-regulation phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (SR V1)')
+            self.kernel_phase_program_status_var.set('Trust lift phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (Trust Lift V2)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (SR V1)')
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (Trust Lift V2)')
         self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', True)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
@@ -1762,7 +1770,7 @@ class AIAssistantApp:
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('Self-regulation phase program: no phases loaded')
+            self.kernel_phase_program_status_var.set('Trust lift phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1842,7 +1850,7 @@ class AIAssistantApp:
         challenge_active = bool(challenge_state.get('active', False))
         challenge_remaining = int(challenge_state.get('remaining_steps', 0) or 0)
         runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text},clamp={(1 if clamp_active else 0)}/{clamp_cooldown_remaining},challenge={(1 if challenge_active else 0)}/{challenge_remaining}'
-        self.kernel_phase_program_status_var.set(f'Self-regulation phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        self.kernel_phase_program_status_var.set(f'Trust lift phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -2492,12 +2500,12 @@ class AIAssistantApp:
         reasoning = self._parallel_reasoning_snapshot() if self.parallel_reasoning_enable else {}
         return self.governance_orchestrator.introspection_snapshot(autonomy=autonomy, reasoning=reasoning)
 
-    def _observe_parallel_reasoning_feedback(self, *, selected_move: str, progress_delta: int, reward_signal: float, penalty_signal: float) -> None:
+    def _observe_parallel_reasoning_feedback(self, *, selected_move: str, progress_delta: int, reward_signal: float, penalty_signal: float, intervention_applied: bool=False, unresolved_override: bool=False, context_bucket_hint: str='') -> None:
         if not self.parallel_reasoning_enable:
             return
         if not selected_move:
             return
-        self.parallel_reasoning_engine.observe_feedback(selected_move=str(selected_move), progress_delta=int(progress_delta), reward_signal=float(reward_signal), penalty_signal=float(penalty_signal))
+        self.parallel_reasoning_engine.observe_feedback(selected_move=str(selected_move), progress_delta=int(progress_delta), reward_signal=float(reward_signal), penalty_signal=float(penalty_signal), intervention_applied=bool(intervention_applied), unresolved_override=bool(unresolved_override), context_bucket_hint=str(context_bucket_hint or ''))
 
     def _hard_override_phase_disables_frontier_lock(self) -> bool:
         return True
@@ -6498,7 +6506,7 @@ class AIAssistantApp:
                 terminal_guidance_pressure_log = float(selected_breakdown.get('terminal_hard_veto_penalty', 0) or 0) + float(selected_breakdown.get('dead_end_end_slap_penalty', 0) or 0) + float(selected_breakdown.get('dead_end_tip_revisit_slap_penalty', 0) or 0) + float(selected_breakdown.get('visible_terminal_end_penalty', 0) or 0) + float(selected_breakdown.get('boxed_corridor_penalty', 0) or 0)
                 self._observe_projection_trust_feedback(projection_forward_bonus=float(selected_breakdown.get('projection_forward_bonus', 0) or 0), projection_backward_penalty=float(selected_breakdown.get('projection_backward_penalty', 0) or 0), projection_backward_escape_bonus=float(selected_breakdown.get('projection_backward_escape_bonus', 0) or 0), progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
                 self._observe_terminal_trust_feedback(terminal_guidance_pressure=terminal_guidance_pressure_log, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, forced_single_exit=bool(selected_breakdown.get('forced_single_exit', 0) or 0), terminal_filtered=bool(self._terminal_hard_filter_applied_last))
-                self._observe_parallel_reasoning_feedback(selected_move=selected_move, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
+                self._observe_parallel_reasoning_feedback(selected_move=selected_move, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, intervention_applied=bool(guard_override), unresolved_override=bool(locals().get('objective_unresolved_override_streak', 0) or 0), context_bucket_hint=str(self.parallel_reasoning_last_result.get('context_bucket', '') if isinstance(getattr(self, 'parallel_reasoning_last_result', {}), dict) else ''))
                 tags: list[str] = []
                 risk_tag_fields = [('dead_end_end_slap_penalty', 'dead_end_slap'), ('dead_end_tip_revisit_slap_penalty', 'dead_end_tip_revisit'), ('revisit_dead_end_entrance_penalty', 'dead_end_entrance_revisit'), ('transition_repeat_penalty', 'transition_repeat'), ('cycle_pair_penalty', 'cycle_pair'), ('loop_risk_marked_edge_penalty', 'loop_marker'), ('visible_terminal_end_penalty', 'visible_terminal'), ('boxed_corridor_penalty', 'boxed_corridor'), ('immediate_backtrack_hard_penalty', 'immediate_backtrack'), ('branch_diversity_penalty', 'branch_diversity')]
                 if self.constructive_reinforcement_only:
@@ -8570,131 +8578,13 @@ class AIAssistantApp:
         plateau_extra_requested = 0
         plateau_no_progress_streak = 0
         plateau_last_micro, plateau_last_phase = self._kernel_phase_progress_counters()
-        for loop_index in range(1, loops + 1):
-            self.root.after(0, lambda i=loop_index, n=loops: self.status_var.set(f'Batch run {i}/{n}: randomizing maze, executing local kernel, dumping full log...'))
-            random_info = '(maze randomization skipped: non-maze mode)'
-            if self._normalized_layout_mode() == 'maze':
-                self._randomize_maze_start_number()
-                random_info = f'map_id={self._current_maze_map_id()} difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}'
-            run_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
-            step_session = run_result.get('step_session', {})
-            completed = int(step_session.get('completed', 0) or 0)
-            iterations = int(step_session.get('iterations', 0) or 0)
-            success = bool(step_session.get('success', False))
-            remaining = int(step_session.get('remaining', 0) or 0)
-            total_completed += completed
-            total_iterations += iterations
-            plateau_now_micro, plateau_now_phase = self._kernel_phase_progress_counters()
-            plateau_progressed = bool(plateau_now_micro > plateau_last_micro or plateau_now_phase > plateau_last_phase)
-            plateau_no_progress_streak = 0 if plateau_progressed else (plateau_no_progress_streak + 1)
-            plateau_last_micro, plateau_last_phase = plateau_now_micro, plateau_now_phase
-            dump_name = '(failed)'
-            dump_error = ''
-            try:
-                debug_for_dump = self._format_local_navigation_debug(run_result, header='[LOCAL KERNEL BATCH LOOP]')
-                output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=debug_for_dump)
-                dump_name = os.path.basename(output_path)
-            except Exception as exc:
-                dump_failures += 1
-                dump_error = str(exc)
-            batch_line = f'batch={loop_index}/{loops} {random_info} completed={completed}/{base_count} iterations={iterations} success={success} remaining={remaining} full_dump={dump_name}'
-            if dump_error:
-                batch_line += f' dump_error={dump_error}'
-            batch_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
-            batch_lines.append(batch_line)
-
-            should_trigger_plateau = bool(
-                self._normalized_layout_mode() == 'maze'
-                and self.maze_plateau_extra_hard_enable
-                and self.maze_plateau_extra_hard_runs > 0
-                and loop_index >= int(self.maze_plateau_extra_hard_min_batch_loop)
-                and plateau_no_progress_streak >= int(self.maze_plateau_extra_hard_streak)
-                and plateau_triggers < int(self.maze_plateau_extra_hard_max_triggers)
-            )
-            if not should_trigger_plateau:
-                continue
-
-            plateau_triggers += 1
-            plateau_no_progress_streak = 0
-            forced_difficulty = str(getattr(self, 'maze_plateau_extra_hard_difficulty', 'very hard') or 'very hard').strip().lower()
-            if forced_difficulty not in {'easy', 'medium', 'hard', 'very hard'}:
-                forced_difficulty = 'very hard'
-            for extra_index in range(1, int(self.maze_plateau_extra_hard_runs) + 1):
-                self.root.after(0, lambda t=plateau_triggers, e=extra_index, n=int(self.maze_plateau_extra_hard_runs): self.status_var.set(f'Plateau detected: running extra hard pass {e}/{n} (trigger {t})...'))
-                restore_difficulty = self._normalized_maze_difficulty()
-                restore_override = str(getattr(self, 'runtime_maze_difficulty_override', '') or '').strip().lower()
-                if restore_override not in {'easy', 'medium', 'hard', 'very hard'}:
-                    restore_override = ''
-                forced_random_info = '(maze randomization skipped: non-maze mode)'
-                try:
-                    if self._normalized_layout_mode() == 'maze':
-                        self.runtime_maze_difficulty_override = forced_difficulty
-                        self._randomize_maze_start_number()
-                        forced_random_info = f'map_id={self._current_maze_map_id()} difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}'
-                    extra_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
-                    extra_session = extra_result.get('step_session', {})
-                    extra_completed = int(extra_session.get('completed', 0) or 0)
-                    extra_iterations = int(extra_session.get('iterations', 0) or 0)
-                    extra_success = bool(extra_session.get('success', False))
-                    extra_remaining = int(extra_session.get('remaining', 0) or 0)
-                    total_completed += extra_completed
-                    total_iterations += extra_iterations
-                    plateau_extra_runs_executed += 1
-                    plateau_extra_requested += base_count
-
-                    plateau_now_micro, plateau_now_phase = self._kernel_phase_progress_counters()
-                    plateau_progressed = bool(plateau_now_micro > plateau_last_micro or plateau_now_phase > plateau_last_phase)
-                    plateau_no_progress_streak = 0 if plateau_progressed else (plateau_no_progress_streak + 1)
-                    plateau_last_micro, plateau_last_phase = plateau_now_micro, plateau_now_phase
-
-                    extra_dump_name = '(failed)'
-                    extra_dump_error = ''
-                    try:
-                        extra_debug = f'[LOCAL KERNEL BATCH LOOP | PLATEAU EXTRA HARD]\ntrigger={plateau_triggers}\nextra_index={extra_index}/{int(self.maze_plateau_extra_hard_runs)}\nforced_difficulty={forced_difficulty}\n\n' + self._format_local_navigation_debug(extra_result, header='[LOCAL KERNEL BATCH LOOP]')
-                        extra_output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=extra_debug)
-                        extra_dump_name = os.path.basename(extra_output_path)
-                    except Exception as exc:
-                        dump_failures += 1
-                        extra_dump_error = str(exc)
-                    extra_line = f'plateau_extra_hard trigger={plateau_triggers}/{int(self.maze_plateau_extra_hard_max_triggers)} run={extra_index}/{int(self.maze_plateau_extra_hard_runs)} forced={forced_difficulty} restore={restore_difficulty} {forced_random_info} completed={extra_completed}/{base_count} iterations={extra_iterations} success={extra_success} remaining={extra_remaining} full_dump={extra_dump_name}'
-                    if extra_dump_error:
-                        extra_line += f' dump_error={extra_dump_error}'
-                    extra_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
-                    batch_lines.append(extra_line)
-                finally:
-                    self.runtime_maze_difficulty_override = restore_override if restore_override else None
-        total_requested_with_plateau = total_requested + plateau_extra_requested
-        debug_text = f'[LOCAL KERNEL BATCH MODIFIER]\nmodifier: x{loops}\nbase_prompt: {base_prompt}\nbase_execution_count: {base_count}\ntotal_requested: {total_requested}\nplateau_extra_requested: {plateau_extra_requested}\ntotal_requested_with_plateau: {total_requested_with_plateau}\ntotal_completed: {total_completed}\ntotal_iterations: {total_iterations}\nplateau_triggers: {plateau_triggers}\nplateau_extra_runs_executed: {plateau_extra_runs_executed}\ndump_failures: {dump_failures}\n\n[BATCH DETAILS]\n' + ('\n'.join(batch_lines) if batch_lines else '(none)')
-        completion_label = 'maze runs' if self._normalized_layout_mode() == 'maze' else 'target hits'
-        answer = f'Batch modifier x{loops} complete. Ran {base_count} {completion_label} per batch ({total_requested} requested total), completed {total_completed} in {total_iterations} step iterations.'
-        if plateau_extra_runs_executed > 0:
-            answer += f' Plateau control injected {plateau_extra_runs_executed} extra {self.maze_plateau_extra_hard_difficulty} batch run(s) after stagnation detection ({plateau_extra_requested} additional requested).'
-        answer += ' Automatic Random # and Full Log Dump executed after each batch' + (' (some dumps failed).' if dump_failures else '.')
-        return {'debug_text': debug_text, 'answer': answer}
-
-    def _execute_local_navigation_batch_sequence_runs(self, segments: list[dict[str, int | str]], assistant_instructions: str) -> dict[str, str]:
-        if not segments:
-            return {'debug_text': '[LOCAL KERNEL BATCH SEQUENCE]\n(no segments)', 'answer': 'No batch sequence segments were parsed.'}
-        total_requested = 0
-        total_completed = 0
-        total_iterations = 0
-        total_loops = 0
-        total_loops_executed = 0
-        dump_failures = 0
-        plateau_triggers = 0
-        plateau_extra_runs_executed = 0
-        plateau_extra_requested = 0
-        plateau_no_progress_streak = 0
-        plateau_last_micro, plateau_last_phase = self._kernel_phase_progress_counters()
-        batch_lines: list[str] = []
-        for segment_index, segment in enumerate(segments, start=1):
-            base_prompt = str(segment.get('base_prompt', '') or '').strip()
-            loops = max(1, min(self.max_repeat_executions, int(segment.get('loops', 1) or 1)))
-            base_count = self._extract_local_execution_count(base_prompt)
-            total_requested += base_count * loops
-            total_loops += loops
+        self.runtime_batch_session_active = True
+        self.runtime_batch_session_requested_count = max(0, int(total_requested))
+        self.runtime_batch_session_completed_count = 0
+        self._schedule_micro_progress_header_update(announce_transition=False)
+        try:
             for loop_index in range(1, loops + 1):
-                self.root.after(0, lambda s=segment_index, n=len(segments), i=loop_index, l=loops: self.status_var.set(f'Batch sequence {s}/{n}, run {i}/{l}: randomizing maze, executing local kernel, dumping full log...'))
+                self.root.after(0, lambda i=loop_index, n=loops: self.status_var.set(f'Batch run {i}/{n}: randomizing maze, executing local kernel, dumping full log...'))
                 random_info = '(maze randomization skipped: non-maze mode)'
                 if self._normalized_layout_mode() == 'maze':
                     self._randomize_maze_start_number()
@@ -8707,7 +8597,8 @@ class AIAssistantApp:
                 remaining = int(step_session.get('remaining', 0) or 0)
                 total_completed += completed
                 total_iterations += iterations
-                total_loops_executed += 1
+                self.runtime_batch_session_completed_count = max(0, min(int(total_requested), int(total_completed)))
+                self._schedule_micro_progress_header_update(announce_transition=False)
                 plateau_now_micro, plateau_now_phase = self._kernel_phase_progress_counters()
                 plateau_progressed = bool(plateau_now_micro > plateau_last_micro or plateau_now_phase > plateau_last_phase)
                 plateau_no_progress_streak = 0 if plateau_progressed else (plateau_no_progress_streak + 1)
@@ -8715,13 +8606,13 @@ class AIAssistantApp:
                 dump_name = '(failed)'
                 dump_error = ''
                 try:
-                    debug_for_dump = f'[LOCAL KERNEL BATCH SEQUENCE LOOP]\nsegment={segment_index}/{len(segments)} loop={loop_index}/{loops}\nbase_prompt={base_prompt}\n\n' + self._format_local_navigation_debug(run_result, header='[LOCAL KERNEL BATCH SEQUENCE RUN]')
+                    debug_for_dump = self._format_local_navigation_debug(run_result, header='[LOCAL KERNEL BATCH LOOP]')
                     output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=debug_for_dump)
                     dump_name = os.path.basename(output_path)
                 except Exception as exc:
                     dump_failures += 1
                     dump_error = str(exc)
-                batch_line = f'segment={segment_index}/{len(segments)} segment_loops={loop_index}/{loops} base_prompt={base_prompt!r} base_count={base_count} {random_info} completed={completed}/{base_count} iterations={iterations} success={success} remaining={remaining} full_dump={dump_name}'
+                batch_line = f'batch={loop_index}/{loops} {random_info} completed={completed}/{base_count} iterations={iterations} success={success} remaining={remaining} full_dump={dump_name}'
                 if dump_error:
                     batch_line += f' dump_error={dump_error}'
                 batch_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
@@ -8731,7 +8622,7 @@ class AIAssistantApp:
                     self._normalized_layout_mode() == 'maze'
                     and self.maze_plateau_extra_hard_enable
                     and self.maze_plateau_extra_hard_runs > 0
-                    and total_loops_executed >= int(self.maze_plateau_extra_hard_min_batch_loop)
+                    and loop_index >= int(self.maze_plateau_extra_hard_min_batch_loop)
                     and plateau_no_progress_streak >= int(self.maze_plateau_extra_hard_streak)
                     and plateau_triggers < int(self.maze_plateau_extra_hard_max_triggers)
                 )
@@ -8763,6 +8654,8 @@ class AIAssistantApp:
                         extra_remaining = int(extra_session.get('remaining', 0) or 0)
                         total_completed += extra_completed
                         total_iterations += extra_iterations
+                        self.runtime_batch_session_completed_count = max(0, min(int(total_requested), int(total_completed)))
+                        self._schedule_micro_progress_header_update(announce_transition=False)
                         plateau_extra_runs_executed += 1
                         plateau_extra_requested += base_count
 
@@ -8774,27 +8667,172 @@ class AIAssistantApp:
                         extra_dump_name = '(failed)'
                         extra_dump_error = ''
                         try:
-                            extra_debug = f'[LOCAL KERNEL BATCH SEQUENCE LOOP | PLATEAU EXTRA HARD]\nsegment={segment_index}/{len(segments)} trigger={plateau_triggers}\nextra_index={extra_index}/{int(self.maze_plateau_extra_hard_runs)}\nforced_difficulty={forced_difficulty}\nbase_prompt={base_prompt}\n\n' + self._format_local_navigation_debug(extra_result, header='[LOCAL KERNEL BATCH SEQUENCE RUN]')
+                            extra_debug = f'[LOCAL KERNEL BATCH LOOP | PLATEAU EXTRA HARD]\ntrigger={plateau_triggers}\nextra_index={extra_index}/{int(self.maze_plateau_extra_hard_runs)}\nforced_difficulty={forced_difficulty}\n\n' + self._format_local_navigation_debug(extra_result, header='[LOCAL KERNEL BATCH LOOP]')
                             extra_output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=extra_debug)
                             extra_dump_name = os.path.basename(extra_output_path)
                         except Exception as exc:
                             dump_failures += 1
                             extra_dump_error = str(exc)
-                        extra_line = f'plateau_extra_hard segment={segment_index}/{len(segments)} trigger={plateau_triggers}/{int(self.maze_plateau_extra_hard_max_triggers)} run={extra_index}/{int(self.maze_plateau_extra_hard_runs)} forced={forced_difficulty} restore={restore_difficulty} base_prompt={base_prompt!r} base_count={base_count} {forced_random_info} completed={extra_completed}/{base_count} iterations={extra_iterations} success={extra_success} remaining={extra_remaining} full_dump={extra_dump_name}'
+                        extra_line = f'plateau_extra_hard trigger={plateau_triggers}/{int(self.maze_plateau_extra_hard_max_triggers)} run={extra_index}/{int(self.maze_plateau_extra_hard_runs)} forced={forced_difficulty} restore={restore_difficulty} {forced_random_info} completed={extra_completed}/{base_count} iterations={extra_iterations} success={extra_success} remaining={extra_remaining} full_dump={extra_dump_name}'
                         if extra_dump_error:
                             extra_line += f' dump_error={extra_dump_error}'
                         extra_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
                         batch_lines.append(extra_line)
                     finally:
                         self.runtime_maze_difficulty_override = restore_override if restore_override else None
-        completion_label = 'maze runs' if self._normalized_layout_mode() == 'maze' else 'target hits'
-        total_requested_with_plateau = total_requested + plateau_extra_requested
-        debug_text = f'[LOCAL KERNEL BATCH SEQUENCE]\nsegments: {len(segments)}\ntotal_segment_loops: {total_loops}\ntotal_requested: {total_requested}\nplateau_extra_requested: {plateau_extra_requested}\ntotal_requested_with_plateau: {total_requested_with_plateau}\ntotal_completed: {total_completed}\ntotal_iterations: {total_iterations}\nplateau_triggers: {plateau_triggers}\nplateau_extra_runs_executed: {plateau_extra_runs_executed}\ndump_failures: {dump_failures}\n\n[BATCH DETAILS]\n' + ('\n'.join(batch_lines) if batch_lines else '(none)')
-        answer = f'Batch sequence complete. Executed {len(segments)} segment(s) across {total_loops} total batch loops, requested {total_requested} total {completion_label}, and completed {total_completed} in {total_iterations} step iterations.'
-        if plateau_extra_runs_executed > 0:
-            answer += f' Plateau control injected {plateau_extra_runs_executed} extra {self.maze_plateau_extra_hard_difficulty} batch run(s) after stagnation detection ({plateau_extra_requested} additional requested).'
-        answer += ' Automatic Random # and Full Log Dump executed after each batch loop' + (' (some dumps failed).' if dump_failures else '.')
-        return {'debug_text': debug_text, 'answer': answer}
+            total_requested_with_plateau = total_requested + plateau_extra_requested
+            debug_text = f'[LOCAL KERNEL BATCH MODIFIER]\nmodifier: x{loops}\nbase_prompt: {base_prompt}\nbase_execution_count: {base_count}\ntotal_requested: {total_requested}\nplateau_extra_requested: {plateau_extra_requested}\ntotal_requested_with_plateau: {total_requested_with_plateau}\ntotal_completed: {total_completed}\ntotal_iterations: {total_iterations}\nplateau_triggers: {plateau_triggers}\nplateau_extra_runs_executed: {plateau_extra_runs_executed}\ndump_failures: {dump_failures}\n\n[BATCH DETAILS]\n' + ('\n'.join(batch_lines) if batch_lines else '(none)')
+            completion_label = 'maze runs' if self._normalized_layout_mode() == 'maze' else 'target hits'
+            answer = f'Batch modifier x{loops} complete. Ran {base_count} {completion_label} per batch ({total_requested} requested total), completed {total_completed} in {total_iterations} step iterations.'
+            if plateau_extra_runs_executed > 0:
+                answer += f' Plateau control injected {plateau_extra_runs_executed} extra {self.maze_plateau_extra_hard_difficulty} batch run(s) after stagnation detection ({plateau_extra_requested} additional requested).'
+            answer += ' Automatic Random # and Full Log Dump executed after each batch' + (' (some dumps failed).' if dump_failures else '.')
+            return {'debug_text': debug_text, 'answer': answer}
+        finally:
+            self.runtime_batch_session_active = False
+            self.runtime_batch_session_requested_count = 0
+            self.runtime_batch_session_completed_count = 0
+            self._schedule_micro_progress_header_update(announce_transition=False)
+
+    def _execute_local_navigation_batch_sequence_runs(self, segments: list[dict[str, int | str]], assistant_instructions: str) -> dict[str, str]:
+        if not segments:
+            return {'debug_text': '[LOCAL KERNEL BATCH SEQUENCE]\n(no segments)', 'answer': 'No batch sequence segments were parsed.'}
+        total_requested = 0
+        total_completed = 0
+        total_iterations = 0
+        total_loops = 0
+        total_loops_executed = 0
+        dump_failures = 0
+        plateau_triggers = 0
+        plateau_extra_runs_executed = 0
+        plateau_extra_requested = 0
+        plateau_no_progress_streak = 0
+        plateau_last_micro, plateau_last_phase = self._kernel_phase_progress_counters()
+        batch_lines: list[str] = []
+        self.runtime_batch_session_active = True
+        self.runtime_batch_session_requested_count = 0
+        self.runtime_batch_session_completed_count = 0
+        self._schedule_micro_progress_header_update(announce_transition=False)
+        try:
+            for segment_index, segment in enumerate(segments, start=1):
+                base_prompt = str(segment.get('base_prompt', '') or '').strip()
+                loops = max(1, min(self.max_repeat_executions, int(segment.get('loops', 1) or 1)))
+                base_count = self._extract_local_execution_count(base_prompt)
+                total_requested += base_count * loops
+                total_loops += loops
+                self.runtime_batch_session_requested_count = max(0, int(total_requested))
+                self._schedule_micro_progress_header_update(announce_transition=False)
+                for loop_index in range(1, loops + 1):
+                    self.root.after(0, lambda s=segment_index, n=len(segments), i=loop_index, l=loops: self.status_var.set(f'Batch sequence {s}/{n}, run {i}/{l}: randomizing maze, executing local kernel, dumping full log...'))
+                    random_info = '(maze randomization skipped: non-maze mode)'
+                    if self._normalized_layout_mode() == 'maze':
+                        self._randomize_maze_start_number()
+                        random_info = f'map_id={self._current_maze_map_id()} difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}'
+                    run_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
+                    step_session = run_result.get('step_session', {})
+                    completed = int(step_session.get('completed', 0) or 0)
+                    iterations = int(step_session.get('iterations', 0) or 0)
+                    success = bool(step_session.get('success', False))
+                    remaining = int(step_session.get('remaining', 0) or 0)
+                    total_completed += completed
+                    total_iterations += iterations
+                    total_loops_executed += 1
+                    self.runtime_batch_session_completed_count = max(0, min(int(total_requested), int(total_completed)))
+                    self._schedule_micro_progress_header_update(announce_transition=False)
+                    plateau_now_micro, plateau_now_phase = self._kernel_phase_progress_counters()
+                    plateau_progressed = bool(plateau_now_micro > plateau_last_micro or plateau_now_phase > plateau_last_phase)
+                    plateau_no_progress_streak = 0 if plateau_progressed else (plateau_no_progress_streak + 1)
+                    plateau_last_micro, plateau_last_phase = plateau_now_micro, plateau_now_phase
+                    dump_name = '(failed)'
+                    dump_error = ''
+                    try:
+                        debug_for_dump = f'[LOCAL KERNEL BATCH SEQUENCE LOOP]\nsegment={segment_index}/{len(segments)} loop={loop_index}/{loops}\nbase_prompt={base_prompt}\n\n' + self._format_local_navigation_debug(run_result, header='[LOCAL KERNEL BATCH SEQUENCE RUN]')
+                        output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=debug_for_dump)
+                        dump_name = os.path.basename(output_path)
+                    except Exception as exc:
+                        dump_failures += 1
+                        dump_error = str(exc)
+                    batch_line = f'segment={segment_index}/{len(segments)} segment_loops={loop_index}/{loops} base_prompt={base_prompt!r} base_count={base_count} {random_info} completed={completed}/{base_count} iterations={iterations} success={success} remaining={remaining} full_dump={dump_name}'
+                    if dump_error:
+                        batch_line += f' dump_error={dump_error}'
+                    batch_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
+                    batch_lines.append(batch_line)
+
+                    should_trigger_plateau = bool(
+                        self._normalized_layout_mode() == 'maze'
+                        and self.maze_plateau_extra_hard_enable
+                        and self.maze_plateau_extra_hard_runs > 0
+                        and total_loops_executed >= int(self.maze_plateau_extra_hard_min_batch_loop)
+                        and plateau_no_progress_streak >= int(self.maze_plateau_extra_hard_streak)
+                        and plateau_triggers < int(self.maze_plateau_extra_hard_max_triggers)
+                    )
+                    if not should_trigger_plateau:
+                        continue
+
+                    plateau_triggers += 1
+                    plateau_no_progress_streak = 0
+                    forced_difficulty = str(getattr(self, 'maze_plateau_extra_hard_difficulty', 'very hard') or 'very hard').strip().lower()
+                    if forced_difficulty not in {'easy', 'medium', 'hard', 'very hard'}:
+                        forced_difficulty = 'very hard'
+                    for extra_index in range(1, int(self.maze_plateau_extra_hard_runs) + 1):
+                        self.root.after(0, lambda t=plateau_triggers, e=extra_index, n=int(self.maze_plateau_extra_hard_runs): self.status_var.set(f'Plateau detected: running extra hard pass {e}/{n} (trigger {t})...'))
+                        restore_difficulty = self._normalized_maze_difficulty()
+                        restore_override = str(getattr(self, 'runtime_maze_difficulty_override', '') or '').strip().lower()
+                        if restore_override not in {'easy', 'medium', 'hard', 'very hard'}:
+                            restore_override = ''
+                        forced_random_info = '(maze randomization skipped: non-maze mode)'
+                        try:
+                            if self._normalized_layout_mode() == 'maze':
+                                self.runtime_maze_difficulty_override = forced_difficulty
+                                self._randomize_maze_start_number()
+                                forced_random_info = f'map_id={self._current_maze_map_id()} difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}'
+                            extra_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
+                            extra_session = extra_result.get('step_session', {})
+                            extra_completed = int(extra_session.get('completed', 0) or 0)
+                            extra_iterations = int(extra_session.get('iterations', 0) or 0)
+                            extra_success = bool(extra_session.get('success', False))
+                            extra_remaining = int(extra_session.get('remaining', 0) or 0)
+                            total_completed += extra_completed
+                            total_iterations += extra_iterations
+                            self.runtime_batch_session_completed_count = max(0, min(int(total_requested), int(total_completed)))
+                            self._schedule_micro_progress_header_update(announce_transition=False)
+                            plateau_extra_runs_executed += 1
+                            plateau_extra_requested += base_count
+
+                            plateau_now_micro, plateau_now_phase = self._kernel_phase_progress_counters()
+                            plateau_progressed = bool(plateau_now_micro > plateau_last_micro or plateau_now_phase > plateau_last_phase)
+                            plateau_no_progress_streak = 0 if plateau_progressed else (plateau_no_progress_streak + 1)
+                            plateau_last_micro, plateau_last_phase = plateau_now_micro, plateau_now_phase
+
+                            extra_dump_name = '(failed)'
+                            extra_dump_error = ''
+                            try:
+                                extra_debug = f'[LOCAL KERNEL BATCH SEQUENCE LOOP | PLATEAU EXTRA HARD]\nsegment={segment_index}/{len(segments)} trigger={plateau_triggers}\nextra_index={extra_index}/{int(self.maze_plateau_extra_hard_runs)}\nforced_difficulty={forced_difficulty}\nbase_prompt={base_prompt}\n\n' + self._format_local_navigation_debug(extra_result, header='[LOCAL KERNEL BATCH SEQUENCE RUN]')
+                                extra_output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=extra_debug)
+                                extra_dump_name = os.path.basename(extra_output_path)
+                            except Exception as exc:
+                                dump_failures += 1
+                                extra_dump_error = str(exc)
+                            extra_line = f'plateau_extra_hard segment={segment_index}/{len(segments)} trigger={plateau_triggers}/{int(self.maze_plateau_extra_hard_max_triggers)} run={extra_index}/{int(self.maze_plateau_extra_hard_runs)} forced={forced_difficulty} restore={restore_difficulty} base_prompt={base_prompt!r} base_count={base_count} {forced_random_info} completed={extra_completed}/{base_count} iterations={extra_iterations} success={extra_success} remaining={extra_remaining} full_dump={extra_dump_name}'
+                            if extra_dump_error:
+                                extra_line += f' dump_error={extra_dump_error}'
+                            extra_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
+                            batch_lines.append(extra_line)
+                        finally:
+                            self.runtime_maze_difficulty_override = restore_override if restore_override else None
+            completion_label = 'maze runs' if self._normalized_layout_mode() == 'maze' else 'target hits'
+            total_requested_with_plateau = total_requested + plateau_extra_requested
+            debug_text = f'[LOCAL KERNEL BATCH SEQUENCE]\nsegments: {len(segments)}\ntotal_segment_loops: {total_loops}\ntotal_requested: {total_requested}\nplateau_extra_requested: {plateau_extra_requested}\ntotal_requested_with_plateau: {total_requested_with_plateau}\ntotal_completed: {total_completed}\ntotal_iterations: {total_iterations}\nplateau_triggers: {plateau_triggers}\nplateau_extra_runs_executed: {plateau_extra_runs_executed}\ndump_failures: {dump_failures}\n\n[BATCH DETAILS]\n' + ('\n'.join(batch_lines) if batch_lines else '(none)')
+            answer = f'Batch sequence complete. Executed {len(segments)} segment(s) across {total_loops} total batch loops, requested {total_requested} total {completion_label}, and completed {total_completed} in {total_iterations} step iterations.'
+            if plateau_extra_runs_executed > 0:
+                answer += f' Plateau control injected {plateau_extra_runs_executed} extra {self.maze_plateau_extra_hard_difficulty} batch run(s) after stagnation detection ({plateau_extra_requested} additional requested).'
+            answer += ' Automatic Random # and Full Log Dump executed after each batch loop' + (' (some dumps failed).' if dump_failures else '.')
+            return {'debug_text': debug_text, 'answer': answer}
+        finally:
+            self.runtime_batch_session_active = False
+            self.runtime_batch_session_requested_count = 0
+            self.runtime_batch_session_completed_count = 0
+            self._schedule_micro_progress_header_update(announce_transition=False)
 
     def _build_local_navigation_plan(self, prompt: str) -> dict:
         execution_count = self._extract_local_execution_count(prompt)
@@ -14283,11 +14321,22 @@ class AIAssistantApp:
         new_center_x = new_x1 + self.player_size / 2
         new_center_y = new_y1 + self.player_size / 2
         new_cell = self._cell_from_center(new_center_x, new_center_y)
+        old_distance_to_target = self._distance_from_target_for_cell(old_cell)
         if self._is_blocked_cell(new_cell):
             blocked_tags = ['blocked_cell']
             if input_source == 'keyboard':
                 blocked_tags.append('manual_keyboard')
             self._record_action_outcome_memory(action_taken=f"MOVE_{move_dir or 'UNKNOWN'}", outcome_value=-8.0, reward_signal=0.0, penalty_signal=8.0, reason_tags=blocked_tags, details={'reason': 'blocked_cell', 'from_cell': old_cell, 'to_cell': new_cell, 'input_source': input_source, 'input_key': input_key}, player_cell=old_cell)
+            if input_source == 'keyboard' and move_dir:
+                self._observe_parallel_reasoning_feedback(
+                    selected_move=str(move_dir),
+                    progress_delta=-1,
+                    reward_signal=0.0,
+                    penalty_signal=2.0,
+                    intervention_applied=True,
+                    unresolved_override=False,
+                    context_bucket_hint='manual_nudge',
+                )
             self._refresh_game_state()
             return
         if new_x1 != x1 or new_y1 != y1:
@@ -14346,6 +14395,53 @@ class AIAssistantApp:
             self.prev_prev_player_cell = self.prev_player_cell
             self.prev_player_cell = new_cell
         self.game_canvas.coords(self.player, new_x1, new_y1, new_x1 + self.player_size, new_y1 + self.player_size)
+
+        # Treat manual keyboard movement as a gentle supervision nudge signal.
+        if input_source == 'keyboard' and move_dir and new_cell != old_cell:
+            new_distance_to_target = self._distance_from_target_for_cell(new_cell)
+            manual_progress_delta = 0
+            if new_distance_to_target < old_distance_to_target:
+                manual_progress_delta = 1
+            elif new_distance_to_target > old_distance_to_target:
+                manual_progress_delta = -1
+            manual_reward_signal = 0.8 if manual_progress_delta > 0 else 0.0
+            manual_penalty_signal = 0.8 if manual_progress_delta < 0 else 0.0
+            manual_outcome_value = 1.5 if manual_progress_delta > 0 else (-1.5 if manual_progress_delta < 0 else 0.2)
+            manual_tags = ['manual_keyboard_nudge']
+            if manual_progress_delta > 0:
+                manual_tags.append('manual_nudge_helpful')
+            elif manual_progress_delta < 0:
+                manual_tags.append('manual_nudge_nonhelpful')
+            else:
+                manual_tags.append('manual_nudge_neutral')
+            self._record_action_outcome_memory(
+                action_taken=f"MOVE_{move_dir}",
+                outcome_value=float(manual_outcome_value),
+                reward_signal=float(manual_reward_signal),
+                penalty_signal=float(manual_penalty_signal),
+                reason_tags=manual_tags,
+                details={
+                    'reason': 'manual_keyboard_nudge',
+                    'from_cell': old_cell,
+                    'to_cell': new_cell,
+                    'input_source': input_source,
+                    'input_key': input_key,
+                    'distance_before': int(old_distance_to_target),
+                    'distance_after': int(new_distance_to_target),
+                    'manual_progress_delta': int(manual_progress_delta),
+                },
+                player_cell=old_cell,
+            )
+            self._observe_parallel_reasoning_feedback(
+                selected_move=str(move_dir),
+                progress_delta=int(manual_progress_delta),
+                reward_signal=float(manual_reward_signal),
+                penalty_signal=float(manual_penalty_signal),
+                intervention_applied=True,
+                unresolved_override=False,
+                context_bucket_hint='manual_nudge',
+            )
+
         self._refresh_game_state()
         captured = self._check_collision()
         if captured:

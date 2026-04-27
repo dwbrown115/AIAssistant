@@ -198,6 +198,29 @@ Milestone rule:
 6. Validate phase/micro consistency across logs and snapshots.
 7. Publish first full-system tuning report with regression flags.
 
+## Bootstrap Status (2026-04-26)
+
+The following kickoff setup is now in place:
+
+- Canonical schema and status contract artifacts:
+	- `tuning/canonical_metrics_schema.json`
+	- `tuning/README.md`
+- Canonical comparison pipeline:
+	- `tuning/canonical_compare.py`
+- Progression consistency checker:
+	- `tuning/progression_consistency.py`
+- Canonical report generator:
+	- `tuning/generate_tuning_report.py`
+- First generated report artifacts:
+	- `phase_plans/reports/FULL_SYSTEM_TUNING_REPORT_2026-04-26.md`
+	- `phase_plans/reports/FULL_SYSTEM_TUNING_REPORT_PAYLOAD_2026-04-26.json`
+
+Current checkpoint:
+- Source-of-truth status normalization is active (preflight JSON).
+- Canonical hard-vs-very-hard report path is active.
+- Progression consistency check path is active.
+- Trust degradation is currently the primary triggered regression flag under OOD proxy.
+
 ## Definition of Done
 
 You are done when:

@@ -1,149 +1,73 @@
 import os
-import glob
 import json
+import glob
 import subprocess
 import re
-import statistics
 
-def find_files():
-    files = glob.glob("Log Dump/15_mazes_*.txt")
-    files.sort(key=os.path.getmtime, reverse=True)
-    return files[:10]
-
-def run_preflight(file_path):
-    try:
-        result = subprocess.run(['python3', 'preflight_dump_gate.py', file_path, '--json'], 
-                                capture_output=True, text=True, check=True)
-        return json.loads(result.stdout)
-    except Exception as e:
-        print(f"Error running preflight on {file_path}: {e}")
+def get_mean(pattern, text):
+    matches = re.findall(pattern, text)
+    if not matches:
         return None
+    return sum(float(m) for m in matches) / len(matches)
 
-def parse_raw_file(file_path):
-    metrics = {
-        'completed_phase_count': [],
-        'completed_micro_total': [],
-        'active_target': [],
-        'promotion_target': []
-    }
+def get_last(pattern, text):
+    matches = re.findall(pattern, text)
+    if not matches:
+        return "N/A"
+    return matches[-1]
+
+files = glob.glob("Log Dump/15_mazes_*.txt")
+results = []
+
+for f in sorted(files):
+    # Get status from preflight
     try:
-        with open(file_path, 'r') as f:
-            content = f.read()
-            metrics['completed_phase_count'] = [int(m) for m in re.findall(r'completed_phase_count[:=]\s*(\d+)', content)]
-            metrics['completed_micro_total'] = [int(m) for m in re.findall(r'completed_micro_total[:=]\s*(\d+)', content)]
-            metrics['active_target'] = re.findall(r'active_target[:=]\s*(\S+)', content)
-            metrics['promotion_target'] = [float(m) for m in re.findall(r'promotion_target[:=]\s*([\d\.]+)', content)]
-            
-            # Look for base_promotion_target. If not found explicitly, we might need a default or search for it.
-            base_search = re.search(r'base_promotion_target[:=]\s*([\d\.]+)', content)
-            base_promotion_target = float(base_search.group(1)) if base_search else None
-            
-            return metrics, base_promotion_target
-    except Exception as e:
-        print(f"Error parsing raw file {file_path}: {e}")
-        return metrics, None
+        cmd = ["python3", "preflight_dump_gate.py", "--json", f]
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode()
+        data = json.loads(output)
+        status = data.get("status", "N/A")
+    except:
+        status = "Error"
 
-def analyze():
-    files = find_files()
-    if not files:
-        print("No files found.")
-        return
+    with open(f, 'r') as file:
+        content = file.read()
 
-    results = []
+    mean_autonomy = get_mean(r"telemetry_autonomy_score=([0-9\.-]+)", content)
+    mean_trust = get_mean(r"telemetry_reasoning_trust_deliberative=([0-9\.-]+)", content)
+    mean_utility = get_mean(r"telemetry_guard_utility_ema=([0-9\.-]+)", content)
     
-    for f in files:
-        pj = run_preflight(f)
-        raw_metrics, base_pt = parse_raw_file(f)
-        results.append({
-            'file': f,
-            'json': pj,
-            'raw': raw_metrics,
-            'base_pt': base_pt
-        })
-
-    print("--- Files (Newest to Oldest) ---")
-    for r in results:
-        print(r['file'])
-
-    # Status/Failures/Warnings
-    statuses = [r['json'].get('status', 'unknown') for r in results if r['json']]
-    total_warns = sum(len(r['json'].get('warnings', [])) for r in results if r['json'])
-    total_fails = sum(len(r['json'].get('failures', [])) for r in results if r['json'])
-    
-    print(f"\nStatus Counts: Pass: {statuses.count('pass')}, Warn: {statuses.count('warn')}, Fail: {statuses.count('fail')}")
-    print(f"Total Warnings: {total_warns}, Total Failures: {total_fails}")
-
-    # Numeric Metrics Mean
-    metric_keys = [
-        'learned_only_rate', 'hardcoded_only_rate', 'unresolved_objective_override_rate',
-        'phase1_telemetry_coverage', 'phase1_intervention_utility_win3', 'phase1_penalty_delta_win3',
-        'projection_coverage', 'projection_beneficial_rate', 'projection_non_beneficial_rate', 'projection_clip_rate'
-    ]
-    
-    print("\nMean Metric Values:")
-    for k in metric_keys:
-        vals = []
-        for r in results:
-            if r['json'] and 'metrics' in r['json']:
-                v = r['json']['metrics'].get(k)
-                if v is not None: vals.append(v)
-        if vals:
-            print(f"  {k}: {statistics.mean(vals):.4f}")
-        else:
-            print(f"  {k}: N/A")
-
-    # Kernel-phase integration summary
-    all_phases = []
-    all_micros = []
-    all_active_targets = []
-    drift_count = 0
-    global_max_pt = 0.0
-    found_phase_files = 0
-    found_micro_files = 0
-    
-    for r in results:
-        m = r['raw']
-        if m['completed_phase_count']:
-            all_phases.extend(m['completed_phase_count'])
-            found_phase_files += 1
-        if m['completed_micro_total']:
-            all_micros.extend(m['completed_micro_total'])
-            found_micro_files += 1
-        all_active_targets.extend(m['active_target'])
+    # Try looking for "key=value" then fallback to " "key": value" form if any
+    phase_count = get_last(r"completed_phase_count=([0-9]+)", content)
+    if phase_count == "N/A":
+        phase_count = get_last(r"\"completed_phase_count\": ([0-9]+)", content)
         
-        max_pt = max(m['promotion_target']) if m['promotion_target'] else 0.0
-        global_max_pt = max(global_max_pt, max_pt)
-        if r['base_pt'] is not None and max_pt > r['base_pt']:
-            drift_count += 1
+    micro_total = get_last(r"completed_micro_total=([0-9]+)", content)
+    if micro_total == "N/A":
+        micro_total = get_last(r"\"completed_micro_total\": ([0-9]+)", content)
 
-    print("\nKernel-Phase Integration Summary:")
-    print(f"  Files with completed_phase_count: {found_phase_files}/10")
-    if all_phases:
-        print(f"    Phases: min={min(all_phases)}, max={max(all_phases)}, mean={statistics.mean(all_phases):.2f}")
-    print(f"  Files with completed_micro_total: {found_micro_files}/10")
-    if all_micros:
-        print(f"    Micros: min={min(all_micros)}, max={max(all_micros)}, mean={statistics.mean(all_micros):.2f}")
-    
-    if all_active_targets:
-        from collections import Counter
-        common_targets = Counter(all_active_targets).most_common(3)
-        print(f"  Most common active_target: {common_targets}")
+    results.append({
+        "File": os.path.basename(f),
+        "Status": status,
+        "Mean Autonomy": mean_autonomy,
+        "Mean Trust": mean_trust,
+        "Mean Utility": mean_utility,
+        "Phases": f"{phase_count}/{micro_total}"
+    })
 
-    print(f"\nPromotion Drift Summary:")
-    print(f"  Files with drift: {drift_count}")
-    print(f"  Global max promotion_target: {global_max_pt}")
+# Print Table
+header = f"{'File':<35} {'Status':<7} {'Autonomy':<10} {'Trust':<10} {'Utility':<10} {'Phases':<10}"
+print(header)
+print("-" * len(header))
+for r in results:
+    auton = f"{r['Mean Autonomy']:.4f}" if r["Mean Autonomy"] is not None else "N/A"
+    trust = f"{r['Mean Trust']:.4f}" if r["Mean Trust"] is not None else "N/A"
+    util = f"{r['Mean Utility']:.4f}" if r["Mean Utility"] is not None else "N/A"
+    print(f"{r['File']:<35} {r['Status']:<7} {auton:<10} {trust:<10} {util:<10} {r['Phases']:<10}")
 
-    # Assessment
-    # High drift or low telemetry or high failures suggest poor health.
-    # High coverage and consistent phases suggest good health.
-    passed = statuses.count('pass')
-    print("\nAssessment:")
-    if passed >= 8 and drift_count <= 2:
-        print("Kernel and phase integration health is strong, showing high pass rates and minimal promotion drift across the recent maze logs.")
-    elif passed >= 5:
-        print("Kernel and phase integration health is moderate; while core metrics are stable, some drift or warnings indicate potential optimization needs.")
-    else:
-        print("Kernel and phase integration health appears degraded, with frequent failures or significant promotion drift requiring investigation.")
-
-if __name__ == "__main__":
-    analyze()
+# Aggregate Trust
+trusts = [r["Mean Trust"] for r in results if r["Mean Trust"] is not None]
+print("\nAggregate Statistics (Trust):")
+if trusts:
+    print(f"Mean: {sum(trusts) / len(trusts):.4f}")
+    print(f"Min:  {min(trusts):.4f}")
+    print(f"Max:  {max(trusts):.4f}")

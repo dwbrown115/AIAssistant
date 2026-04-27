@@ -1,0 +1,60 @@
+{
+    "schema_version": "1.0.0",
+    "status_contract": {
+        "source_of_truth": "preflight_dump_gate.py --json",
+        "allowed_status": [
+            "PASS",
+            "WARN",
+            "FAIL",
+            "ERROR",
+            "TIMEOUT"
+        ]
+    },
+    "file_level_metrics": {
+        "preflight": [
+            "learned_only_rate",
+            "hardcoded_only_rate",
+            "mixed_rate",
+            "phase1_intervention_utility_win3",
+            "projection_effectiveness_score",
+            "warnings_count",
+            "failures_count"
+        ],
+        "streamed_log": [
+            "telemetry_autonomy_score_mean",
+            "telemetry_reasoning_trust_deliberative_mean",
+            "telemetry_guard_utility_ema_mean",
+            "completed_phase_count_last",
+            "completed_micro_total_last",
+            "promotion_target_max",
+            "base_promotion_target_last",
+            "promotion_target_drift_flag"
+        ]
+    },
+    "group_metrics": [
+        "autonomy_mean",
+        "trust_delib_mean",
+        "trust_delib_floor",
+        "trust_id_ood_delta",
+        "guard_utility_mean",
+        "learned_only_rate_mean",
+        "hardcoded_only_rate_mean",
+        "mixed_rate_mean",
+        "phase1_intervention_utility_win3_mean",
+        "projection_effectiveness_score_mean",
+        "status_counts",
+        "drift_count",
+        "total_warnings",
+        "total_failures"
+    ],
+    "default_regression_thresholds": {
+        "trust_drop_warn": 0.1,
+        "trust_mean_min": 0.82,
+        "trust_floor_min": 0.72,
+        "trust_id_ood_delta_max": 0.1,
+        "autonomy_drop_warn": 0.05,
+        "guard_drop_warn": 0.03,
+        "max_drift_count": 0,
+        "require_all_pass": true
+    }
+}

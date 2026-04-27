@@ -12,6 +12,9 @@ class ParallelReasoningEngine:
     estimates per-plan preference scores, and combines them with learned plan-trust EMAs.
     """
 
+    _CHANNELS = ("local", "adaptive", "deliberative")
+    _CONTEXT_BUCKETS = ("neutral", "unknown", "frontier", "loop", "hazard")
+
     def __init__(
         self,
         *,
@@ -51,6 +54,18 @@ class ParallelReasoningEngine:
         self.plan_trust_deliberative = 0.5
         self.confidence_ema = 0.5
         self.utility_ema = 0.5
+        self.outcome_quality_ema = 0.5
+        self.intervention_helpfulness_ema = 0.5
+        self.context_trust_blend_weight = 0.38
+        self.plan_trust_context: dict[str, dict[str, float]] = {
+            channel: {bucket: 0.5 for bucket in self._CONTEXT_BUCKETS}
+            for channel in self._CHANNELS
+        }
+        self.context_bucket_counts: dict[str, int] = {
+            bucket: 0 for bucket in self._CONTEXT_BUCKETS
+        }
+        self.last_strategy = "bootstrap"
+        self.strategy_switch_stability_count = 0
         self.last_result: dict[str, object] = {}
 
     def _profile_default_budget(self, profile: ReasoningProfile) -> ReasoningBudgetContract:
@@ -94,6 +109,79 @@ class ParallelReasoningEngine:
     def _sigmoid(value: float) -> float:
         clipped = max(-8.0, min(8.0, float(value)))
         return 1.0 / (1.0 + math.exp(-clipped))
+
+    def _context_bucket(self, candidate: dict[str, float]) -> str:
+        unknown = self._clamp(float(candidate.get("unknown_neighbors", 0.0)) / 4.0, 0.0, 1.0)
+        frontier = self._clamp(float(candidate.get("frontier_gain", 0.0)), 0.0, 1.0)
+        loop_pressure = self._clamp(float(candidate.get("loop_pressure_norm", 0.0)), 0.0, 1.0)
+        hazard_pressure = self._clamp(float(candidate.get("hazard_pressure_norm", 0.0)), 0.0, 1.0)
+
+        if hazard_pressure >= 0.62:
+            return "hazard"
+        if loop_pressure >= 0.58:
+            return "loop"
+        if frontier >= 0.56:
+            return "frontier"
+        if unknown >= 0.35:
+            return "unknown"
+        return "neutral"
+
+    def _context_trust(self, channel: str, bucket: str) -> float:
+        channel_map = self.plan_trust_context.get(channel, {})
+        return self._clamp(float(channel_map.get(bucket, 0.5) or 0.5), 0.0, 1.0)
+
+    def _effective_channel_trust(self, channel: str, *, global_trust: float, bucket: str) -> float:
+        context_trust = self._context_trust(channel, bucket)
+        alpha = self._clamp(self.context_trust_blend_weight, 0.0, 0.8)
+        return self._clamp(((1.0 - alpha) * global_trust) + (alpha * context_trust), 0.0, 1.0)
+
+    def _outcome_label(
+        self,
+        *,
+        progress_delta: int,
+        reward_signal: float,
+        penalty_signal: float,
+        intervention_applied: bool,
+        unresolved_override: bool,
+    ) -> tuple[float, float]:
+        progress_quality = 1.0 if int(progress_delta) > 0 else (0.45 if int(progress_delta) == 0 else 0.0)
+        reward_minus_penalty = (float(reward_signal) - float(penalty_signal)) / 90.0
+        reward_quality = self._sigmoid(reward_minus_penalty)
+        penalty_relief = self._clamp(1.0 - (float(penalty_signal) / 24.0), 0.0, 1.0)
+        outcome_quality = self._clamp(
+            (0.46 * progress_quality) + (0.34 * reward_quality) + (0.20 * penalty_relief),
+            0.0,
+            1.0,
+        )
+        if bool(unresolved_override):
+            outcome_quality = self._clamp(outcome_quality * 0.82, 0.0, 1.0)
+
+        intervention_helpful = 0.5
+        if intervention_applied:
+            intervention_helpful = 1.0 if (progress_delta > 0 and reward_signal >= penalty_signal) else 0.0
+            outcome_quality = self._clamp(
+                (0.82 * outcome_quality) + (0.18 * intervention_helpful),
+                0.0,
+                1.0,
+            )
+        return (outcome_quality, intervention_helpful)
+
+    def _smooth_strategy(self, candidate_strategy: str) -> str:
+        token = str(candidate_strategy or "parallel_ensemble")
+        if token == self.last_strategy:
+            self.strategy_switch_stability_count = 0
+            return token
+        if self.step_count <= self.warmup_steps:
+            self.last_strategy = token
+            self.strategy_switch_stability_count = 0
+            return token
+        # Require two consecutive switch opportunities to prevent oscillation.
+        self.strategy_switch_stability_count += 1
+        if self.strategy_switch_stability_count < 2:
+            return self.last_strategy
+        self.last_strategy = token
+        self.strategy_switch_stability_count = 0
+        return token
 
     def _deliberative_score(self, candidate: dict[str, float]) -> float:
         unknown_pref = self._clamp(float(candidate.get("unknown_neighbors", 0.0)) / 4.0, 0.0, 1.0)
@@ -167,6 +255,12 @@ class ParallelReasoningEngine:
         lookahead_max = max(lookahead_scores)
 
         ranked: list[dict[str, float | str]] = []
+        previous_margin = self._clamp(
+            float(self.last_result.get("confidence_margin", 0.0) if self.last_result else 0.0),
+            0.0,
+            1.0,
+        )
+        trust_flatten = 1.0 - self._clamp(previous_margin / 0.18, 0.0, 1.0)
 
         for row in candidates:
             move = str(row.get("move", "") or "")
@@ -186,10 +280,31 @@ class ParallelReasoningEngine:
                 "contradiction_norm": float(row.get("contradiction_norm", 0.0) or 0.0),
             }
             deliberative_pref = self._deliberative_score(row_for_deliberation)
+            context_bucket = self._context_bucket(row_for_deliberation)
 
-            weight_local = self.local_weight * self.plan_trust_local
-            weight_adaptive = self.adaptive_weight * self.plan_trust_adaptive
-            weight_deliberative = self.deliberative_weight * self.plan_trust_deliberative
+            trust_local = self._effective_channel_trust(
+                "local",
+                global_trust=self.plan_trust_local,
+                bucket=context_bucket,
+            )
+            trust_adaptive = self._effective_channel_trust(
+                "adaptive",
+                global_trust=self.plan_trust_adaptive,
+                bucket=context_bucket,
+            )
+            trust_deliberative = self._effective_channel_trust(
+                "deliberative",
+                global_trust=self.plan_trust_deliberative,
+                bucket=context_bucket,
+            )
+            trust_mean = (trust_local + trust_adaptive + trust_deliberative) / 3.0
+            trust_local = self._clamp((trust_local * (1.0 - (0.45 * trust_flatten))) + (trust_mean * (0.45 * trust_flatten)), 0.0, 1.0)
+            trust_adaptive = self._clamp((trust_adaptive * (1.0 - (0.45 * trust_flatten))) + (trust_mean * (0.45 * trust_flatten)), 0.0, 1.0)
+            trust_deliberative = self._clamp((trust_deliberative * (1.0 - (0.45 * trust_flatten))) + (trust_mean * (0.45 * trust_flatten)), 0.0, 1.0)
+
+            weight_local = self.local_weight * trust_local
+            weight_adaptive = self.adaptive_weight * trust_adaptive
+            weight_deliberative = self.deliberative_weight * trust_deliberative
             total_weight = weight_local + weight_adaptive + weight_deliberative
             if total_weight <= 1e-9:
                 combined = local_pref
@@ -208,6 +323,10 @@ class ParallelReasoningEngine:
                     "adaptive_pref": round(adaptive_pref, 6),
                     "deliberative_pref": round(deliberative_pref, 6),
                     "combined_pref": round(float(combined), 6),
+                    "context_bucket": context_bucket,
+                    "trust_local_effective": round(float(trust_local), 6),
+                    "trust_adaptive_effective": round(float(trust_adaptive), 6),
+                    "trust_deliberative_effective": round(float(trust_deliberative), 6),
                 }
             )
 
@@ -252,6 +371,20 @@ class ParallelReasoningEngine:
             selected = best
             strategy = "parallel_ensemble"
 
+        strategy = self._smooth_strategy(strategy)
+        if strategy == "parallel_ensemble":
+            selected = best
+        elif strategy == "low_confidence_probe":
+            selected = max(
+                ranked,
+                key=lambda item: (
+                    (0.6 * float(item.get("deliberative_pref", 0.0) or 0.0))
+                    + (0.4 * float(item.get("local_pref", 0.0) or 0.0))
+                ),
+            )
+        elif strategy == "warmup_local":
+            selected = min(ranked, key=lambda item: float(item.get("local_score", 0.0) or 0.0))
+
         self.last_result = {
             "enabled": 1,
             "selected_move": str(selected.get("move", "") or ""),
@@ -263,6 +396,8 @@ class ParallelReasoningEngine:
             "plan_trust_adaptive": round(self.plan_trust_adaptive, 6),
             "plan_trust_deliberative": round(self.plan_trust_deliberative, 6),
             "confidence_ema": round(self.confidence_ema, 6),
+            "context_bucket": str(selected.get("context_bucket", "neutral") or "neutral"),
+            "context_trust_blend_weight": round(float(self.context_trust_blend_weight), 4),
             "step_count": int(self.step_count),
             "reasoning_profile": profile_enum.value,
             "budget": {
@@ -282,6 +417,9 @@ class ParallelReasoningEngine:
         progress_delta: int,
         reward_signal: float,
         penalty_signal: float,
+        intervention_applied: bool = False,
+        unresolved_override: bool = False,
+        context_bucket_hint: str = "",
     ) -> None:
         if (not self.enabled) or (not self.last_result):
             return
@@ -301,24 +439,48 @@ class ParallelReasoningEngine:
         self.step_count += 1
         decay = self.ema_decay
 
-        reward_minus_penalty = (float(reward_signal) - float(penalty_signal)) / 120.0
-        progress_term = float(progress_delta) * 0.2
-        utility = self._sigmoid(reward_minus_penalty + progress_term)
-        self.utility_ema = (decay * self.utility_ema) + ((1.0 - decay) * utility)
+        outcome_quality, intervention_helpful = self._outcome_label(
+            progress_delta=int(progress_delta),
+            reward_signal=float(reward_signal),
+            penalty_signal=float(penalty_signal),
+            intervention_applied=bool(intervention_applied),
+            unresolved_override=bool(unresolved_override),
+        )
+        self.utility_ema = (decay * self.utility_ema) + ((1.0 - decay) * outcome_quality)
+        self.outcome_quality_ema = (decay * self.outcome_quality_ema) + ((1.0 - decay) * outcome_quality)
+        self.intervention_helpfulness_ema = (decay * self.intervention_helpfulness_ema) + ((1.0 - decay) * intervention_helpful)
 
         local_pred = float(chosen.get("local_pref", 0.0) or 0.0)
         adaptive_pred = float(chosen.get("adaptive_pref", 0.0) or 0.0)
         deliberative_pred = float(chosen.get("deliberative_pref", 0.0) or 0.0)
 
-        local_accuracy = self._clamp(1.0 - abs(utility - local_pred), 0.0, 1.0)
-        adaptive_accuracy = self._clamp(1.0 - abs(utility - adaptive_pred), 0.0, 1.0)
-        deliberative_accuracy = self._clamp(1.0 - abs(utility - deliberative_pred), 0.0, 1.0)
+        # Brier-style calibration scoring drives trust updates.
+        local_accuracy = self._clamp(1.0 - ((outcome_quality - local_pred) ** 2), 0.0, 1.0)
+        adaptive_accuracy = self._clamp(1.0 - ((outcome_quality - adaptive_pred) ** 2), 0.0, 1.0)
+        deliberative_accuracy = self._clamp(1.0 - ((outcome_quality - deliberative_pred) ** 2), 0.0, 1.0)
 
         self.plan_trust_local = (decay * self.plan_trust_local) + ((1.0 - decay) * local_accuracy)
         self.plan_trust_adaptive = (decay * self.plan_trust_adaptive) + ((1.0 - decay) * adaptive_accuracy)
         self.plan_trust_deliberative = (decay * self.plan_trust_deliberative) + ((1.0 - decay) * deliberative_accuracy)
 
-    def snapshot(self) -> dict[str, float | int]:
+        bucket = str(context_bucket_hint or chosen.get("context_bucket", "neutral") or "neutral").strip().lower()
+        if bucket not in self._CONTEXT_BUCKETS:
+            bucket = "neutral"
+        self.context_bucket_counts[bucket] = int(self.context_bucket_counts.get(bucket, 0) or 0) + 1
+        self.plan_trust_context["local"][bucket] = (decay * self._context_trust("local", bucket)) + ((1.0 - decay) * local_accuracy)
+        self.plan_trust_context["adaptive"][bucket] = (decay * self._context_trust("adaptive", bucket)) + ((1.0 - decay) * adaptive_accuracy)
+        self.plan_trust_context["deliberative"][bucket] = (decay * self._context_trust("deliberative", bucket)) + ((1.0 - decay) * deliberative_accuracy)
+
+    def snapshot(self) -> dict[str, object]:
+        context_bucket_mean_trust: dict[str, float] = {}
+        for bucket in self._CONTEXT_BUCKETS:
+            mean_trust = (
+                self._context_trust("local", bucket)
+                + self._context_trust("adaptive", bucket)
+                + self._context_trust("deliberative", bucket)
+            ) / 3.0
+            context_bucket_mean_trust[bucket] = round(float(mean_trust), 4)
+
         return {
             "enabled": 1 if self.enabled else 0,
             "step_count": int(self.step_count),
@@ -327,6 +489,11 @@ class ParallelReasoningEngine:
             "plan_trust_deliberative": round(float(self.plan_trust_deliberative), 4),
             "confidence_ema": round(float(self.confidence_ema), 4),
             "utility_ema": round(float(self.utility_ema), 4),
+            "outcome_quality_ema": round(float(self.outcome_quality_ema), 4),
+            "intervention_helpfulness_ema": round(float(self.intervention_helpfulness_ema), 4),
+            "context_trust_blend_weight": round(float(self.context_trust_blend_weight), 4),
+            "context_bucket_trust": context_bucket_mean_trust,
+            "context_bucket_counts": dict(self.context_bucket_counts),
             "last_confidence": round(float(self.last_result.get("confidence", 0.0) if self.last_result else 0.0), 4),
             "last_confidence_margin": round(
                 float(self.last_result.get("confidence_margin", 0.0) if self.last_result else 0.0),

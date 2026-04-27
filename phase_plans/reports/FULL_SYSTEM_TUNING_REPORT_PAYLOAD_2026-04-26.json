@@ -1,0 +1,349 @@
+{
+  "report_path": "phase_plans/reports/FULL_SYSTEM_TUNING_REPORT_2026-04-26.md",
+  "compare": {
+    "generated_at_utc": "2026-04-27T01:49:28.907146+00:00",
+    "contract": {
+      "status_source": "preflight_dump_gate.py --json",
+      "id_pattern": "Log Dump/15_mazes_hard_*.txt",
+      "ood_pattern": "Log Dump/15_mazes_very_hard_*.txt",
+      "count": 3,
+      "timeout_seconds": 60
+    },
+    "thresholds": {
+      "trust_drop_warn": 0.1,
+      "autonomy_drop_warn": 0.05,
+      "guard_drop_warn": 0.03
+    },
+    "id_files": [
+      "15_mazes_hard_20260426_201929.txt",
+      "15_mazes_hard_20260426_201351.txt",
+      "15_mazes_hard_20260426_201054.txt"
+    ],
+    "ood_files": [
+      "15_mazes_very_hard_20260426_195515.txt",
+      "15_mazes_very_hard_20260426_193009.txt",
+      "15_mazes_very_hard_20260426_180941.txt"
+    ],
+    "id_rows": [
+      {
+        "file": "15_mazes_hard_20260426_201929.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.8006,
+        "hardcoded_only_rate": 0.006,
+        "mixed_rate": 0.0298,
+        "phase1_intervention_utility_win3": -0.8796,
+        "projection_effectiveness_score": 0.7143,
+        "autonomy_mean": 0.8053122023809524,
+        "trust_delib_mean": 0.7563880952380952,
+        "guard_utility_mean": 0.5143005952380952,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": 0.62,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      },
+      {
+        "file": "15_mazes_hard_20260426_201351.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.8162,
+        "hardcoded_only_rate": 0.0,
+        "mixed_rate": 0.0,
+        "phase1_intervention_utility_win3": -2.9838,
+        "projection_effectiveness_score": 0.8432,
+        "autonomy_mean": 0.8161367567567567,
+        "trust_delib_mean": 0.7577118918918919,
+        "guard_utility_mean": 0.5180594594594595,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": 0.62,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      },
+      {
+        "file": "15_mazes_hard_20260426_201054.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.7895,
+        "hardcoded_only_rate": 0.0063,
+        "mixed_rate": 0.0168,
+        "phase1_intervention_utility_win3": -0.0601,
+        "projection_effectiveness_score": 0.7032,
+        "autonomy_mean": 0.8027237894736842,
+        "trust_delib_mean": 0.7968846315789473,
+        "guard_utility_mean": 0.5139157894736842,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": 0.62,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      }
+    ],
+    "ood_rows": [
+      {
+        "file": "15_mazes_very_hard_20260426_195515.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.782,
+        "hardcoded_only_rate": 0.0056,
+        "mixed_rate": 0.0218,
+        "phase1_intervention_utility_win3": -1.4712,
+        "projection_effectiveness_score": 0.7257,
+        "autonomy_mean": 0.800223558368495,
+        "trust_delib_mean": 0.6794135724331927,
+        "guard_utility_mean": 0.5000232067510548,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": 0.62,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      },
+      {
+        "file": "15_mazes_very_hard_20260426_193009.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.7414,
+        "hardcoded_only_rate": 0.0146,
+        "mixed_rate": 0.0735,
+        "phase1_intervention_utility_win3": -1.0389,
+        "projection_effectiveness_score": 0.6386,
+        "autonomy_mean": 0.7758679391504019,
+        "trust_delib_mean": 0.6654549368541907,
+        "guard_utility_mean": 0.49250172215843857,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": 0.62,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      },
+      {
+        "file": "15_mazes_very_hard_20260426_180941.txt",
+        "status": "PASS",
+        "warnings": 0,
+        "failures": 0,
+        "learned_only_rate": 0.7535,
+        "hardcoded_only_rate": 0.0125,
+        "mixed_rate": 0.0596,
+        "phase1_intervention_utility_win3": -2.8865,
+        "projection_effectiveness_score": 0.7652,
+        "autonomy_mean": 0.7350080332409972,
+        "trust_delib_mean": 0.5,
+        "guard_utility_mean": 0.49077977839335185,
+        "phase_count": 7,
+        "micro_count": 18,
+        "promotion_target_max": 0.62,
+        "base_promotion_target_last": 0.62,
+        "drift": false
+      }
+    ],
+    "id_group": {
+      "autonomy_mean": 0.8080575828704645,
+      "trust_delib_mean": 0.7703282062363114,
+      "guard_utility_mean": 0.515425281390413,
+      "learned_only_rate_mean": 0.8020999999999999,
+      "hardcoded_only_rate_mean": 0.0041,
+      "mixed_rate_mean": 0.015533333333333335,
+      "phase1_intervention_utility_win3_mean": -1.3078333333333334,
+      "projection_effectiveness_score_mean": 0.7535666666666666,
+      "status_counts": {
+        "PASS": 3
+      },
+      "drift_count": 0,
+      "total_warnings": 0,
+      "total_failures": 0,
+      "mean_phase_count": 7.0,
+      "mean_micro_count": 18.0
+    },
+    "ood_group": {
+      "autonomy_mean": 0.770366510253298,
+      "trust_delib_mean": 0.6149561697624611,
+      "guard_utility_mean": 0.49443490243428173,
+      "learned_only_rate_mean": 0.7589666666666667,
+      "hardcoded_only_rate_mean": 0.0109,
+      "mixed_rate_mean": 0.05163333333333333,
+      "phase1_intervention_utility_win3_mean": -1.7988666666666664,
+      "projection_effectiveness_score_mean": 0.7098333333333334,
+      "status_counts": {
+        "PASS": 3
+      },
+      "drift_count": 0,
+      "total_warnings": 0,
+      "total_failures": 0,
+      "mean_phase_count": 7.0,
+      "mean_micro_count": 18.0
+    },
+    "deltas_id_minus_ood": {
+      "autonomy_mean": 0.03769107261716642,
+      "trust_delib_mean": 0.15537203647385023,
+      "guard_utility_mean": 0.02099037895613126,
+      "learned_only_rate_mean": 0.043133333333333246,
+      "hardcoded_only_rate_mean": -0.0068,
+      "mixed_rate_mean": -0.03609999999999999,
+      "phase1_intervention_utility_win3_mean": 0.491033333333333,
+      "projection_effectiveness_score_mean": 0.04373333333333318
+    },
+    "regressions": {
+      "status_not_all_pass": false,
+      "drift_detected": false,
+      "trust_drop_exceeds_threshold": true,
+      "autonomy_drop_exceeds_threshold": false,
+      "guard_drop_exceeds_threshold": false
+    }
+  },
+  "progression": {
+    "generated_at_utc": "2026-04-27T01:49:38.047017+00:00",
+    "pattern": "Log Dump/15_mazes_*.txt",
+    "count": 15,
+    "files": [
+      "15_mazes_hard_20260426_201929.txt",
+      "15_mazes_hard_20260426_201351.txt",
+      "15_mazes_hard_20260426_201054.txt",
+      "15_mazes_very_hard_20260426_195515.txt",
+      "15_mazes_very_hard_20260426_193009.txt",
+      "15_mazes_very_hard_20260426_180941.txt",
+      "15_mazes_hard_20260426_172017.txt",
+      "15_mazes_hard_20260426_171051.txt",
+      "15_mazes_hard_20260426_165736.txt",
+      "15_mazes_hard_20260426_164748.txt",
+      "15_mazes_hard_20260426_163558.txt",
+      "15_mazes_hard_20260426_162447.txt",
+      "15_mazes_hard_20260426_162032.txt",
+      "15_mazes_hard_20260426_161338.txt",
+      "15_mazes_hard_20260426_160912.txt"
+    ],
+    "rows": [
+      {
+        "file": "15_mazes_hard_20260426_201929.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_201351.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_201054.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_very_hard_20260426_195515.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_very_hard_20260426_193009.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_very_hard_20260426_180941.txt",
+        "phase_count": 7,
+        "micro_count": 18,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_172017.txt",
+        "phase_count": 5,
+        "micro_count": 12,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_171051.txt",
+        "phase_count": 5,
+        "micro_count": 12,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_165736.txt",
+        "phase_count": 5,
+        "micro_count": 12,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_164748.txt",
+        "phase_count": 5,
+        "micro_count": 12,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_163558.txt",
+        "phase_count": 5,
+        "micro_count": 12,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_162447.txt",
+        "phase_count": 4,
+        "micro_count": 11,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_162032.txt",
+        "phase_count": 4,
+        "micro_count": 11,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_161338.txt",
+        "phase_count": 4,
+        "micro_count": 10,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      },
+      {
+        "file": "15_mazes_hard_20260426_160912.txt",
+        "phase_count": 4,
+        "micro_count": 10,
+        "active_target": null,
+        "phase_set_signature": null,
+        "issues": []
+      }
+    ],
+    "summary": {
+      "files_checked": 15,
+      "files_with_issues": 0,
+      "issues_total": 0,
+      "status": "PASS"
+    }
+  }
+}
