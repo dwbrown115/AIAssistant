@@ -372,6 +372,7 @@ class AdaptiveKernelPhaseProgram:
         if state.observations == 1:
             self._maybe_rebase_weights_for_stage_entry(stage)
         self._adapt_weights(state)
+        self._align_weights_to_objectives_under_deficit(state=state, stage=stage)
         state.score_ema = self._composite_score(state)
         allow_target_raise = True
         if self.target_raise_only_when_score_ready and state.observations >= effective_min_observations:
@@ -655,6 +656,41 @@ class AdaptiveKernelPhaseProgram:
         for key in list(self.adaptive_weights.keys()):
             self.adaptive_weights[key] = self.adaptive_weights[key] / norm
 
+    def _align_weights_to_objectives_under_deficit(
+        self,
+        *,
+        state: AdaptivePhaseRuntime,
+        stage: MicroStageSpec,
+    ) -> None:
+        """Nudge adaptive weights toward stage objectives when score lags target.
+
+        Entry-time rebasing can drift over long windows; this bounded correction
+        keeps late-stage phases from stalling in transfer-heavy equilibria.
+        """
+        if not self.weight_rebase_enable:
+            return
+        deficit = max(0.0, float(state.promotion_target) - float(state.score_ema))
+        if deficit <= 0.0:
+            return
+        target = self._rebase_weight_target(tuple(stage.objective_signals or ()))
+        mode_token = str(getattr(stage, "mode", "") or "").strip().lower()
+        align_rate = 0.03 + min(0.16, deficit * 0.90)
+        if "control" in mode_token:
+            align_rate *= 1.2
+        align_rate = _clamp(align_rate, 0.02, 0.22)
+        for key in tuple(self.adaptive_weights.keys()):
+            current = float(self.adaptive_weights.get(key, 0.0))
+            desired = float(target.get(key, current))
+            self.adaptive_weights[key] = _clamp(
+                ((1.0 - align_rate) * current) + (align_rate * desired),
+                0.02,
+                0.60,
+            )
+        norm = sum(self.adaptive_weights.values())
+        if norm > 0.0:
+            for key in tuple(self.adaptive_weights.keys()):
+                self.adaptive_weights[key] = self.adaptive_weights[key] / norm
+
     def snapshot(self) -> dict[str, object]:
         phases: list[dict[str, object]] = []
         completed_phase_count = 0
@@ -856,7 +892,7 @@ class AdaptiveKernelPhaseProgram:
         return True
 
 
-def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+def build_exit_goal_capability_and_ouch_readiness_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     def _stage(
         stage_id: str,
         label: str,
@@ -889,41 +925,43 @@ def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
             env_prefixes=tuple((str(prefix).strip() for prefix in tuple(env_prefixes) if str(prefix).strip())),
         )
 
-    mvt0_instrumentation_targets = (
+    egc0_visibility_targets = (
         "adaptive_controller",
         "parallel_reasoning_engine",
         "governance_orchestrator",
+        "learned_autonomy_controller",
+    )
+    egc1_pursuit_targets = (
+        "learned_autonomy_controller",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "organism_control",
+        "maze_agent",
+    )
+    egc2_rollback_targets = (
+        "parallel_reasoning_engine",
+        "learned_autonomy_controller",
+        "adaptive_controller",
+        "organism_control",
+        "maze_agent",
+        "governance_orchestrator",
+    )
+    egc3_arbitration_targets = (
+        "learned_autonomy_controller",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "organism_control",
+        "maze_agent",
         "causal_counterfactual_planner",
-    )
-    mvt1_routing_targets = (
-        "learned_autonomy_controller",
-        "parallel_reasoning_engine",
-        "adaptive_controller",
-        "organism_control",
-        "maze_agent",
-    )
-    mvt2_intervention_targets = (
-        "parallel_reasoning_engine",
-        "learned_autonomy_controller",
-        "adaptive_controller",
-        "organism_control",
-        "maze_agent",
         "governance_orchestrator",
     )
-    mvt3_memory_targets = (
+    egc4_ouch_targets = (
         "learned_autonomy_controller",
         "adaptive_controller",
-        "organism_control",
-        "maze_agent",
-        "causal_counterfactual_planner",
-    )
-    mvt4_override_targets = (
         "parallel_reasoning_engine",
-        "learned_autonomy_controller",
-        "adaptive_controller",
         "governance_orchestrator",
     )
-    mvt5_validation_targets = (
+    egc5_validation_targets = (
         "governance_orchestrator",
         "parallel_reasoning_engine",
         "adaptive_controller",
@@ -933,193 +971,185 @@ def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
 
     return (
         AdaptivePhaseSpec(
-            phase_id="phase_mvt0_instrumentation_and_gate_reliability",
-            label="Phase MVT0 - Instrumentation and Gate Reliability",
-            capability="stabilize parser/gate telemetry and intervention taxonomy before behavior tuning",
-            module_id="mvt0_instrumentation_and_gate_reliability",
+            phase_id="phase_egc0_instrumentation_and_behavioral_visibility",
+            label="Phase EGC0 - Instrumentation and Behavioral Visibility",
+            capability="expose directional intent, contradiction tags, and pursuit stability metrics",
+            module_id="egc0_instrumentation_and_behavioral_visibility",
             micro_stages=(
                 _stage(
-                    "mvt0.m1_preflight_parser_hardening",
-                    "MVT0.1 Preflight parser hardening",
+                    "egc0.m1_directional_intent_telemetry",
+                    "EGC0.1 Directional intent telemetry",
                     mode="integrate",
-                    module_targets=mvt0_instrumentation_targets,
+                    module_targets=egc0_visibility_targets,
                     objective_signals=("integration_quality", "stability", "safety"),
                     min_observations=56,
                 ),
                 _stage(
-                    "mvt0.m2_intervention_taxonomy_lock",
-                    "MVT0.2 Intervention taxonomy lock",
+                    "egc0.m2_contradiction_and_reacquire_tags",
+                    "EGC0.2 Contradiction and reacquire tags",
                     mode="control_integrate",
-                    module_targets=mvt0_instrumentation_targets,
+                    module_targets=egc0_visibility_targets,
                     objective_signals=("integration_quality", "safety", "introspection_gain"),
                     min_observations=72,
                 ),
                 _stage(
-                    "mvt0.m3_reasoning_conf_signal_enable",
-                    "MVT0.3 Reasoning confidence signal enable",
+                    "egc0.m3_pursuit_window_metrics",
+                    "EGC0.3 Pursuit window metrics",
                     mode="control_integrate",
-                    module_targets=mvt0_instrumentation_targets,
-                    objective_signals=("integration_quality", "stability", "transfer"),
+                    module_targets=egc0_visibility_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
                     min_observations=84,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_mvt1_mv_to_learned_routing_bias_lift",
-            label="Phase MVT1 - MV to Learned Routing Bias Lift",
-            capability="raise learned-path MV routing share while reducing unknown and mixed routing leakage",
-            module_id="mvt1_mv_to_learned_routing_bias_lift",
+            phase_id="phase_egc1_provisional_directional_pursuit_capability",
+            label="Phase EGC1 - Provisional Directional Pursuit Capability",
+            capability="blend MV evidence with spatial memory to stabilize early directional pursuit",
+            module_id="egc1_provisional_directional_pursuit_capability",
             micro_stages=(
                 _stage(
-                    "mvt1.m1_mv_prior_weight_rebalance",
-                    "MVT1.1 MV prior weight rebalance",
+                    "egc1.m1_latent_goal_vector_blend",
+                    "EGC1.1 Latent goal vector blend",
                     mode="integrate",
-                    module_targets=mvt1_routing_targets,
+                    module_targets=egc1_pursuit_targets,
                     objective_signals=("integration_quality", "transfer", "stability"),
                     min_observations=76,
                 ),
                 _stage(
-                    "mvt1.m2_mv_disagreement_dynamic_relief",
-                    "MVT1.2 MV disagreement dynamic relief",
+                    "egc1.m2_pursuit_confidence_ema",
+                    "EGC1.2 Pursuit confidence EMA",
                     mode="integrate",
-                    module_targets=mvt1_routing_targets,
+                    module_targets=egc1_pursuit_targets,
                     objective_signals=("integration_quality", "transfer", "safety"),
                     min_observations=88,
                 ),
                 _stage(
-                    "mvt1.m3_objective_evidence_quality_gate",
-                    "MVT1.3 Objective evidence quality gate",
+                    "egc1.m3_soft_entry_gate",
+                    "EGC1.3 Soft entry gate",
                     mode="control_integrate",
-                    module_targets=mvt1_routing_targets,
+                    module_targets=egc1_pursuit_targets,
                     objective_signals=("integration_quality", "safety", "introspection_gain"),
                     min_observations=100,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_mvt2_intervention_rate_compression_soft_first",
-            label="Phase MVT2 - Intervention Rate Compression (Soft-First)",
-            capability="decrease intervention and objective overrides by exhausting learned soft substitutions first",
-            module_id="mvt2_intervention_rate_compression_soft_first",
+            phase_id="phase_egc2_contradiction_recovery_and_rollback",
+            label="Phase EGC2 - Contradiction Recovery and Rollback",
+            capability="rollback and reacquire directional pursuit under contradiction pressure",
+            module_id="egc2_contradiction_recovery_and_rollback",
             micro_stages=(
                 _stage(
-                    "mvt2.m1_soft_substitution_before_override",
-                    "MVT2.1 Soft substitution before override",
+                    "egc2.m1_rollback_on_evidence_break",
+                    "EGC2.1 Rollback on evidence break",
                     mode="control_integrate",
-                    module_targets=mvt2_intervention_targets,
+                    module_targets=egc2_rollback_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
                     min_observations=92,
                 ),
                 _stage(
-                    "mvt2.m2_override_budget_strictness_tuning",
-                    "MVT2.2 Override budget strictness tuning",
+                    "egc2.m2_reacquisition_cooldown",
+                    "EGC2.2 Reacquisition cooldown",
                     mode="control_integrate",
-                    module_targets=mvt2_intervention_targets,
-                    objective_signals=("integration_quality", "safety", "transfer"),
+                    module_targets=egc2_rollback_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
                     min_observations=104,
                 ),
                 _stage(
-                    "mvt2.m3_unresolved_context_override_guard",
-                    "MVT2.3 Unresolved-context override guard",
+                    "egc2.m3_contextual_debt_repayment",
+                    "EGC2.3 Contextual debt repayment",
                     mode="control_integrate",
-                    module_targets=mvt2_intervention_targets,
+                    module_targets=egc2_rollback_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
                     min_observations=116,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_mvt3_memory_driven_learned_selection_lift",
-            label="Phase MVT3 - Memory-Driven Learned Selection Lift",
-            capability="increase learned-only selection through stronger memory quality and uncertainty feedback integration",
-            module_id="mvt3_memory_driven_learned_selection_lift",
+            phase_id="phase_egc3_corridor_and_direction_arbitration",
+            label="Phase EGC3 - Corridor and Direction Arbitration",
+            capability="blend corridor escape and directional pursuit with memory-aware arbitration",
+            module_id="egc3_corridor_and_direction_arbitration",
             micro_stages=(
                 _stage(
-                    "mvt3.m1_cause_effect_priority_lift",
-                    "MVT3.1 Cause-effect priority lift",
+                    "egc3.m1_corridor_direction_blend",
+                    "EGC3.1 Corridor direction blend",
                     mode="integrate",
-                    module_targets=mvt3_memory_targets,
+                    module_targets=egc3_arbitration_targets,
                     objective_signals=("integration_quality", "transfer", "stability"),
-                    min_observations=100,
+                    min_observations=108,
                 ),
                 _stage(
-                    "mvt3.m2_stm_to_semantic_promotion_quality_tuning",
-                    "MVT3.2 STM to semantic promotion quality tuning",
+                    "egc3.m2_memory_aversive_prior",
+                    "EGC3.2 Memory aversive prior",
                     mode="integrate",
-                    module_targets=mvt3_memory_targets,
+                    module_targets=egc3_arbitration_targets,
                     objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=112,
-                ),
-                _stage(
-                    "mvt3.m3_pattern_uncertainty_feedback_loop",
-                    "MVT3.3 Pattern uncertainty feedback loop",
-                    mode="control_integrate",
-                    module_targets=mvt3_memory_targets,
-                    objective_signals=("integration_quality", "stability", "introspection_gain"),
-                    min_observations=124,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_mvt4_objective_override_near_invisibility",
-            label="Phase MVT4 - Objective Override Near-Invisibility",
-            capability="push objective override behavior toward rare edge cases while preserving safety certainty",
-            module_id="mvt4_objective_override_near_invisibility",
-            micro_stages=(
-                _stage(
-                    "mvt4.m1_objective_excitement_soft_capture_refine",
-                    "MVT4.1 Objective excitement soft-capture refine",
-                    mode="control_integrate",
-                    module_targets=mvt4_override_targets,
-                    objective_signals=("integration_quality", "safety", "transfer"),
-                    min_observations=110,
-                ),
-                _stage(
-                    "mvt4.m2_terminal_and_frontier_guard_coherence",
-                    "MVT4.2 Terminal and frontier guard coherence",
-                    mode="control_integrate",
-                    module_targets=mvt4_override_targets,
-                    objective_signals=("integration_quality", "safety", "stability"),
                     min_observations=122,
                 ),
                 _stage(
-                    "mvt4.m3_phase_policy_cap_for_hardcoded_channel",
-                    "MVT4.3 Phase policy cap for hardcoded channel",
+                    "egc3.m3_objective_pressure_ramp_smoothing",
+                    "EGC3.3 Objective pressure ramp smoothing",
                     mode="control_integrate",
-                    module_targets=mvt4_override_targets,
-                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    module_targets=egc3_arbitration_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
                     min_observations=134,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_mvt5_validation_rollout_and_freeze",
-            label="Phase MVT5 - Validation, Rollout, and Freeze",
-            capability="validate targets across hard windows, publish gates, and freeze guarded runtime defaults",
-            module_id="mvt5_validation_rollout_and_freeze",
+            phase_id="phase_egc4_ouch_readiness_training_disabled",
+            label="Phase EGC4 - Ouch Readiness (Training Disabled)",
+            capability="capture ouch-readiness events and training seams while keeping policy actuation disabled",
+            module_id="egc4_ouch_readiness_training_disabled",
             micro_stages=(
                 _stage(
-                    "mvt5.m1_batch_validation_matrix",
-                    "MVT5.1 Batch validation matrix",
-                    mode="control_integrate",
-                    module_targets=mvt5_validation_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
+                    "egc4.m1_ouch_event_schema_and_buffer",
+                    "EGC4.1 Ouch event schema and buffer",
+                    mode="integrate",
+                    module_targets=egc4_ouch_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
                     min_observations=120,
                 ),
                 _stage(
-                    "mvt5.m2_canonical_report_and_gate_update",
-                    "MVT5.2 Canonical report and gate update",
-                    mode="control_integrate",
-                    module_targets=mvt5_validation_targets,
-                    objective_signals=("integration_quality", "transfer", "stability"),
+                    "egc4.m2_training_interface_stub",
+                    "EGC4.2 Training interface stub",
+                    mode="integrate",
+                    module_targets=egc4_ouch_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
                     min_observations=136,
                 ),
                 _stage(
-                    "mvt5.m3_freeze_and_regression_guard",
-                    "MVT5.3 Freeze and regression guard",
+                    "egc4.m3_safety_fences_for_future_activation",
+                    "EGC4.3 Safety fences for future activation",
                     mode="control_integrate",
-                    module_targets=mvt5_validation_targets,
+                    module_targets=egc4_ouch_targets,
                     objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=152,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_egc5_validation_and_rollout",
+            label="Phase EGC5 - Validation and Rollout",
+            capability="validate directional pursuit gains and publish canonical rollout metrics",
+            module_id="egc5_validation_and_rollout",
+            micro_stages=(
+                _stage(
+                    "egc5.m1_validation_matrix",
+                    "EGC5.1 Validation matrix",
+                    mode="control_integrate",
+                    module_targets=egc5_validation_targets,
+                    objective_signals=("integration_quality", "transfer", "safety"),
+                    min_observations=136,
+                ),
+                _stage(
+                    "egc5.m2_report_additions",
+                    "EGC5.2 Report additions",
+                    mode="control_integrate",
+                    module_targets=egc5_validation_targets,
+                    objective_signals=("integration_quality", "stability", "safety", "introspection_gain"),
                     min_observations=152,
                 ),
             ),
@@ -1127,11 +1157,16 @@ def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     )
 
 
+def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+    """Compatibility alias retained for migrated callers."""
+    return build_exit_goal_capability_and_ouch_readiness_phase_specs()
+
+
 def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     """Compatibility alias retained for runtime callers migrated from older plans."""
-    return build_mv_localization_phase_specs()
+    return build_exit_goal_capability_and_ouch_readiness_phase_specs()
 
 
 def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     """Compatibility alias kept for existing callers in the runtime bootstrap path."""
-    return build_mv_localization_phase_specs()
+    return build_exit_goal_capability_and_ouch_readiness_phase_specs()

@@ -18,7 +18,7 @@ from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
 from runtime_kernel.adaptive_controller import AdaptiveNeuralController
-from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_mv_localization_phase_specs
+from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_exit_goal_capability_and_ouch_readiness_phase_specs
 from runtime_kernel.governance_orchestrator import GovernanceOrchestrator
 from runtime_kernel.kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
 from runtime_kernel.learned_autonomy_controller import LearnedAutonomyController
@@ -388,8 +388,8 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='MV integration tuning phase program: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (MVT Phase Plan V1)')
+        self.kernel_phase_program_status_var = tk.StringVar(value='Exit-goal capability + ouch readiness phase program: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
@@ -593,6 +593,7 @@ class AIAssistantApp:
         self.prediction_reward_wrong_learning = float(os.getenv('PREDICTION_WRONG_LEARNING_REWARD', '0.8'))
         self.prediction_wrong_learning_credit_scale = min(1.0, max(0.0, float(os.getenv('PREDICTION_WRONG_LEARNING_CREDIT_SCALE', '0.15'))))
         self.constructive_reinforcement_only = os.getenv('CONSTRUCTIVE_REINFORCEMENT_ONLY', '1') == '1'
+        self.goal_directed_reward_only = os.getenv('GOAL_DIRECTED_REWARD_ONLY', '1') == '1'
         self.constructive_learning_credit_scale = max(0.0, min(1.0, float(os.getenv('CONSTRUCTIVE_LEARNING_CREDIT_SCALE', '0.08'))))
         self.constructive_learning_credit_cap = max(0.0, float(os.getenv('CONSTRUCTIVE_LEARNING_CREDIT_CAP', '12.0')))
         self.constructive_stagnation_credit = max(0.0, float(os.getenv('CONSTRUCTIVE_STAGNATION_CREDIT', '0.25')))
@@ -760,7 +761,7 @@ class AIAssistantApp:
         self.learned_autonomy_objective_phase_bonus = 0
         self.learned_autonomy_soft_override_scale = 1.0
         self.kernel_phase_program_enable = KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME
-        self.kernel_phase_specs = build_mv_localization_phase_specs() if self.kernel_phase_program_enable else ()
+        self.kernel_phase_specs = build_exit_goal_capability_and_ouch_readiness_phase_specs() if self.kernel_phase_program_enable else ()
         kernel_phase_program_defaults = dict(KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME)
         self.kernel_phase_program = AdaptiveKernelPhaseProgram(
             phase_specs=self.kernel_phase_specs,
@@ -1692,7 +1693,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='MV Integration Tuning Phase Program (MVT V1)', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='Exit Goal Capability + Ouch Readiness (EGC V1)', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -1749,9 +1750,9 @@ class AIAssistantApp:
         toggle_canvas.bind('<Configure>', _sync_toggle_canvas_layout)
 
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='MV integration tuning phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
-            self.kernel_phase_program_status_var.set('MV integration tuning phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MVT Phase Plan V1)')
+            tk.Label(toggle_grid, text='Exit-goal capability + ouch readiness phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
+            self.kernel_phase_program_status_var.set('Exit-goal capability + ouch readiness phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1784,13 +1785,13 @@ class AIAssistantApp:
 
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('MV integration tuning phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MVT Phase Plan V1)')
+            self.kernel_phase_program_status_var.set('Exit-goal capability + ouch readiness phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MVT Phase Plan V1)')
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
         self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', True)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
@@ -1801,7 +1802,7 @@ class AIAssistantApp:
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('MV integration tuning phase program: no phases loaded')
+            self.kernel_phase_program_status_var.set('Exit-goal capability + ouch readiness phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1881,7 +1882,7 @@ class AIAssistantApp:
         challenge_active = bool(challenge_state.get('active', False))
         challenge_remaining = int(challenge_state.get('remaining_steps', 0) or 0)
         runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text},clamp={(1 if clamp_active else 0)}/{clamp_cooldown_remaining},challenge={(1 if challenge_active else 0)}/{challenge_remaining}'
-        self.kernel_phase_program_status_var.set(f'MV integration tuning phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        self.kernel_phase_program_status_var.set(f'Exit-goal capability + ouch readiness phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -5285,7 +5286,7 @@ class AIAssistantApp:
         total_weight = 0.0
         tag_accumulator: dict[str, float] = {}
         risk_tags = {'dead_end_slap', 'dead_end_tip_revisit', 'dead_end_entrance_revisit', 'transition_repeat', 'cycle_pair', 'visible_terminal', 'boxed_corridor', 'immediate_backtrack', 'branch_diversity'}
-        positive_tags = {'novelty_reward', 'visible_open_decision', 'visible_exit', 'frontier_visible', 'junction_visible', 'corridor_verification_mark'}
+        positive_tags = {'goal_progress', 'visible_exit', 'projection_guidance_reward', 'target_capture', 'efficiency_reward', 'fast_solve_treat'}
         query_tags = {tag.strip() for tag in reason_tags if tag and tag.strip()}
         query_has_risk = any((tag in risk_tags for tag in query_tags))
         edge_type = str((details or {}).get('edge_type', '') or '')
@@ -6552,13 +6553,19 @@ class AIAssistantApp:
                         self.recent_forced_corridor_cells.append(next_cell)
                 decision_score = float(selected_breakdown.get('score', 0))
                 progress_delta = int(current_distance - selected_distance)
+                meaningful_progress_gain = bool(
+                    progress_delta > 0
+                    and ((not maze_mode) or (selected_distance < best_distance_seen))
+                )
                 if self.constructive_reinforcement_only:
                     repeat_pressure = max(0, int(selected_breakdown.get('recent_transition_count', 0) or 0) + int(selected_breakdown.get('recent_reverse_transition_count', 0) or 0))
                     unknown_neighbors = max(0, int(selected_breakdown.get('unknown_neighbors', 0) or 0))
-                    progress_credit = max(0.0, -decision_score) if progress_delta > 0 else 0.0
+                    progress_credit = max(0.0, -decision_score) if meaningful_progress_gain else 0.0
                     constructive_learning_credit = min(float(self.constructive_learning_credit_cap), max(0.0, decision_score) * float(self.constructive_learning_credit_scale))
-                    # Only grant non-progress credit for genuinely exploratory, low-repeat steps.
-                    if progress_delta > 0:
+                    # In goal-directed mode, avoid rewarding exploratory non-progress moves.
+                    if self.goal_directed_reward_only:
+                        constructive_credit_scale = 1.0 if meaningful_progress_gain else 0.0
+                    elif progress_delta > 0:
                         constructive_credit_scale = 1.0
                     elif unknown_neighbors > 0 and repeat_pressure <= 0 and no_progress_steps <= 1:
                         constructive_credit_scale = 0.25
@@ -6566,8 +6573,8 @@ class AIAssistantApp:
                         constructive_credit_scale = 0.0
                     stagnation_credit = 0.0
                     reward_signal = progress_credit + (constructive_learning_credit * constructive_credit_scale) + stagnation_credit
-                    penalty_signal = 0.0
-                    outcome_value = reward_signal
+                    penalty_signal = 0.0 if progress_delta > 0 else max(0.0, decision_score)
+                    outcome_value = reward_signal - penalty_signal
                 else:
                     outcome_value = -decision_score
                     reward_signal = max(0.0, -decision_score)
@@ -6584,9 +6591,13 @@ class AIAssistantApp:
                     projection_backtrace_penalty = max(0.0, float(selected_breakdown.get('projection_backward_penalty', 0) or 0))
                     projection_guidance_signal = max(0.0, projection_forward_bonus + projection_escape_bonus - 0.35 * projection_backtrace_penalty)
                     projection_guidance_reward = min(float(self.kernel_projection_reward_max), projection_guidance_signal * float(self.kernel_projection_reward_scale))
-                    if projection_guidance_reward > 0.0:
+                    if projection_guidance_reward > 0.0 and ((not self.goal_directed_reward_only) or meaningful_progress_gain):
                         reward_signal += projection_guidance_reward
                         outcome_value += projection_guidance_reward
+                if self.goal_directed_reward_only and (not meaningful_progress_gain):
+                    reward_signal = 0.0
+                    if outcome_value > 0.0:
+                        outcome_value = 0.0
                 telemetry_decision_score = decision_score
                 telemetry_reward_signal = reward_signal
                 telemetry_penalty_signal = penalty_signal
@@ -6614,21 +6625,24 @@ class AIAssistantApp:
                         if float(selected_breakdown.get(field, 0) or 0) > 0:
                             tags.append(tag)
                 elif outcome_value > 0.01:
-                    if float(selected_breakdown.get('novelty_reward', 0) or 0) > 0:
-                        tags.append('novelty_reward')
-                    if int(selected_breakdown.get('visible_open_decision', 0) or 0) > 0:
-                        tags.append('visible_open_decision')
+                    if meaningful_progress_gain:
+                        tags.append('goal_progress')
                     if int(selected_breakdown.get('visible_exit_corridor', 0) or 0) > 0:
                         tags.append('visible_exit')
-                    if int(selected_breakdown.get('corridor_verification_mark_applied', 0) or 0) > 0:
-                        tags.append('corridor_verification_mark')
-                    if bool(selected_breakdown.get('edge_frontier', False)):
-                        tags.append('frontier_visible')
-                    if bool(selected_breakdown.get('edge_junction', False)):
-                        tags.append('junction_visible')
+                    if not self.goal_directed_reward_only:
+                        if float(selected_breakdown.get('novelty_reward', 0) or 0) > 0:
+                            tags.append('novelty_reward')
+                        if int(selected_breakdown.get('visible_open_decision', 0) or 0) > 0:
+                            tags.append('visible_open_decision')
+                        if int(selected_breakdown.get('corridor_verification_mark_applied', 0) or 0) > 0:
+                            tags.append('corridor_verification_mark')
+                        if bool(selected_breakdown.get('edge_frontier', False)):
+                            tags.append('frontier_visible')
+                        if bool(selected_breakdown.get('edge_junction', False)):
+                            tags.append('junction_visible')
                 if projection_guidance_reward > 0.0:
                     tags.append('projection_guidance_reward')
-                self._record_action_outcome_memory(action_taken=f'MOVE_{selected_move}', outcome_value=outcome_value, reward_signal=reward_signal, penalty_signal=penalty_signal, reason_tags=tags, details={'score': decision_score, 'base_score': selected_breakdown.get('base_score_without_noise', decision_score), 'decision_noise': selected_breakdown.get('decision_noise', 0), 'unknown_neighbors': selected_breakdown.get('unknown_neighbors', 0), 'open_degree': selected_breakdown.get('open_degree', 0), 'frontier_distance': selected_breakdown.get('frontier_distance', 0), 'edge_type': selected_breakdown.get('edge_type', ''), 'corridor_verification_mark_bonus': selected_breakdown.get('corridor_verification_mark_bonus', 0), 'corridor_verification_mark_applied': selected_breakdown.get('corridor_verification_mark_applied', 0), 'corridor_verification_mark_key': selected_breakdown.get('corridor_verification_mark_key', ''), 'hazard_preparedness_penalty': selected_breakdown.get('hazard_preparedness_penalty', 0), 'hazard_preparedness_relative_pressure': selected_breakdown.get('hazard_preparedness_relative_pressure', 0.0), 'spatial_transition_bonus': selected_breakdown.get('spatial_transition_bonus', 0), 'spatial_transition_penalty': selected_breakdown.get('spatial_transition_penalty', 0), 'spatial_branch_risk_penalty': selected_breakdown.get('spatial_branch_risk_penalty', 0), 'spatial_exit_recall_bonus': selected_breakdown.get('spatial_exit_recall_bonus', 0), 'spatial_exit_recall_penalty': selected_breakdown.get('spatial_exit_recall_penalty', 0), 'spatial_exit_progress_norm': selected_breakdown.get('spatial_exit_progress_norm', 0.0), 'projection_guidance_reward': round(projection_guidance_reward, 3), 'adaptive_features': selected_breakdown.get('adaptive_features', []), 'from_cell': list(self.current_player_cell), 'to_cell': list(self._neighbor_for_move(self.current_player_cell, selected_move))}, player_cell=self.current_player_cell)
+                self._record_action_outcome_memory(action_taken=f'MOVE_{selected_move}', outcome_value=outcome_value, reward_signal=reward_signal, penalty_signal=penalty_signal, reason_tags=tags, details={'score': decision_score, 'base_score': selected_breakdown.get('base_score_without_noise', decision_score), 'decision_noise': selected_breakdown.get('decision_noise', 0), 'unknown_neighbors': selected_breakdown.get('unknown_neighbors', 0), 'open_degree': selected_breakdown.get('open_degree', 0), 'frontier_distance': selected_breakdown.get('frontier_distance', 0), 'edge_type': selected_breakdown.get('edge_type', ''), 'corridor_verification_mark_bonus': selected_breakdown.get('corridor_verification_mark_bonus', 0), 'corridor_verification_mark_applied': selected_breakdown.get('corridor_verification_mark_applied', 0), 'corridor_verification_mark_key': selected_breakdown.get('corridor_verification_mark_key', ''), 'hazard_preparedness_penalty': selected_breakdown.get('hazard_preparedness_penalty', 0), 'hazard_preparedness_relative_pressure': selected_breakdown.get('hazard_preparedness_relative_pressure', 0.0), 'spatial_transition_bonus': selected_breakdown.get('spatial_transition_bonus', 0), 'spatial_transition_penalty': selected_breakdown.get('spatial_transition_penalty', 0), 'spatial_branch_risk_penalty': selected_breakdown.get('spatial_branch_risk_penalty', 0), 'spatial_exit_recall_bonus': selected_breakdown.get('spatial_exit_recall_bonus', 0), 'spatial_exit_recall_penalty': selected_breakdown.get('spatial_exit_recall_penalty', 0), 'spatial_exit_progress_norm': selected_breakdown.get('spatial_exit_progress_norm', 0.0), 'projection_guidance_reward': round(projection_guidance_reward, 3), 'meaningful_progress_gain': int(1 if meaningful_progress_gain else 0), 'best_distance_before_step': int(best_distance_seen), 'adaptive_features': selected_breakdown.get('adaptive_features', []), 'from_cell': list(self.current_player_cell), 'to_cell': list(self._neighbor_for_move(self.current_player_cell, selected_move))}, player_cell=self.current_player_cell)
                 self._recent_step_penalties.append(penalty_signal)
             if maze_mode:
                 self._set_player_facing_from_move(selected_move)
@@ -9436,7 +9450,7 @@ class AIAssistantApp:
             self._hazard_preparedness_cache.clear()
         action_to_move = {f'MOVE_{move}': move for move in ['UP', 'DOWN', 'LEFT', 'RIGHT']}
         risk_tags = {'dead_end_slap', 'dead_end_tip_revisit', 'dead_end_entrance_revisit', 'visible_terminal', 'boxed_corridor', 'cycle_pair', 'transition_repeat', 'immediate_backtrack', 'branch_diversity'}
-        positive_tags = {'novelty_reward', 'visible_open_decision', 'visible_exit', 'frontier_visible', 'junction_visible', 'corridor_verification_mark'}
+        positive_tags = {'goal_progress', 'visible_exit', 'projection_guidance_reward', 'target_capture', 'efficiency_reward', 'fast_solve_treat'}
         row_limit = max(16, int(self.hazard_preparedness_window) * 4)
         try:
             with sqlite3.connect(self.memory_db_path) as conn:
@@ -12599,6 +12613,15 @@ class AIAssistantApp:
         effective_bio_opening_bonus = int(round(int(bio_nav['bio_opening_bonus']) * novelty_multiplier))
         effective_bio_novelty_bonus = int(round(int(bio_nav['bio_novelty_bonus']) * novelty_multiplier))
         effective_bio_corridor_flow_bonus = int(round(int(bio_nav['bio_corridor_flow_bonus']) * novelty_multiplier))
+        if self.goal_directed_reward_only:
+            # Freeze exploration-only reward channels once directional pursuit is primary.
+            effective_visible_open_decision = 0
+            effective_edge_frontier = False
+            effective_edge_junction = False
+            effective_endocrine_curiosity_bonus = 0
+            effective_bio_opening_bonus = 0
+            effective_bio_novelty_bonus = 0
+            effective_bio_corridor_flow_bonus = 0
         corridor_verification_mark_bonus = 0
         corridor_verification_mark_applied = 0
         corridor_verification_mark_repeat_blocked = 0
@@ -12687,7 +12710,9 @@ class AIAssistantApp:
         score += move_personality_bias
         score += decision_noise
         novelty_reward = int(round(unknown_neighbors * 2 * novelty_reward_scale))
-        if dead_end_risk_depth > 0 or corridor_suppression_active:
+        if self.goal_directed_reward_only:
+            novelty_reward = 0
+        elif dead_end_risk_depth > 0 or corridor_suppression_active:
             novelty_reward = 0
         elif local_map_authority_scale > 0.0:
             novelty_reward = int(round(novelty_reward * novelty_multiplier))

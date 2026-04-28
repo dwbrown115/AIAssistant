@@ -14,16 +14,16 @@ DEFAULT_KERNEL_PHASE_PROGRAM_KWARGS = {
     "target_adapt_rate": 0.08,
     "weight_adapt_rate": 0.06,
     "promotion_target_hard_max": 0.90,
-    "early_target_cap_enable": True,
-    "early_target_cap": 0.58,
+    "early_target_cap_enable": False,
+    "early_target_cap": 0.62,
     "early_target_cap_phase_count": 1,
     "early_target_cap_micro_max": 3,
     "weight_rebase_enable": True,
     "weight_rebase_alpha": 0.68,
     "weight_rebase_objective_boost": 0.30,
-    "warmup_target_dampener_enable": True,
+    "warmup_target_dampener_enable": False,
     "warmup_target_dampener_observations": 96,
-    "warmup_target_dampener_max_reduction": 0.14,
+    "warmup_target_dampener_max_reduction": 0.0,
     "target_raise_only_when_score_ready": True,
     "target_freeze_after_observation_gate": True,
     "target_deficit_relief_rate": 0.0,
@@ -70,7 +70,7 @@ DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP = {
 }
 DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR = "BALANCED"
 DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS = (
-    "phase_mvt0_instrumentation_and_gate_reliability",
+    "phase_egc0_instrumentation_and_behavioral_visibility",
 )
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER = 0.72
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS = 28
@@ -1337,7 +1337,7 @@ def build_kernel_phase_step_context(
             challenge_reason = "challenge_horizon_complete"
             challenge_state["last_reason"] = challenge_reason
 
-    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 5 and str(stage_id) == "mvt5.m3_freeze_and_regression_guard":
+    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 5 and str(stage_id) == "egc5.m2_report_additions":
         safety_signal = _clip(homeostasis.get("safety", 0.0))
         start_allowed = (
             (not clamp_active)
