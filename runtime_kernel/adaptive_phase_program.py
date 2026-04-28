@@ -856,7 +856,7 @@ class AdaptiveKernelPhaseProgram:
         return True
 
 
-def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     def _stage(
         stage_id: str,
         label: str,
@@ -889,44 +889,41 @@ def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
             env_prefixes=tuple((str(prefix).strip() for prefix in tuple(env_prefixes) if str(prefix).strip())),
         )
 
-    common_module_targets = (
+    mvt0_instrumentation_targets = (
+        "adaptive_controller",
+        "parallel_reasoning_engine",
+        "governance_orchestrator",
+        "causal_counterfactual_planner",
+    )
+    mvt1_routing_targets = (
         "learned_autonomy_controller",
         "parallel_reasoning_engine",
+        "adaptive_controller",
+        "organism_control",
+        "maze_agent",
+    )
+    mvt2_intervention_targets = (
+        "parallel_reasoning_engine",
+        "learned_autonomy_controller",
+        "adaptive_controller",
+        "organism_control",
+        "maze_agent",
+        "governance_orchestrator",
+    )
+    mvt3_memory_targets = (
+        "learned_autonomy_controller",
         "adaptive_controller",
         "organism_control",
         "maze_agent",
         "causal_counterfactual_planner",
-        "governance_orchestrator",
     )
-    trust_calibration_targets = (
+    mvt4_override_targets = (
+        "parallel_reasoning_engine",
         "learned_autonomy_controller",
-        "parallel_reasoning_engine",
-        "governance_orchestrator",
-    )
-    trust_context_targets = (
-        "parallel_reasoning_engine",
         "adaptive_controller",
         "governance_orchestrator",
     )
-    trust_arbitration_targets = (
-        "learned_autonomy_controller",
-        "parallel_reasoning_engine",
-        "governance_orchestrator",
-    )
-    trust_intervention_targets = (
-        "parallel_reasoning_engine",
-        "learned_autonomy_controller",
-        "organism_control",
-        "maze_agent",
-        "governance_orchestrator",
-    )
-    trust_ood_targets = (
-        "organism_control",
-        "maze_agent",
-        "parallel_reasoning_engine",
-        "governance_orchestrator",
-    )
-    trust_gate_targets = (
+    mvt5_validation_targets = (
         "governance_orchestrator",
         "parallel_reasoning_engine",
         "adaptive_controller",
@@ -936,232 +933,205 @@ def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
 
     return (
         AdaptivePhaseSpec(
-            phase_id="phase_tl0_baseline_lock_trust_contract",
-            label="Phase TL0 - Baseline Lock + Trust Contract",
-            capability="freeze baseline trust envelope, lock trust contract schema, and preserve canonical source-of-truth",
-            module_id="tl0_baseline_lock_trust_contract",
+            phase_id="phase_mvt0_instrumentation_and_gate_reliability",
+            label="Phase MVT0 - Instrumentation and Gate Reliability",
+            capability="stabilize parser/gate telemetry and intervention taxonomy before behavior tuning",
+            module_id="mvt0_instrumentation_and_gate_reliability",
             micro_stages=(
                 _stage(
-                    "tl0.m1_baseline_pack_lock",
-                    "TL0.1 Baseline pack lock",
+                    "mvt0.m1_preflight_parser_hardening",
+                    "MVT0.1 Preflight parser hardening",
                     mode="integrate",
-                    module_targets=common_module_targets,
+                    module_targets=mvt0_instrumentation_targets,
                     objective_signals=("integration_quality", "stability", "safety"),
                     min_observations=56,
                 ),
                 _stage(
-                    "tl0.m2_trust_contract_schema",
-                    "TL0.2 Trust contract schema",
+                    "mvt0.m2_intervention_taxonomy_lock",
+                    "MVT0.2 Intervention taxonomy lock",
                     mode="control_integrate",
-                    module_targets=common_module_targets,
+                    module_targets=mvt0_instrumentation_targets,
                     objective_signals=("integration_quality", "safety", "introspection_gain"),
                     min_observations=72,
                 ),
                 _stage(
-                    "tl0.m3_reporting_contract_lock",
-                    "TL0.3 Reporting contract lock",
+                    "mvt0.m3_reasoning_conf_signal_enable",
+                    "MVT0.3 Reasoning confidence signal enable",
                     mode="control_integrate",
-                    module_targets=common_module_targets,
-                    objective_signals=("integration_quality", "stability", "safety"),
+                    module_targets=mvt0_instrumentation_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
                     min_observations=84,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_tl1_calibration_trust_core",
-            label="Phase TL1 - Calibration Trust Core",
-            capability="shift trust updates to reliability-calibration outcomes while preserving backward telemetry compatibility",
-            module_id="tl1_calibration_trust_core",
+            phase_id="phase_mvt1_mv_to_learned_routing_bias_lift",
+            label="Phase MVT1 - MV to Learned Routing Bias Lift",
+            capability="raise learned-path MV routing share while reducing unknown and mixed routing leakage",
+            module_id="mvt1_mv_to_learned_routing_bias_lift",
             micro_stages=(
                 _stage(
-                    "tl1.m1_outcome_label_contract",
-                    "TL1.1 Outcome label contract",
+                    "mvt1.m1_mv_prior_weight_rebalance",
+                    "MVT1.1 MV prior weight rebalance",
                     mode="integrate",
-                    module_targets=trust_calibration_targets,
-                    objective_signals=("integration_quality", "stability", "safety"),
-                    min_observations=64,
-                ),
-                _stage(
-                    "tl1.m2_calibration_scoring_update",
-                    "TL1.2 Calibration scoring update",
-                    mode="integrate",
-                    module_targets=trust_calibration_targets,
-                    objective_signals=("integration_quality", "stability", "transfer"),
+                    module_targets=mvt1_routing_targets,
+                    objective_signals=("integration_quality", "transfer", "stability"),
                     min_observations=76,
                 ),
                 _stage(
-                    "tl1.m3_compat_telemetry_bridge",
-                    "TL1.3 Compatibility telemetry bridge",
-                    mode="control_integrate",
-                    module_targets=trust_calibration_targets,
-                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    "mvt1.m2_mv_disagreement_dynamic_relief",
+                    "MVT1.2 MV disagreement dynamic relief",
+                    mode="integrate",
+                    module_targets=mvt1_routing_targets,
+                    objective_signals=("integration_quality", "transfer", "safety"),
                     min_observations=88,
                 ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_tl2_context_conditioned_reliability",
-            label="Phase TL2 - Context-Conditioned Reliability",
-            capability="learn per-context trust reliability and blend it with global trust for robust arbitration",
-            module_id="tl2_context_conditioned_reliability",
-            micro_stages=(
                 _stage(
-                    "tl2.m1_context_bucket_model",
-                    "TL2.1 Context bucket model",
-                    mode="integrate",
-                    module_targets=trust_context_targets,
-                    objective_signals=("integration_quality", "transfer", "stability"),
-                    min_observations=84,
-                ),
-                _stage(
-                    "tl2.m2_context_trust_memory",
-                    "TL2.2 Context trust memory",
-                    mode="integrate",
-                    module_targets=trust_context_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=96,
-                ),
-                _stage(
-                    "tl2.m3_global_context_blend",
-                    "TL2.3 Global/context blend",
+                    "mvt1.m3_objective_evidence_quality_gate",
+                    "MVT1.3 Objective evidence quality gate",
                     mode="control_integrate",
-                    module_targets=trust_context_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=108,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_tl3_soft_arbitration_refinement",
-            label="Phase TL3 - Soft Arbitration Refinement",
-            capability="use trust-margin-sensitive arbitration with smoothing and anti-oscillation protection",
-            module_id="tl3_soft_arbitration_refinement",
-            micro_stages=(
-                _stage(
-                    "tl3.m1_margin_sensitive_weighting",
-                    "TL3.1 Margin-sensitive weighting",
-                    mode="integrate",
-                    module_targets=trust_arbitration_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=96,
-                ),
-                _stage(
-                    "tl3.m2_probe_policy_smoothing",
-                    "TL3.2 Probe policy smoothing",
-                    mode="integrate",
-                    module_targets=trust_arbitration_targets,
-                    objective_signals=("integration_quality", "stability", "safety"),
-                    min_observations=108,
-                ),
-                _stage(
-                    "tl3.m3_oscillation_guard_for_arbitration",
-                    "TL3.3 Oscillation guard for arbitration",
-                    mode="control_integrate",
-                    module_targets=trust_arbitration_targets,
+                    module_targets=mvt1_routing_targets,
                     objective_signals=("integration_quality", "safety", "introspection_gain"),
-                    min_observations=120,
+                    min_observations=100,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_tl4_intervention_outcome_learning",
-            label="Phase TL4 - Intervention-Outcome Learning",
-            capability="use intervention aftermath to supervise trust and fuse helpfulness labels into trust updates",
-            module_id="tl4_intervention_outcome_learning",
+            phase_id="phase_mvt2_intervention_rate_compression_soft_first",
+            label="Phase MVT2 - Intervention Rate Compression (Soft-First)",
+            capability="decrease intervention and objective overrides by exhausting learned soft substitutions first",
+            module_id="mvt2_intervention_rate_compression_soft_first",
             micro_stages=(
                 _stage(
-                    "tl4.m1_intervention_outcome_capture",
-                    "TL4.1 Intervention outcome capture",
-                    mode="integrate",
-                    module_targets=trust_intervention_targets,
-                    objective_signals=("integration_quality", "transfer", "stability"),
+                    "mvt2.m1_soft_substitution_before_override",
+                    "MVT2.1 Soft substitution before override",
+                    mode="control_integrate",
+                    module_targets=mvt2_intervention_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=92,
+                ),
+                _stage(
+                    "mvt2.m2_override_budget_strictness_tuning",
+                    "MVT2.2 Override budget strictness tuning",
+                    mode="control_integrate",
+                    module_targets=mvt2_intervention_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
                     min_observations=104,
                 ),
                 _stage(
-                    "tl4.m2_helpful_vs_nonhelpful_labeling",
-                    "TL4.2 Helpful/nonhelpful labeling",
-                    mode="integrate",
-                    module_targets=trust_intervention_targets,
-                    objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=118,
-                ),
-                _stage(
-                    "tl4.m3_trust_feedback_fusion",
-                    "TL4.3 Trust feedback fusion",
+                    "mvt2.m3_unresolved_context_override_guard",
+                    "MVT2.3 Unresolved-context override guard",
                     mode="control_integrate",
-                    module_targets=trust_intervention_targets,
+                    module_targets=mvt2_intervention_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=132,
+                    min_observations=116,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_tl5_ood_trust_curriculum",
-            label="Phase TL5 - OOD Trust Curriculum",
-            capability="progress trust validation from near-OOD to far-OOD under guarded stability checks",
-            module_id="tl5_ood_trust_curriculum",
+            phase_id="phase_mvt3_memory_driven_learned_selection_lift",
+            label="Phase MVT3 - Memory-Driven Learned Selection Lift",
+            capability="increase learned-only selection through stronger memory quality and uncertainty feedback integration",
+            module_id="mvt3_memory_driven_learned_selection_lift",
             micro_stages=(
                 _stage(
-                    "tl5.m1_near_ood_stabilization",
-                    "TL5.1 Near-OOD stabilization",
+                    "mvt3.m1_cause_effect_priority_lift",
+                    "MVT3.1 Cause-effect priority lift",
                     mode="integrate",
-                    module_targets=trust_ood_targets,
+                    module_targets=mvt3_memory_targets,
+                    objective_signals=("integration_quality", "transfer", "stability"),
+                    min_observations=100,
+                ),
+                _stage(
+                    "mvt3.m2_stm_to_semantic_promotion_quality_tuning",
+                    "MVT3.2 STM to semantic promotion quality tuning",
+                    mode="integrate",
+                    module_targets=mvt3_memory_targets,
+                    objective_signals=("integration_quality", "transfer", "safety"),
+                    min_observations=112,
+                ),
+                _stage(
+                    "mvt3.m3_pattern_uncertainty_feedback_loop",
+                    "MVT3.3 Pattern uncertainty feedback loop",
+                    mode="control_integrate",
+                    module_targets=mvt3_memory_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=124,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_mvt4_objective_override_near_invisibility",
+            label="Phase MVT4 - Objective Override Near-Invisibility",
+            capability="push objective override behavior toward rare edge cases while preserving safety certainty",
+            module_id="mvt4_objective_override_near_invisibility",
+            micro_stages=(
+                _stage(
+                    "mvt4.m1_objective_excitement_soft_capture_refine",
+                    "MVT4.1 Objective excitement soft-capture refine",
+                    mode="control_integrate",
+                    module_targets=mvt4_override_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=110,
+                ),
+                _stage(
+                    "mvt4.m2_terminal_and_frontier_guard_coherence",
+                    "MVT4.2 Terminal and frontier guard coherence",
+                    mode="control_integrate",
+                    module_targets=mvt4_override_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
                     min_observations=122,
                 ),
                 _stage(
-                    "tl5.m2_mid_ood_generalization",
-                    "TL5.2 Mid-OOD generalization",
+                    "mvt4.m3_phase_policy_cap_for_hardcoded_channel",
+                    "MVT4.3 Phase policy cap for hardcoded channel",
                     mode="control_integrate",
-                    module_targets=trust_ood_targets,
-                    objective_signals=("integration_quality", "safety", "stability"),
+                    module_targets=mvt4_override_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
                     min_observations=134,
-                ),
-                _stage(
-                    "tl5.m3_far_ood_guarded_trials",
-                    "TL5.3 Far-OOD guarded trials",
-                    mode="control_integrate",
-                    module_targets=trust_ood_targets,
-                    objective_signals=("integration_quality", "safety", "transfer"),
-                    min_observations=146,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_tl6_canonical_trust_gate_enforcement",
-            label="Phase TL6 - Canonical Trust Gates + Enforcement",
-            capability="introduce trust gates in canonical reporting and roll from warning mode to blocking enforcement",
-            module_id="tl6_canonical_trust_gate_enforcement",
+            phase_id="phase_mvt5_validation_rollout_and_freeze",
+            label="Phase MVT5 - Validation, Rollout, and Freeze",
+            capability="validate targets across hard windows, publish gates, and freeze guarded runtime defaults",
+            module_id="mvt5_validation_rollout_and_freeze",
             micro_stages=(
                 _stage(
-                    "tl6.m1_trust_gate_schema",
-                    "TL6.1 Trust gate schema",
+                    "mvt5.m1_batch_validation_matrix",
+                    "MVT5.1 Batch validation matrix",
                     mode="control_integrate",
-                    module_targets=trust_gate_targets,
+                    module_targets=mvt5_validation_targets,
                     objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=132,
+                    min_observations=120,
                 ),
                 _stage(
-                    "tl6.m2_report_gate_emit",
-                    "TL6.2 Report gate emit",
+                    "mvt5.m2_canonical_report_and_gate_update",
+                    "MVT5.2 Canonical report and gate update",
                     mode="control_integrate",
-                    module_targets=trust_gate_targets,
+                    module_targets=mvt5_validation_targets,
                     objective_signals=("integration_quality", "transfer", "stability"),
-                    min_observations=144,
+                    min_observations=136,
                 ),
                 _stage(
-                    "tl6.m3_warning_then_blocking_rollout",
-                    "TL6.3 Warning then blocking rollout",
+                    "mvt5.m3_freeze_and_regression_guard",
+                    "MVT5.3 Freeze and regression guard",
                     mode="control_integrate",
-                    module_targets=trust_gate_targets,
+                    module_targets=mvt5_validation_targets,
                     objective_signals=("integration_quality", "safety", "introspection_gain"),
-                    min_observations=156,
+                    min_observations=152,
                 ),
             ),
         ),
     )
 
 
+def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+    """Compatibility alias retained for runtime callers migrated from older plans."""
+    return build_mv_localization_phase_specs()
+
+
 def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     """Compatibility alias kept for existing callers in the runtime bootstrap path."""
-    return build_trust_lift_phase_specs()
+    return build_mv_localization_phase_specs()

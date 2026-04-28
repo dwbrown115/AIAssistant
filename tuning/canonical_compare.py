@@ -42,6 +42,12 @@ class FileSummary:
     mixed_rate: float
     phase1_intervention_utility_win3: float
     projection_effectiveness_score: float
+    mvl0_contract_lock: float
+    mvl1_estimator_signal_present: float
+    mvl_player_accuracy: float
+    mvl_exit_accuracy: float
+    mvl_cellmap_ready: float
+    legacy_mv_route_mode_active: float
     autonomy_mean: float
     trust_delib_mean: float
     trust_delib_floor: float
@@ -171,6 +177,12 @@ def _run_preflight(
             "mixed_rate": 0.0,
             "phase1_intervention_utility_win3": 0.0,
             "projection_effectiveness_score": 0.0,
+            "mvl0_contract_lock": 0.0,
+            "mvl1_estimator_signal_present": 0.0,
+            "mvl_player_accuracy": 0.0,
+            "mvl_exit_accuracy": 0.0,
+            "mvl_cellmap_ready": 0.0,
+            "legacy_mv_route_mode_active": 0.0,
         }
 
     if proc.returncode != 0:
@@ -183,6 +195,12 @@ def _run_preflight(
             "mixed_rate": 0.0,
             "phase1_intervention_utility_win3": 0.0,
             "projection_effectiveness_score": 0.0,
+            "mvl0_contract_lock": 0.0,
+            "mvl1_estimator_signal_present": 0.0,
+            "mvl_player_accuracy": 0.0,
+            "mvl_exit_accuracy": 0.0,
+            "mvl_cellmap_ready": 0.0,
+            "legacy_mv_route_mode_active": 0.0,
         }
 
     try:
@@ -197,11 +215,18 @@ def _run_preflight(
             "mixed_rate": 0.0,
             "phase1_intervention_utility_win3": 0.0,
             "projection_effectiveness_score": 0.0,
+            "mvl0_contract_lock": 0.0,
+            "mvl1_estimator_signal_present": 0.0,
+            "mvl_player_accuracy": 0.0,
+            "mvl_exit_accuracy": 0.0,
+            "mvl_cellmap_ready": 0.0,
+            "legacy_mv_route_mode_active": 0.0,
         }
 
     metrics = payload.get("metrics", {})
     behavior = metrics.get("behavior_screen", {}) if isinstance(metrics, dict) else {}
     projection = metrics.get("projection_screen", {}) if isinstance(metrics, dict) else {}
+    mv_localization = metrics.get("mv_localization_screen", {}) if isinstance(metrics, dict) else {}
 
     return {
         "status": _normalize_status(str(payload.get("status", "ERROR"))),
@@ -215,6 +240,24 @@ def _run_preflight(
         ),
         "projection_effectiveness_score": float(
             projection.get("projection_effectiveness_score", 0.0) or 0.0
+        ),
+        "mvl0_contract_lock": float(
+            mv_localization.get("mvl0_contract_lock", 0.0) or 0.0
+        ),
+        "mvl1_estimator_signal_present": float(
+            mv_localization.get("mvl1_estimator_signal_present", 0.0) or 0.0
+        ),
+        "mvl_player_accuracy": float(
+            mv_localization.get("player_accuracy", 0.0) or 0.0
+        ),
+        "mvl_exit_accuracy": float(
+            mv_localization.get("exit_accuracy", 0.0) or 0.0
+        ),
+        "mvl_cellmap_ready": float(
+            mv_localization.get("cellmap_ready", 0.0) or 0.0
+        ),
+        "legacy_mv_route_mode_active": float(
+            mv_localization.get("legacy_mv_route_mode_active", 0.0) or 0.0
         ),
     }
 
@@ -231,6 +274,12 @@ def _summarize_group(rows: list[FileSummary]) -> dict[str, Any]:
             "mixed_rate_mean": 0.0,
             "phase1_intervention_utility_win3_mean": 0.0,
             "projection_effectiveness_score_mean": 0.0,
+            "mvl0_contract_lock_mean": 0.0,
+            "mvl1_estimator_signal_present_mean": 0.0,
+            "mvl_player_accuracy_mean": 0.0,
+            "mvl_exit_accuracy_mean": 0.0,
+            "mvl_cellmap_ready_mean": 0.0,
+            "legacy_mv_route_mode_active_mean": 0.0,
             "status_counts": {},
             "drift_count": 0,
             "total_warnings": 0,
@@ -249,6 +298,12 @@ def _summarize_group(rows: list[FileSummary]) -> dict[str, Any]:
         "mixed_rate_mean": _mean([r.mixed_rate for r in rows]),
         "phase1_intervention_utility_win3_mean": _mean([r.phase1_intervention_utility_win3 for r in rows]),
         "projection_effectiveness_score_mean": _mean([r.projection_effectiveness_score for r in rows]),
+        "mvl0_contract_lock_mean": _mean([r.mvl0_contract_lock for r in rows]),
+        "mvl1_estimator_signal_present_mean": _mean([r.mvl1_estimator_signal_present for r in rows]),
+        "mvl_player_accuracy_mean": _mean([r.mvl_player_accuracy for r in rows]),
+        "mvl_exit_accuracy_mean": _mean([r.mvl_exit_accuracy for r in rows]),
+        "mvl_cellmap_ready_mean": _mean([r.mvl_cellmap_ready for r in rows]),
+        "legacy_mv_route_mode_active_mean": _mean([r.legacy_mv_route_mode_active for r in rows]),
         "status_counts": dict(Counter(r.status for r in rows)),
         "drift_count": sum(1 for r in rows if r.drift),
         "total_warnings": sum(max(0, r.warnings) for r in rows),
@@ -291,6 +346,12 @@ def compare_runs(
                     mixed_rate=float(preflight["mixed_rate"]),
                     phase1_intervention_utility_win3=float(preflight["phase1_intervention_utility_win3"]),
                     projection_effectiveness_score=float(preflight["projection_effectiveness_score"]),
+                    mvl0_contract_lock=float(preflight["mvl0_contract_lock"]),
+                    mvl1_estimator_signal_present=float(preflight["mvl1_estimator_signal_present"]),
+                    mvl_player_accuracy=float(preflight["mvl_player_accuracy"]),
+                    mvl_exit_accuracy=float(preflight["mvl_exit_accuracy"]),
+                    mvl_cellmap_ready=float(preflight["mvl_cellmap_ready"]),
+                    legacy_mv_route_mode_active=float(preflight["legacy_mv_route_mode_active"]),
                     autonomy_mean=float(streamed["autonomy_mean"]),
                     trust_delib_mean=float(streamed["trust_delib_mean"]),
                     trust_delib_floor=float(streamed["trust_delib_floor"]),
@@ -322,6 +383,18 @@ def compare_runs(
         - ood_group["phase1_intervention_utility_win3_mean"],
         "projection_effectiveness_score_mean": id_group["projection_effectiveness_score_mean"]
         - ood_group["projection_effectiveness_score_mean"],
+        "mvl0_contract_lock_mean": id_group["mvl0_contract_lock_mean"]
+        - ood_group["mvl0_contract_lock_mean"],
+        "mvl1_estimator_signal_present_mean": id_group["mvl1_estimator_signal_present_mean"]
+        - ood_group["mvl1_estimator_signal_present_mean"],
+        "mvl_player_accuracy_mean": id_group["mvl_player_accuracy_mean"]
+        - ood_group["mvl_player_accuracy_mean"],
+        "mvl_exit_accuracy_mean": id_group["mvl_exit_accuracy_mean"]
+        - ood_group["mvl_exit_accuracy_mean"],
+        "mvl_cellmap_ready_mean": id_group["mvl_cellmap_ready_mean"]
+        - ood_group["mvl_cellmap_ready_mean"],
+        "legacy_mv_route_mode_active_mean": id_group["legacy_mv_route_mode_active_mean"]
+        - ood_group["legacy_mv_route_mode_active_mean"],
     }
 
     regressions = {
@@ -333,6 +406,9 @@ def compare_runs(
         "trust_id_ood_delta_exceeds_target": deltas["trust_id_ood_delta"] > trust_id_ood_delta_max,
         "autonomy_drop_exceeds_threshold": deltas["autonomy_mean"] > auto_drop_warn,
         "guard_drop_exceeds_threshold": deltas["guard_utility_mean"] > guard_drop_warn,
+        "mvl0_contract_lock_missing": min(id_group["mvl0_contract_lock_mean"], ood_group["mvl0_contract_lock_mean"]) < 1.0,
+        "mvl1_estimator_signal_missing": min(id_group["mvl1_estimator_signal_present_mean"], ood_group["mvl1_estimator_signal_present_mean"]) < 1.0,
+        "legacy_mv_route_mode_active": max(id_group["legacy_mv_route_mode_active_mean"], ood_group["legacy_mv_route_mode_active_mean"]) > 0.0,
     }
 
     return {
@@ -372,12 +448,13 @@ def _print_console(result: dict[str, Any]) -> None:
         print("-", name)
 
     print("\nID PER-FILE:")
-    print("file | status | warn | fail | auto | trust | guard | drift | phase/micro")
+    print("file | status | warn | fail | auto | trust | guard | drift | phase/micro | mvl(p/e/cell/r)")
     for row in result["id_rows"]:
         print(
             f"{row['file']} | {row['status']} | {row['warnings']} | {row['failures']} | "
             f"{row['autonomy_mean']:.4f} | {row['trust_delib_mean']:.4f} | {row['guard_utility_mean']:.4f} | "
-            f"{'Y' if row['drift'] else 'N'} | {row['phase_count']}/{row['micro_count']}"
+            f"{'Y' if row['drift'] else 'N'} | {row['phase_count']}/{row['micro_count']} | "
+            f"{row['mvl_player_accuracy']:.3f}/{row['mvl_exit_accuracy']:.3f}/{int(round(row['mvl_cellmap_ready']))}/{int(round(row['legacy_mv_route_mode_active']))}"
         )
 
     print("\nGROUP MEANS:")
@@ -391,9 +468,30 @@ def _print_console(result: dict[str, Any]) -> None:
         f"OOD auto={og['autonomy_mean']:.4f} trust={og['trust_delib_mean']:.4f} "
         f"trust_floor={og['trust_delib_floor']:.4f} guard={og['guard_utility_mean']:.4f}"
     )
+    print(
+        f"ID mvl_player_acc={ig['mvl_player_accuracy_mean']:.4f} "
+        f"mvl_exit_acc={ig['mvl_exit_accuracy_mean']:.4f} "
+        f"mvl_cellmap_ready={ig['mvl_cellmap_ready_mean']:.4f} "
+        f"legacy_route_mode={ig['legacy_mv_route_mode_active_mean']:.4f}"
+    )
+    print(
+        f"OOD mvl_player_acc={og['mvl_player_accuracy_mean']:.4f} "
+        f"mvl_exit_acc={og['mvl_exit_accuracy_mean']:.4f} "
+        f"mvl_cellmap_ready={og['mvl_cellmap_ready_mean']:.4f} "
+        f"legacy_route_mode={og['legacy_mv_route_mode_active_mean']:.4f}"
+    )
 
     print("\nDELTA ID-OOD:")
-    for key in ("autonomy_mean", "trust_delib_mean", "trust_id_ood_delta", "guard_utility_mean"):
+    for key in (
+        "autonomy_mean",
+        "trust_delib_mean",
+        "trust_id_ood_delta",
+        "guard_utility_mean",
+        "mvl_player_accuracy_mean",
+        "mvl_exit_accuracy_mean",
+        "mvl_cellmap_ready_mean",
+        "legacy_mv_route_mode_active_mean",
+    ):
         print(f"{key}={result['deltas_id_minus_ood'][key]:.4f}")
 
     print("\nSTATUS COUNTS:")
@@ -425,12 +523,20 @@ def _write_markdown(path: Path, result: dict[str, Any]) -> None:
         "## Group Means",
         f"- ID: auto={ig['autonomy_mean']:.4f}, trust={ig['trust_delib_mean']:.4f}, trust_floor={ig['trust_delib_floor']:.4f}, guard={ig['guard_utility_mean']:.4f}",
         f"- OOD: auto={og['autonomy_mean']:.4f}, trust={og['trust_delib_mean']:.4f}, trust_floor={og['trust_delib_floor']:.4f}, guard={og['guard_utility_mean']:.4f}",
+        f"- ID MVL: player_acc={ig['mvl_player_accuracy_mean']:.4f}, exit_acc={ig['mvl_exit_accuracy_mean']:.4f}, cellmap_ready={ig['mvl_cellmap_ready_mean']:.4f}, contract_lock={ig['mvl0_contract_lock_mean']:.4f}, estimator_signal={ig['mvl1_estimator_signal_present_mean']:.4f}, legacy_route_mode={ig['legacy_mv_route_mode_active_mean']:.4f}",
+        f"- OOD MVL: player_acc={og['mvl_player_accuracy_mean']:.4f}, exit_acc={og['mvl_exit_accuracy_mean']:.4f}, cellmap_ready={og['mvl_cellmap_ready_mean']:.4f}, contract_lock={og['mvl0_contract_lock_mean']:.4f}, estimator_signal={og['mvl1_estimator_signal_present_mean']:.4f}, legacy_route_mode={og['legacy_mv_route_mode_active_mean']:.4f}",
         "",
         "## Delta (ID - OOD)",
         f"- autonomy_mean: {d['autonomy_mean']:.4f}",
         f"- trust_delib_mean: {d['trust_delib_mean']:.4f}",
         f"- trust_id_ood_delta: {d['trust_id_ood_delta']:.4f}",
         f"- guard_utility_mean: {d['guard_utility_mean']:.4f}",
+        f"- mvl_player_accuracy_mean: {d['mvl_player_accuracy_mean']:.4f}",
+        f"- mvl_exit_accuracy_mean: {d['mvl_exit_accuracy_mean']:.4f}",
+        f"- mvl_cellmap_ready_mean: {d['mvl_cellmap_ready_mean']:.4f}",
+        f"- mvl0_contract_lock_mean: {d['mvl0_contract_lock_mean']:.4f}",
+        f"- mvl1_estimator_signal_present_mean: {d['mvl1_estimator_signal_present_mean']:.4f}",
+        f"- legacy_mv_route_mode_active_mean: {d['legacy_mv_route_mode_active_mean']:.4f}",
         "",
         "## Status and Drift",
         f"- ID status counts: {ig['status_counts']}",

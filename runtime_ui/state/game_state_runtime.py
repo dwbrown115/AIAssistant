@@ -128,6 +128,7 @@ def refresh_game_state(app: object) -> None:
     app._draw_machine_vision_route_overlay()
     app._draw_machine_vision_prediction_overlay(player_row, player_col)
     app._draw_machine_vision_exit_prediction_overlay(player_row, player_col)
+    app._draw_mv_render_debug_overlay(player_row, player_col, target_row, target_col)
     if app._machine_vision_enabled():
         vision_pred_cell = app.machine_vision_last_prediction.get("predicted_cell", (-1, -1))
         vision_conf = float(app.machine_vision_last_prediction.get("confidence", 0.0) or 0.0)
@@ -154,10 +155,48 @@ def refresh_game_state(app: object) -> None:
             f"last_error={vision_exit_error} samples={app.machine_vision_exit_total_samples}."
         )
         machine_vision_cellmap_line = app._machine_vision_cellmap_status_line()
+        machine_vision_view_line = (
+            "Machine vision sees (grid-sized training snapshot):\n"
+            f"{app._machine_vision_grid_snapshot(player_row, player_col)}"
+        )
+        mv_hints = app._machine_vision_kernel_hints()
+        mv_self_pred = tuple(mv_hints.get("self_pred_cell", (-1, -1)) or (-1, -1))
+        mv_exit_pred = tuple(mv_hints.get("exit_pred_cell", (-1, -1)) or (-1, -1))
+        mv_self_err_raw = mv_hints.get("self_error", -1)
+        mv_self_err = int(mv_self_err_raw if mv_self_err_raw is not None else -1)
+        machine_vision_kernel_hint_line = (
+            "Machine vision kernel hint channel: "
+            f"enabled={(1 if bool(mv_hints.get('enabled', False)) else 0)} "
+            f"exit_usable={(1 if bool(mv_hints.get('exit_usable', False)) else 0)} "
+            f"self_pred={mv_self_pred} self_err={mv_self_err} self_conf={round(float(mv_hints.get('self_conf', 0.0) or 0.0), 3)} "
+            f"exit_pred={mv_exit_pred} exit_conf={round(float(mv_hints.get('exit_conf', 0.0) or 0.0), 3)} "
+            f"hint_strength={round(float(mv_hints.get('exit_hint_strength', 0.0) or 0.0), 3)}."
+        )
+        last_mv_kernel = dict(getattr(app, "_last_mv_kernel_breakdown", {}) or {})
+        machine_vision_kernel_influence_line = (
+            "Machine vision kernel scoring (last selected move): "
+            f"step={int(getattr(app, '_last_mv_kernel_breakdown_step', -1) or -1)} "
+            f"move={str(last_mv_kernel.get('move', '') or '(none)')} "
+            f"exit_usable={int(last_mv_kernel.get('mv_exit_usable', 0) or 0)} "
+            f"exit_pred={tuple(last_mv_kernel.get('mv_exit_pred_cell', (-1, -1)) or (-1, -1))} "
+            f"exit_hint_strength={round(float(last_mv_kernel.get('mv_exit_hint_strength', 0.0) or 0.0), 3)} "
+            f"exit_bonus={int(last_mv_kernel.get('mv_exit_alignment_bonus', 0) or 0)} "
+            f"exit_penalty={int(last_mv_kernel.get('mv_exit_alignment_penalty', 0) or 0)} "
+            f"cellmap_usable={int(last_mv_kernel.get('mv_cellmap_usable', 0) or 0)} "
+            f"cellmap_open_bonus={int(last_mv_kernel.get('mv_cellmap_open_alignment_bonus', 0) or 0)} "
+            f"cellmap_blocked_penalty={int(last_mv_kernel.get('mv_cellmap_blocked_risk_penalty', 0) or 0)} "
+            f"cellmap_neighbor_open_bonus={int(last_mv_kernel.get('mv_cellmap_neighbor_open_bonus', 0) or 0)} "
+            f"cellmap_neighbor_blocked_penalty={int(last_mv_kernel.get('mv_cellmap_neighbor_blocked_penalty', 0) or 0)}."
+        )
+        machine_vision_render_debug_line = app._mv_render_debug_status_line()
     else:
         machine_vision_line = "Machine vision player localization: disabled (master toggle off)."
         machine_vision_exit_line = "Machine vision exit localization: disabled (master toggle off)."
         machine_vision_cellmap_line = "Machine vision cell map: disabled (master toggle off)."
+        machine_vision_view_line = "Machine vision sees: disabled (master toggle off)."
+        machine_vision_kernel_hint_line = "Machine vision kernel hint channel: disabled (master toggle off)."
+        machine_vision_kernel_influence_line = "Machine vision kernel scoring (last selected move): unavailable (master toggle off)."
+        machine_vision_render_debug_line = app._mv_render_debug_status_line()
 
     app._draw_pseudo3d_view(player_row, player_col)
 
@@ -191,6 +230,10 @@ def refresh_game_state(app: object) -> None:
         f"{machine_vision_line}\n"
         f"{machine_vision_exit_line}\n"
         f"{machine_vision_cellmap_line}\n"
+        f"{machine_vision_kernel_hint_line}\n"
+        f"{machine_vision_kernel_influence_line}\n"
+        f"{machine_vision_render_debug_line}\n"
+        f"{machine_vision_view_line}\n"
         f"{perception_block}"
     )
 

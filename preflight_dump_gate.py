@@ -78,12 +78,45 @@ def _to_bool(value: str | None) -> bool | None:
 
 
 def _parse_scalar(value: str) -> int | float | str:
-    value = value.strip()
+    value = value.strip().rstrip(",")
     if re.fullmatch(r"-?\d+", value):
         return int(value)
-    if re.fullmatch(r"-?\d+\.\d+", value):
+    if re.fullmatch(r"-?(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?", value):
         return float(value)
     return value
+
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return int(default)
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return int(float(text))
+        except ValueError:
+            return int(default)
+
+
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return float(default)
+    try:
+        return float(text)
+    except ValueError:
+        return float(default)
 
 
 def _parse_key_values(span: str) -> dict[str, int | float | str]:
@@ -366,6 +399,72 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
         or "projection_score_delta=" in text
         or (projection_guidance_tag_rows > 0)
     )
+
+    mv_player_enabled = 0
+    mv_player_training = 0
+    mv_player_samples = 0
+    mv_player_exact_hits = 0
+    mv_player_accuracy = 0.0
+    mv_player_mae = 0.0
+    mv_exit_enabled = 0
+    mv_exit_training = 0
+    mv_exit_samples = 0
+    mv_exit_exact_hits = 0
+    mv_exit_accuracy = 0.0
+    mv_exit_mae = 0.0
+    mv_cellmap_ready = 0
+    mv_cellmap_accuracy = 0.0
+    mv_cellmap_confident_accuracy = 0.0
+    mv_cellmap_refine_passes = 0
+    mv_cellmap_confident = 0
+    mv_cellmap_total = 0
+
+    mv_player_match = None
+    for match in re.finditer(r"machine_vision_player_localization:\s*\n([^\n]+)", text, flags=re.IGNORECASE):
+        mv_player_match = match
+    if mv_player_match is not None:
+        player_payload = _parse_key_values(mv_player_match.group(1))
+        mv_player_enabled = _coerce_int(player_payload.get("enabled", 0))
+        mv_player_training = _coerce_int(player_payload.get("training", 0))
+        mv_player_samples = _coerce_int(player_payload.get("samples", 0))
+        mv_player_exact_hits = _coerce_int(player_payload.get("exact_hits", 0))
+        mv_player_accuracy = _coerce_float(player_payload.get("accuracy", 0.0))
+        mv_player_mae = _coerce_float(player_payload.get("mae", 0.0))
+
+    mv_exit_match = None
+    for match in re.finditer(r"machine_vision_exit_localization:\s*\n([^\n]+)", text, flags=re.IGNORECASE):
+        mv_exit_match = match
+    if mv_exit_match is not None:
+        exit_payload = _parse_key_values(mv_exit_match.group(1))
+        mv_exit_enabled = _coerce_int(exit_payload.get("enabled", 0))
+        mv_exit_training = _coerce_int(exit_payload.get("training", 0))
+        mv_exit_samples = _coerce_int(exit_payload.get("samples", 0))
+        mv_exit_exact_hits = _coerce_int(exit_payload.get("exact_hits", 0))
+        mv_exit_accuracy = _coerce_float(exit_payload.get("accuracy", 0.0))
+        mv_exit_mae = _coerce_float(exit_payload.get("mae", 0.0))
+
+    mv_cellmap_match = None
+    for match in re.finditer(r"machine_vision_cellmap_bootstrap:\s*\n([^\n]+)", text, flags=re.IGNORECASE):
+        mv_cellmap_match = match
+    if mv_cellmap_match is not None:
+        cellmap_line = str(mv_cellmap_match.group(1) or "").strip()
+        cellmap_payload = _parse_key_values(cellmap_line)
+        mv_cellmap_ready = _coerce_int(cellmap_payload.get("ready", 0))
+        mv_cellmap_accuracy = _coerce_float(cellmap_payload.get("acc", 0.0))
+        mv_cellmap_confident_accuracy = _coerce_float(cellmap_payload.get("conf_acc", 0.0))
+        mv_cellmap_refine_passes = _coerce_int(cellmap_payload.get("refine_passes", 0))
+        confident_match = re.search(r"confident=(\d+)/(\d+)", cellmap_line)
+        if confident_match:
+            mv_cellmap_confident = int(confident_match.group(1))
+            mv_cellmap_total = int(confident_match.group(2))
+
+    mv_enabled_matches = [int(raw) for raw in re.findall(r"\bmv_enabled=(\d+)\b", text)]
+    mv_enabled_last = int(mv_enabled_matches[-1]) if mv_enabled_matches else int((mv_player_enabled > 0) or (mv_exit_enabled > 0))
+    mv_route_mode_matches = [int(raw) for raw in re.findall(r"\bmv_route_mode=(\d+)\b", text)]
+    legacy_mv_route_mode_active = int(any(value > 0 for value in mv_route_mode_matches))
+
+    mvl0_contract_lock = int(legacy_mv_route_mode_active == 0)
+    mvl1_estimator_signal_present = int((mv_player_samples > 0) and (mv_exit_samples > 0))
 
     marker_diagnostics: dict[str, dict[str, int | float]] = {}
     active_marker_keys: list[str] = []
@@ -682,6 +781,30 @@ def parse_dump(text: str, profile: str) -> dict[str, object]:
                 "projection_backward_escape_bonus_avg": round(projection_back_escape_avg, 4),
                 "projection_influence_scale_avg": round(projection_influence_scale_avg, 4),
             },
+            "mv_localization_screen": {
+                "player_enabled": int(mv_player_enabled),
+                "player_training": int(mv_player_training),
+                "player_samples": int(mv_player_samples),
+                "player_exact_hits": int(mv_player_exact_hits),
+                "player_accuracy": round(float(mv_player_accuracy), 4),
+                "player_mae": round(float(mv_player_mae), 4),
+                "exit_enabled": int(mv_exit_enabled),
+                "exit_training": int(mv_exit_training),
+                "exit_samples": int(mv_exit_samples),
+                "exit_exact_hits": int(mv_exit_exact_hits),
+                "exit_accuracy": round(float(mv_exit_accuracy), 4),
+                "exit_mae": round(float(mv_exit_mae), 4),
+                "cellmap_ready": int(mv_cellmap_ready),
+                "cellmap_confident": int(mv_cellmap_confident),
+                "cellmap_total": int(mv_cellmap_total),
+                "cellmap_accuracy": round(float(mv_cellmap_accuracy), 4),
+                "cellmap_confident_accuracy": round(float(mv_cellmap_confident_accuracy), 4),
+                "cellmap_refine_passes": int(mv_cellmap_refine_passes),
+                "mv_enabled_last": int(mv_enabled_last),
+                "legacy_mv_route_mode_active": int(legacy_mv_route_mode_active),
+                "mvl0_contract_lock": int(mvl0_contract_lock),
+                "mvl1_estimator_signal_present": int(mvl1_estimator_signal_present),
+            },
             "intervention_diagnostics": {
                 "markers": marker_diagnostics,
                 "top_harmful_markers": top_harmful_markers,
@@ -778,6 +901,17 @@ def main() -> int:
                     f"delta_avg={projection_screen.get('projection_score_delta_avg', 0.0)} "
                     f"delta_scaled_avg={projection_screen.get('projection_score_delta_scaled_avg', 0.0)} "
                     f"effectiveness_score={projection_screen.get('projection_effectiveness_score', 0.0)}"
+                )
+            mv_localization_screen = metrics.get("mv_localization_screen", {})
+            if isinstance(mv_localization_screen, dict) and mv_localization_screen:
+                print(
+                    "mv_localization_screen="
+                    f"player_acc={mv_localization_screen.get('player_accuracy', 0.0)} "
+                    f"exit_acc={mv_localization_screen.get('exit_accuracy', 0.0)} "
+                    f"cellmap_ready={mv_localization_screen.get('cellmap_ready', 0)} "
+                    f"contract_lock={mv_localization_screen.get('mvl0_contract_lock', 0)} "
+                    f"estimator_signal={mv_localization_screen.get('mvl1_estimator_signal_present', 0)} "
+                    f"legacy_route_mode={mv_localization_screen.get('legacy_mv_route_mode_active', 0)}"
                 )
             intervention_diag = metrics.get("intervention_diagnostics", {})
             if isinstance(intervention_diag, dict):

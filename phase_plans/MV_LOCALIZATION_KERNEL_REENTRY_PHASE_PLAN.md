@@ -1,4 +1,4 @@
-# MV Localization Kernel Reentry Plan V1
+# MV Localization Kernel Reentry Plan V1.1
 
 ## Objective
 
@@ -8,6 +8,7 @@ Reintroduce machine vision (MV) to the kernel in a constrained way where MV only
 - confidence for both estimates.
 
 MV must not provide pathing guidance, route hints, or direct next-move proposals in this phase plan.
+This plan assumes beam vision can be noisy and still requires graceful kernel behavior under degraded input.
 
 ## Success Criteria
 
@@ -15,6 +16,7 @@ MV must not provide pathing guidance, route hints, or direct next-move proposals
 - MV localization improves orientation without increasing unsafe overrides.
 - Trust updates reflect MV helpfulness instead of hardcoded heuristics.
 - Canonical reports surface MV usage and MV impact clearly.
+- Degraded or garbled vision input triggers safe down-weighting instead of brittle behavior.
 
 ## Safety Contract
 
@@ -38,6 +40,12 @@ Non-bypassable constraints:
 - Manual nudges can recover orientation but are not always available.
 - MV signals exist in runtime pathways but are not yet constrained as localization-only kernel priors.
 - Canonical reporting does not yet isolate MV localization contribution.
+
+## Current Readiness Signal
+
+- Recent behavior suggests stronger-than-expected resilience under accidental garbled vision input.
+- Kernel adaptation across maze variants is currently improving faster than original conservative timing assumptions.
+- Remaining concern is transfer quality outside maze domains, not maze-only competence.
 
 ## Program Phases (Phase + Micro)
 
@@ -146,11 +154,13 @@ Stage ids:
 - `mvl5.m1_mv_dropout_resilience`
 - `mvl5.m2_latency_and_jitter_tolerance`
 - `mvl5.m3_focus_drift_recovery`
+- `mvl5.m4_garbled_vision_chaos_trials`
 
 What we implement:
 - Add controlled MV dropout windows to prevent dependence.
 - Validate behavior under latency/jitter perturbations.
 - Validate safe handling of focus/window drift scenarios.
+- Inject garbled and partially-corrupted localization packets to test trust-safe degradation paths.
 
 Primary touchpoints:
 - `runtime/app_runtime.py`
@@ -158,6 +168,7 @@ Primary touchpoints:
 Exit criteria:
 - Kernel remains functional and safe with intermittent MV loss.
 - No unsafe actions under perturbation.
+- Garbled-input trials show graceful fallback with no severe safety regressions.
 
 ### Phase MVL6: Canonical Reporting and Rollout Gates
 
@@ -190,6 +201,12 @@ Exit criteria:
 6. MVL5 robustness curriculum.
 7. MVL6 canonical reporting and rollout gates.
 
+## Fast-Track Execution Mode
+
+- Default cadence is accelerated when phase gates are already green.
+- Multiple micro stages may be completed in one day, but only after per-stage validation gates pass.
+- If any stability or safety gate fails, execution drops back to one-stage-at-a-time conservative mode.
+
 ## Validation Gates Per Phase
 
 Static gate:
@@ -205,7 +222,7 @@ Stability gate:
 Safety gate:
 - Reject on any severe safety regression, drift regression, or PASS consistency break.
 
-## Immediate 7-Day Kickoff
+## Immediate Fast-Track Kickoff (Target: 1-3 Days If Gates Stay Green)
 
 1. Implement MVL0 packet contract and no-route guardrail enforcement.
 2. Wire MVL1 pose/exit confidence emissions in runtime telemetry.
@@ -213,6 +230,14 @@ Safety gate:
 4. Add MVL3 confidence/disagreement down-weight logic.
 5. Run latest 10 hard logs with MV localization on and off.
 6. Generate canonical comparison report including MV localization fields.
+7. Run MVL5 garbled-vision chaos trials before enabling broader exposure.
+
+## Post-Maze Transition: Beam Vision to Proper MV
+
+- Beam vision remains the interim localization signal while maze program wraps.
+- Proper MV replaces beam vision only after parity gates pass on localization accuracy and confidence calibration.
+- During handoff, keep the same localization-only contract (pose, exit, confidence) so policy integration does not change.
+- Any proper-MV extension beyond localization-only is out of scope for this plan and requires a new gated phase plan.
 
 ## Operating Rule
 

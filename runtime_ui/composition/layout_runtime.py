@@ -83,15 +83,48 @@ def build_ui(app: object) -> None:
     game_note = tk.Label(game_frame, text="Move the square to the blue ball. Use Arrow keys or WASD.")
     game_note.pack(anchor="w", pady=(2, 8))
 
+    visual_row = tk.Frame(game_frame, bg="#0b0b0b")
+    visual_row.pack(anchor="w")
+
     app.game_canvas = tk.Canvas(
-        game_frame,
+        visual_row,
         width=app.canvas_width,
         height=app.canvas_height,
         bg="#f5f7ff",
         highlightthickness=1,
         highlightbackground="#b6bfd3",
     )
-    app.game_canvas.pack(fill=tk.NONE, expand=False)
+    app.game_canvas.pack(side=tk.LEFT, fill=tk.NONE, expand=False)
+
+    app.mv_render_debug_panel_container = tk.Frame(
+        visual_row,
+        width=300,
+        height=app.canvas_height,
+        bg="#0b0b0b",
+        highlightthickness=1,
+        highlightbackground="#2d2d2d",
+    )
+    app.mv_render_debug_panel_container.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
+    app.mv_render_debug_panel_container.pack_propagate(False)
+
+    if not hasattr(app, "mv_render_debug_panel_var"):
+        app.mv_render_debug_panel_var = tk.StringVar(value="")
+    app.mv_render_debug_panel = tk.Label(
+        app.mv_render_debug_panel_container,
+        textvariable=app.mv_render_debug_panel_var,
+        justify=tk.LEFT,
+        anchor="nw",
+        bg="#0b0b0b",
+        fg="#f8edc6",
+        font=("Helvetica", 8, "bold"),
+        padx=6,
+        pady=6,
+        wraplength=286,
+    )
+    app.mv_render_debug_panel.pack(fill=tk.BOTH, expand=True)
+
+    if not bool(getattr(app, "mv_render_debug_enable", True)):
+        app.mv_render_debug_panel_var.set("MVDBG disabled (F8 to toggle)")
 
     if app.enable_pseudo3d_view:
         pseudo3d_label = tk.Label(game_frame, text="Pseudo-3D Visualizer (preview)")
@@ -148,7 +181,7 @@ def build_ui(app: object) -> None:
 
     app.mv_route_mode_checkbutton = tk.Checkbutton(
         toggle_row,
-        text="MV Route Mode",
+        text="MV Route Mode (Deprecated)",
         variable=app.mv_route_planning_mode_var,
         command=app._on_mv_route_mode_toggled,
         anchor="w",

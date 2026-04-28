@@ -70,7 +70,7 @@ DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP = {
 }
 DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR = "BALANCED"
 DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS = (
-    "phase_tl0_baseline_lock_trust_contract",
+    "phase_mvt0_instrumentation_and_gate_reliability",
 )
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER = 0.72
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS = 28
@@ -1337,7 +1337,7 @@ def build_kernel_phase_step_context(
             challenge_reason = "challenge_horizon_complete"
             challenge_state["last_reason"] = challenge_reason
 
-    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 6 and str(stage_id) == "tl6.m3_warning_then_blocking_rollout":
+    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 5 and str(stage_id) == "mvt5.m3_freeze_and_regression_guard":
         safety_signal = _clip(homeostasis.get("safety", 0.0))
         start_allowed = (
             (not clamp_active)

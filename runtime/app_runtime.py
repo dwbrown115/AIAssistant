@@ -18,7 +18,7 @@ from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
 from runtime_kernel.adaptive_controller import AdaptiveNeuralController
-from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_trust_lift_phase_specs
+from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_mv_localization_phase_specs
 from runtime_kernel.governance_orchestrator import GovernanceOrchestrator
 from runtime_kernel.kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
 from runtime_kernel.learned_autonomy_controller import LearnedAutonomyController
@@ -388,8 +388,8 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='Trust lift phase program: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (Trust Lift V2)')
+        self.kernel_phase_program_status_var = tk.StringVar(value='MV integration tuning phase program: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (MVT Phase Plan V1)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
@@ -528,6 +528,17 @@ class AIAssistantApp:
         self._runtime_objective_excitement_level = 0.0
         self._runtime_objective_excitement_gain = 0.0
         self._runtime_objective_progress_move = ''
+        # Future-facing aversive learning channel ("ouch") stays inert unless explicitly enabled.
+        self.ouch_response_enable = os.getenv('OUCH_RESPONSE_ENABLE', '0') == '1'
+        self.ouch_response_train_enable = os.getenv('OUCH_RESPONSE_TRAIN_ENABLE', '0') == '1'
+        self.ouch_response_min_penalty = max(0.0, float(os.getenv('OUCH_RESPONSE_MIN_PENALTY', '24.0')))
+        self.ouch_response_tag_boost = max(0.0, float(os.getenv('OUCH_RESPONSE_TAG_BOOST', '8.0')))
+        self.ouch_response_intensity_scale = max(1.0, float(os.getenv('OUCH_RESPONSE_INTENSITY_SCALE', '120.0')))
+        self.ouch_response_buffer_size = max(16, min(4096, int(os.getenv('OUCH_RESPONSE_BUFFER_SIZE', '512'))))
+        self.ouch_response_event_buffer: deque[dict[str, object]] = deque(maxlen=self.ouch_response_buffer_size)
+        self.ouch_response_candidate_count = 0
+        self.ouch_response_training_sample_count = 0
+        self.ouch_response_last_event: dict[str, object] = {}
         self.layout_generation_index = 0
         self.layout_event_index = 0
         self.maze_map_start_var = tk.StringVar(value='0')
@@ -650,6 +661,20 @@ class AIAssistantApp:
         self.machine_vision_player_localization_train_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE'])
         self.machine_vision_exit_localization_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_EXIT_LOCALIZATION_ENABLE'])
         self.machine_vision_exit_localization_train_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE'])
+        self.mv_render_debug_enable = os.getenv('MV_RENDER_DEBUG_ENABLE', '1') == '1'
+        self.mv_render_debug_show_actual_cells = os.getenv('MV_RENDER_DEBUG_SHOW_ACTUAL_CELLS', '1') == '1'
+        self.mv_render_debug_show_text = os.getenv('MV_RENDER_DEBUG_SHOW_TEXT', '1') == '1'
+        self.mv_render_debug_panel_var = tk.StringVar(value='')
+        self._mv_render_debug_frame = 0
+        self._mv_render_debug_last: dict[str, object] = {
+            'frame': 0,
+            'step': -1,
+            'mode': 'init',
+            'self_guess': None,
+            'exit_guess': None,
+            'outline_items': 0,
+            'debug_items': 0,
+        }
         self.machine_vision_overlay_color = '#9acd32'
         self.machine_vision_overlay_fill = '#adff2f'
         self.machine_vision_exit_overlay_color = '#9acd32'
@@ -660,12 +685,15 @@ class AIAssistantApp:
         self.machine_vision_kernel_hint_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_HINT_ENABLE'])
         self.machine_vision_kernel_hint_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_HINT_MIN_CONF'])))
         self.machine_vision_kernel_exit_bias_weight = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT']))
-        self.mv_bootstrap_route_enable = os.getenv('MV_BOOTSTRAP_ROUTE_ENABLE', '1') == '1'
+        self.mv_routing_deprecated = True
+        self.mv_bootstrap_route_requested = os.getenv('MV_BOOTSTRAP_ROUTE_ENABLE', '1') == '1'
+        self.mv_bootstrap_route_enable = False
         self.mv_bootstrap_self_min_conf = min(1.0, max(0.0, float(os.getenv('MV_BOOTSTRAP_SELF_MIN_CONF', '0.9'))))
         self.mv_bootstrap_exit_min_conf = min(1.0, max(0.0, float(os.getenv('MV_BOOTSTRAP_EXIT_MIN_CONF', '0.9'))))
         self.mv_bootstrap_max_self_error = max(0, int(os.getenv('MV_BOOTSTRAP_MAX_SELF_ERROR', '1')))
         self.mv_preplan_sweep_enable = os.getenv('MV_PREPLAN_SWEEP_ENABLE', '1') == '1'
         self.mv_preplan_require_exit = os.getenv('MV_PREPLAN_REQUIRE_EXIT', '1') == '1'
+        self.mv_kernel_identification_halt_enable = os.getenv('MV_KERNEL_IDENTIFICATION_HALT_ENABLE', '1') == '1'
         self.mv_preplan_self_min_conf = min(1.0, max(0.0, float(os.getenv('MV_PREPLAN_SELF_MIN_CONF', '0.9'))))
         self.mv_preplan_exit_min_conf = min(1.0, max(0.0, float(os.getenv('MV_PREPLAN_EXIT_MIN_CONF', '0.9'))))
         self.mv_preplan_max_self_error = max(0, int(os.getenv('MV_PREPLAN_MAX_SELF_ERROR', '1')))
@@ -680,8 +708,9 @@ class AIAssistantApp:
         self.machine_vision_cellmap_kernel_hint_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_HINT_ENABLE'])
         self.machine_vision_cellmap_kernel_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_MIN_CONF'])))
         self.machine_vision_cellmap_kernel_bias_weight = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_BIAS_WEIGHT']))
-        self.mv_route_planning_mode_enable = os.getenv('MV_ROUTE_PLANNING_MODE_ENABLE', '0') == '1'
-        self.mv_route_planning_mode_var = tk.BooleanVar(value=self.mv_route_planning_mode_enable)
+        self.mv_route_planning_mode_requested = os.getenv('MV_ROUTE_PLANNING_MODE_ENABLE', '0') == '1'
+        self.mv_route_planning_mode_enable = False
+        self.mv_route_planning_mode_var = tk.BooleanVar(value=False)
         self.machine_vision_cellmap_min_accuracy = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_ACCURACY'])))
         self.machine_vision_cellmap_min_confident_accuracy = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_CONFIDENT_ACCURACY'])))
         self.machine_vision_cellmap_refine_passes_per_check = max(1, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_REFINE_PASSES_PER_CHECK']))
@@ -713,6 +742,8 @@ class AIAssistantApp:
         self.machine_vision_exit_last_prediction: dict[str, object] = {'predicted_cell': (-1, -1), 'actual_cell': (-1, -1), 'confidence': 0.0, 'support': 0, 'exact': False, 'manhattan_error': 0, 'source': 'none', 'maze_layout_id': -1, 'step_index': -1}
         self._machine_vision_exit_last_sample_key: tuple[int, int, int, int] | None = None
         self._machine_vision_exit_rng = random.Random(self.maze_seed_base + 104729)
+        self._last_mv_kernel_breakdown_step = -1
+        self._last_mv_kernel_breakdown: dict[str, object] = {'move': '', 'mv_exit_usable': 0, 'mv_exit_pred_cell': (-1, -1), 'mv_exit_hint_strength': 0.0, 'mv_exit_alignment_bonus': 0, 'mv_exit_alignment_penalty': 0, 'mv_cellmap_usable': 0, 'mv_cellmap_open_alignment_bonus': 0, 'mv_cellmap_blocked_risk_penalty': 0, 'mv_cellmap_neighbor_open_bonus': 0, 'mv_cellmap_neighbor_blocked_penalty': 0}
         self.endocrine_enabled = bool(_WAVE5_TRUST_MEMORY_DEFAULTS['ENDOCRINE_ENABLE'])
         self.endocrine = EndocrineSystem()
         # Phase 1-4 deprecation channels are retired in the live runtime path.
@@ -729,7 +760,7 @@ class AIAssistantApp:
         self.learned_autonomy_objective_phase_bonus = 0
         self.learned_autonomy_soft_override_scale = 1.0
         self.kernel_phase_program_enable = KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME
-        self.kernel_phase_specs = build_trust_lift_phase_specs() if self.kernel_phase_program_enable else ()
+        self.kernel_phase_specs = build_mv_localization_phase_specs() if self.kernel_phase_program_enable else ()
         kernel_phase_program_defaults = dict(KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME)
         self.kernel_phase_program = AdaptiveKernelPhaseProgram(
             phase_specs=self.kernel_phase_specs,
@@ -1661,7 +1692,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='Trust Lift Phase Program (TL V2)', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='MV Integration Tuning Phase Program (MVT V1)', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -1718,9 +1749,9 @@ class AIAssistantApp:
         toggle_canvas.bind('<Configure>', _sync_toggle_canvas_layout)
 
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='Trust lift phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
-            self.kernel_phase_program_status_var.set('Trust lift phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (Trust Lift V2)')
+            tk.Label(toggle_grid, text='MV integration tuning phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
+            self.kernel_phase_program_status_var.set('MV integration tuning phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MVT Phase Plan V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1753,13 +1784,13 @@ class AIAssistantApp:
 
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('Trust lift phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (Trust Lift V2)')
+            self.kernel_phase_program_status_var.set('MV integration tuning phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MVT Phase Plan V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (Trust Lift V2)')
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MVT Phase Plan V1)')
         self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', True)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
@@ -1770,7 +1801,7 @@ class AIAssistantApp:
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('Trust lift phase program: no phases loaded')
+            self.kernel_phase_program_status_var.set('MV integration tuning phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1850,7 +1881,7 @@ class AIAssistantApp:
         challenge_active = bool(challenge_state.get('active', False))
         challenge_remaining = int(challenge_state.get('remaining_steps', 0) or 0)
         runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text},clamp={(1 if clamp_active else 0)}/{clamp_cooldown_remaining},challenge={(1 if challenge_active else 0)}/{challenge_remaining}'
-        self.kernel_phase_program_status_var.set(f'Trust lift phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        self.kernel_phase_program_status_var.set(f'MV integration tuning phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -3557,7 +3588,7 @@ class AIAssistantApp:
             return []
 
     def _machine_vision_signature(self, player_row: int, player_col: int) -> str:
-        local_ascii = self._build_local_status_snapshot(player_row, player_col, radius=1, include_render_details=False, facing=self.player_facing)
+        local_ascii = self._machine_vision_grid_snapshot(player_row, player_col)
         mode = self._normalized_layout_mode()
         difficulty = self._normalized_maze_difficulty() if mode == 'maze' else 'n/a'
         return f'mode={mode}|difficulty={difficulty}|grid={self.grid_cells}|facing={self.player_facing}|local_ascii={local_ascii}'
@@ -3566,6 +3597,8 @@ class AIAssistantApp:
         return bool(self.machine_vision_master_enable)
 
     def _mv_route_mode_active(self) -> bool:
+        if bool(getattr(self, 'mv_routing_deprecated', False)):
+            return False
         return bool(self._machine_vision_enabled() and self.mv_route_planning_mode_enable)
 
     def _machine_vision_exit_signature(self) -> str:
@@ -3818,22 +3851,22 @@ class AIAssistantApp:
                 self.maze_known_cells[known_cell] = '.'
         self.maze_known_cells[player_row, player_col] = 'P'
 
-    def _is_local_cell_visible(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None) -> bool:
-        return self._local_visibility_kind(origin_row, origin_col, row, col, facing=facing) != 'none'
+    def _is_local_cell_visible(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None, max_depth: int | None=None) -> bool:
+        return self._local_visibility_kind(origin_row, origin_col, row, col, facing=facing, max_depth=max_depth) != 'none'
 
-    def _local_visibility_kind(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None) -> str:
+    def _local_visibility_kind(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None, max_depth: int | None=None) -> str:
         if row < 0 or row >= self.grid_cells or col < 0 or (col >= self.grid_cells):
             return 'none'
         if row == origin_row and col == origin_col:
             return 'full'
-        strength = self._visibility_strength(origin_row, origin_col, row, col, facing=facing)
+        strength = self._visibility_strength(origin_row, origin_col, row, col, facing=facing, max_depth=max_depth)
         if strength < self.maze_fov_half_threshold:
             return 'none'
         if strength < self.maze_fov_full_threshold:
             return 'half'
         return 'full'
 
-    def _visibility_strength(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None) -> float:
+    def _visibility_strength(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None, max_depth: int | None=None) -> float:
         if row < 0 or row >= self.grid_cells or col < 0 or (col >= self.grid_cells):
             return 0.0
         dr = row - origin_row
@@ -3844,7 +3877,8 @@ class AIAssistantApp:
         forward = dr * fv_r + dc * fv_c
         if forward <= 0:
             return 0.0
-        max_forward = max(1.0, float(self.maze_fov_depth) + 0.5)
+        depth_limit = float(self.maze_fov_depth) if max_depth is None else float(max(1, int(max_depth)))
+        max_forward = max(1.0, depth_limit + 0.5)
         if forward > max_forward:
             return 0.0
         distance = math.hypot(dr, dc)
@@ -3855,7 +3889,7 @@ class AIAssistantApp:
         cos_limit = math.cos(math.radians(half_angle))
         cos_theta = forward / distance
         in_cone = cos_theta >= cos_limit
-        lateral_beam_visible = self._is_cell_in_kernel_lateral_beam(origin_row, origin_col, row, col, facing=facing)
+        lateral_beam_visible = self._is_cell_in_kernel_lateral_beam(origin_row, origin_col, row, col, facing=facing, max_depth=max_depth)
         if not in_cone and (not lateral_beam_visible):
             return 0.0
         los_clear, corner_graze_steps = self._line_of_sight_metrics(origin_row, origin_col, row, col)
@@ -3900,14 +3934,15 @@ class AIAssistantApp:
         widen = max(0.0, float(self.maze_fov_lateral_extra_degrees)) * near_weight * lateral_weight
         return max(28.0, min(88.0, half_angle + widen))
 
-    def _is_cell_in_kernel_lateral_beam(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None) -> bool:
+    def _is_cell_in_kernel_lateral_beam(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None, max_depth: int | None=None) -> bool:
         if row < 0 or row >= self.grid_cells or col < 0 or (col >= self.grid_cells):
             return False
         fv_r, fv_c = self._facing_vector_for(facing)
         dr = row - origin_row
         dc = col - origin_col
         forward = dr * fv_r + dc * fv_c
-        if forward <= 0 or forward > max(1.0, float(self.maze_fov_depth) + 0.5):
+        depth_limit = float(self.maze_fov_depth) if max_depth is None else float(max(1, int(max_depth)))
+        if forward <= 0 or forward > max(1.0, depth_limit + 0.5):
             return False
         side_r = -fv_c
         side_c = fv_r
@@ -3944,7 +3979,7 @@ class AIAssistantApp:
     def _facing_vector(self) -> tuple[int, int]:
         return self._facing_vector_for(self.player_facing)
 
-    def _is_cell_in_forward_fov(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None) -> bool:
+    def _is_cell_in_forward_fov(self, origin_row: int, origin_col: int, row: int, col: int, facing: str | None=None, max_depth: int | None=None) -> bool:
         dr = row - origin_row
         dc = col - origin_col
         if dr == 0 and dc == 0:
@@ -3953,7 +3988,8 @@ class AIAssistantApp:
         forward = dr * fv_r + dc * fv_c
         if forward <= 0:
             return False
-        if forward > max(1.0, float(self.maze_fov_depth) + 0.5):
+        depth_limit = float(self.maze_fov_depth) if max_depth is None else float(max(1, int(max_depth)))
+        if forward > max(1.0, depth_limit + 0.5):
             return False
         distance = math.hypot(dr, dc)
         if distance <= 0.0:
@@ -4957,6 +4993,46 @@ class AIAssistantApp:
         self.endocrine_event_log.append(event_line)
         self._append_memory_log(f'endocrine_event source={source} {text}')
 
+    def _build_ouch_event(self, *, action: str, outcome_score: float, reward_value: float, penalty_value: float, tags: list[str], from_cell: tuple[int, int] | None, to_cell: tuple[int, int] | None) -> dict[str, object]:
+        tag_set = {str(tag).strip() for tag in tags if str(tag).strip()}
+        severity_tags = {'dead_end_slap', 'dead_end_tip_revisit', 'dead_end_entrance_revisit', 'visible_terminal', 'boxed_corridor', 'cycle_pair', 'transition_repeat', 'immediate_backtrack'}
+        severity_hits = len(tag_set & severity_tags)
+        base_signal = max(0.0, float(penalty_value) - 0.25 * float(reward_value))
+        if float(outcome_score) < 0.0:
+            base_signal += min(80.0, abs(float(outcome_score)) * 0.2)
+        base_signal += float(severity_hits) * float(self.ouch_response_tag_boost)
+        intensity = max(0.0, min(1.0, base_signal / float(self.ouch_response_intensity_scale)))
+        return {
+            'step': int(self.memory_step_index),
+            'mode': self._normalized_layout_mode(),
+            'difficulty': self._normalized_maze_difficulty() if self._normalized_layout_mode() == 'maze' else 'n/a',
+            'action': str(action or 'UNKNOWN_ACTION'),
+            'from_cell': list(from_cell) if from_cell is not None else None,
+            'to_cell': list(to_cell) if to_cell is not None else None,
+            'outcome_score': float(round(float(outcome_score), 4)),
+            'reward_signal': float(round(float(reward_value), 4)),
+            'penalty_signal': float(round(float(penalty_value), 4)),
+            'severity_tag_hits': int(severity_hits),
+            'base_signal': float(round(base_signal, 4)),
+            'intensity': float(round(intensity, 4)),
+            'tags': sorted(tag_set),
+            'train_enabled': bool(self.ouch_response_train_enable),
+        }
+
+    def _maybe_record_ouch_event(self, *, action: str, outcome_score: float, reward_value: float, penalty_value: float, tags: list[str], from_cell: tuple[int, int] | None, to_cell: tuple[int, int] | None) -> None:
+        if not self.ouch_response_enable:
+            return
+        event = self._build_ouch_event(action=action, outcome_score=outcome_score, reward_value=reward_value, penalty_value=penalty_value, tags=tags, from_cell=from_cell, to_cell=to_cell)
+        if float(event.get('base_signal', 0.0) or 0.0) < float(self.ouch_response_min_penalty):
+            return
+        self.ouch_response_candidate_count += 1
+        self.ouch_response_event_buffer.append(event)
+        self.ouch_response_last_event = dict(event)
+        # Placeholder only: we collect candidate events now; trainer wiring comes in a later phase.
+        if self.ouch_response_train_enable:
+            self.ouch_response_training_sample_count += 1
+        self._append_memory_log(f"ouch_event intensity={round(float(event.get('intensity', 0.0) or 0.0), 3)} base_signal={round(float(event.get('base_signal', 0.0) or 0.0), 2)} penalty={round(float(penalty_value), 2)} reward={round(float(reward_value), 2)} tags={','.join(list(event.get('tags', []))[:6]) or 'none'} train={(1 if self.ouch_response_train_enable else 0)}")
+
     def _record_action_outcome_memory(self, action_taken: str, outcome_value: float, reward_signal: float, penalty_signal: float, reason_tags: list[str] | tuple[str, ...] | None=None, details: dict | None=None, player_cell: tuple[int, int] | None=None) -> None:
         action = (action_taken or '').strip().upper() or 'UNKNOWN_ACTION'
         mode = self._normalized_layout_mode()
@@ -4997,6 +5073,7 @@ class AIAssistantApp:
             delta_text = self._endocrine_delta_text(before_state, after_state)
             tag_summary = ','.join(tags[:6]) if tags else 'none'
             self._append_endocrine_event('outcome', f"delta=[{delta_text or 'none'}] outcome={round(outcome_score, 2)} reward={round(reward_value, 2)} penalty={round(penalty_value, 2)} tags={tag_summary}")
+        self._maybe_record_ouch_event(action=action, outcome_score=outcome_score, reward_value=reward_value, penalty_value=penalty_value, tags=tags, from_cell=from_cell, to_cell=to_cell)
         self._learn_spatial_transition_memory(from_cell=from_cell, to_cell=to_cell, outcome_score=outcome_score, reason_tags=tags)
         self._register_transition_trap_event(from_cell=from_cell, to_cell=to_cell, reason_tags=tags, outcome_score=outcome_score)
         self._append_memory_log(f"cause_effect action={action} outcome={outcome_label} reward={round(reward_value, 2)} penalty={round(penalty_value, 2)} tags={tag_text or '(none)'}")
@@ -5859,7 +5936,7 @@ class AIAssistantApp:
                     continue
                 if self._mv_route_mode_active():
                     self._mv_preplan_last_status = 'route-mode-bypass'
-                elif self.mv_preplan_sweep_enable:
+                elif self.mv_preplan_sweep_enable or self.mv_kernel_identification_halt_enable:
                     mv_preplan_ready, mv_preplan_note = self._mv_preplan_acquire_until_ready()
                     self._mv_preplan_last_status = mv_preplan_note
                     if not mv_preplan_ready:
@@ -5871,14 +5948,15 @@ class AIAssistantApp:
                         live_debug += f'\n\n[EXPLORATION SCORES]\n{exploration_snapshot}'
                         self.root.after(0, self._set_debug_text, live_debug)
                         continue
-                    post_ready_hints = self._machine_vision_kernel_hints()
-                    post_ready_directions = self._mv_preplan_select_look_directions(post_ready_hints)
-                    if not post_ready_directions:
-                        post_ready_directions = self._available_look_directions()
-                    self._preview_look_directions_blocking(post_ready_directions)
-                    if post_ready_directions:
-                        mv_preplan_note = f"{mv_preplan_note} look={','.join(post_ready_directions)}".strip()
-                        self._mv_preplan_last_status = mv_preplan_note
+                    if self.mv_preplan_sweep_enable:
+                        post_ready_hints = self._machine_vision_kernel_hints()
+                        post_ready_directions = self._mv_preplan_select_look_directions(post_ready_hints)
+                        if not post_ready_directions:
+                            post_ready_directions = self._available_look_directions()
+                        self._preview_look_directions_blocking(post_ready_directions)
+                        if post_ready_directions:
+                            mv_preplan_note = f"{mv_preplan_note} look={','.join(post_ready_directions)}".strip()
+                            self._mv_preplan_last_status = mv_preplan_note
                 else:
                     self._mv_preplan_last_status = 'disabled'
                     self._preview_look_directions_blocking(self._available_look_directions())
@@ -6444,6 +6522,23 @@ class AIAssistantApp:
                     objective_steps += 1
             if maze_mode and self._is_valid_traversal_move(selected_move):
                 selected_breakdown = self._exploration_move_breakdown(selected_move)
+                mv_exit_pred_cell = tuple(selected_breakdown.get('mv_exit_pred_cell', (-1, -1)) or (-1, -1))
+                if (not isinstance(mv_exit_pred_cell, (tuple, list))) or len(mv_exit_pred_cell) != 2:
+                    mv_exit_pred_cell = (-1, -1)
+                self._last_mv_kernel_breakdown_step = int(self.memory_step_index)
+                self._last_mv_kernel_breakdown = {
+                    'move': str(selected_move),
+                    'mv_exit_usable': int(selected_breakdown.get('mv_exit_usable', 0) or 0),
+                    'mv_exit_pred_cell': (int(mv_exit_pred_cell[0]), int(mv_exit_pred_cell[1])),
+                    'mv_exit_hint_strength': round(float(selected_breakdown.get('mv_exit_hint_strength', 0.0) or 0.0), 3),
+                    'mv_exit_alignment_bonus': int(selected_breakdown.get('mv_exit_alignment_bonus', 0) or 0),
+                    'mv_exit_alignment_penalty': int(selected_breakdown.get('mv_exit_alignment_penalty', 0) or 0),
+                    'mv_cellmap_usable': int(selected_breakdown.get('mv_cellmap_usable', 0) or 0),
+                    'mv_cellmap_open_alignment_bonus': int(selected_breakdown.get('mv_cellmap_open_alignment_bonus', 0) or 0),
+                    'mv_cellmap_blocked_risk_penalty': int(selected_breakdown.get('mv_cellmap_blocked_risk_penalty', 0) or 0),
+                    'mv_cellmap_neighbor_open_bonus': int(selected_breakdown.get('mv_cellmap_neighbor_open_bonus', 0) or 0),
+                    'mv_cellmap_neighbor_blocked_penalty': int(selected_breakdown.get('mv_cellmap_neighbor_blocked_penalty', 0) or 0),
+                }
                 current_pattern_signature = self._canonical_pattern_signature(self._current_pattern_signature())
                 current_pattern_name = self._sanitize_pattern_name(str(evaluation.get('pattern_name', '') or ''))
                 if not current_pattern_name:
@@ -6825,37 +6920,42 @@ class AIAssistantApp:
             if saved_difficulty in {'easy', 'medium', 'hard', 'very hard'}:
                 self.maze_difficulty.set(saved_difficulty)
             saved_mv_route_mode = payload.get('mv_route_planning_mode_enable')
-            if isinstance(saved_mv_route_mode, bool):
-                self.mv_route_planning_mode_enable = saved_mv_route_mode
-                self.mv_route_planning_mode_var.set(saved_mv_route_mode)
-            elif isinstance(saved_mv_route_mode, (int, float)):
-                parsed = bool(saved_mv_route_mode)
-                self.mv_route_planning_mode_enable = parsed
-                self.mv_route_planning_mode_var.set(parsed)
-            elif isinstance(saved_mv_route_mode, str):
-                parsed_text = saved_mv_route_mode.strip().lower()
-                if parsed_text in {'1', 'true', 'yes', 'on'}:
-                    self.mv_route_planning_mode_enable = True
-                    self.mv_route_planning_mode_var.set(True)
-                elif parsed_text in {'0', 'false', 'no', 'off'}:
-                    self.mv_route_planning_mode_enable = False
-                    self.mv_route_planning_mode_var.set(False)
+            if not bool(getattr(self, 'mv_routing_deprecated', False)):
+                if isinstance(saved_mv_route_mode, bool):
+                    self.mv_route_planning_mode_enable = saved_mv_route_mode
+                    self.mv_route_planning_mode_var.set(saved_mv_route_mode)
+                elif isinstance(saved_mv_route_mode, (int, float)):
+                    parsed = bool(saved_mv_route_mode)
+                    self.mv_route_planning_mode_enable = parsed
+                    self.mv_route_planning_mode_var.set(parsed)
+                elif isinstance(saved_mv_route_mode, str):
+                    parsed_text = saved_mv_route_mode.strip().lower()
+                    if parsed_text in {'1', 'true', 'yes', 'on'}:
+                        self.mv_route_planning_mode_enable = True
+                        self.mv_route_planning_mode_var.set(True)
+                    elif parsed_text in {'0', 'false', 'no', 'off'}:
+                        self.mv_route_planning_mode_enable = False
+                        self.mv_route_planning_mode_var.set(False)
+            else:
+                self.mv_route_planning_mode_enable = False
+                self.mv_route_planning_mode_var.set(False)
             saved_mv_master = payload.get('machine_vision_master_enable')
+            parsed_mv_master: bool | None = None
             if isinstance(saved_mv_master, bool):
-                self.machine_vision_master_enable = saved_mv_master
-                self.machine_vision_master_enable_var.set(saved_mv_master)
+                parsed_mv_master = saved_mv_master
             elif isinstance(saved_mv_master, (int, float)):
-                parsed = bool(saved_mv_master)
-                self.machine_vision_master_enable = parsed
-                self.machine_vision_master_enable_var.set(parsed)
+                parsed_mv_master = bool(saved_mv_master)
             elif isinstance(saved_mv_master, str):
                 parsed_text = saved_mv_master.strip().lower()
                 if parsed_text in {'1', 'true', 'yes', 'on'}:
-                    self.machine_vision_master_enable = True
-                    self.machine_vision_master_enable_var.set(True)
+                    parsed_mv_master = True
                 elif parsed_text in {'0', 'false', 'no', 'off'}:
-                    self.machine_vision_master_enable = False
-                    self.machine_vision_master_enable_var.set(False)
+                    parsed_mv_master = False
+            # Keep MV enabled by kernel defaults unless a positive persisted enable is present.
+            # This avoids stale legacy "MV off" persisted states silently disabling MV.
+            if parsed_mv_master is True:
+                self.machine_vision_master_enable = True
+                self.machine_vision_master_enable_var.set(True)
             saved_fast_mode = payload.get('fast_mode_enabled')
             if isinstance(saved_fast_mode, bool):
                 self._apply_fast_mode_profile(saved_fast_mode, sync_var=True, persist=False)
@@ -6992,7 +7092,8 @@ class AIAssistantApp:
             payload = {'geometry': self.root.winfo_geometry()}
             payload['layout_mode'] = self._normalized_layout_mode()
             payload['maze_difficulty'] = self._normalized_maze_difficulty()
-            payload['mv_route_planning_mode_enable'] = bool(self.mv_route_planning_mode_enable)
+            payload['mv_route_planning_mode_enable'] = bool((not self.mv_routing_deprecated) and self.mv_route_planning_mode_enable)
+            payload['mv_routing_deprecated'] = int(bool(self.mv_routing_deprecated))
             payload['machine_vision_master_enable'] = bool(self.machine_vision_master_enable)
             payload['fast_mode_enabled'] = bool(self.fast_mode_enabled)
             payload['long_run_mode_enabled'] = bool(getattr(self, 'long_run_mode_enabled', False))
@@ -7592,7 +7693,7 @@ class AIAssistantApp:
         _flush_grid_block()
         return '\n'.join(out_lines).strip()
 
-    def _edge_context_probe_cells(self, origin_row: int, origin_col: int, facing: str | None=None) -> set[tuple[int, int]]:
+    def _edge_context_probe_cells(self, origin_row: int, origin_col: int, facing: str | None=None, max_depth: int | None=None) -> set[tuple[int, int]]:
         """
         Return nearby side-context cells around the forward beam for ASCII views.
 
@@ -7611,7 +7712,7 @@ class AIAssistantApp:
             beam_col = origin_col + fv_c * step
             if beam_row < 0 or beam_row >= self.grid_cells or beam_col < 0 or (beam_col >= self.grid_cells):
                 break
-            if step > 0 and (not self._is_local_cell_visible(origin_row, origin_col, beam_row, beam_col, facing=facing)):
+            if step > 0 and (not self._is_local_cell_visible(origin_row, origin_col, beam_row, beam_col, facing=facing, max_depth=max_depth)):
                 break
             for sv_r, sv_c in side_vectors:
                 side_row = beam_row + sv_r
@@ -7627,10 +7728,10 @@ class AIAssistantApp:
         cells.discard((origin_row, origin_col))
         return cells
 
-    def _build_local_status_snapshot(self, player_row: int, player_col: int, radius: int=1, include_render_details: bool=False, facing: str | None=None) -> str:
+    def _build_local_status_snapshot(self, player_row: int, player_col: int, radius: int=1, include_render_details: bool=False, facing: str | None=None, max_depth: int | None=None) -> str:
         facing_for_view = facing or self.player_facing
         edge_markers: dict[tuple[int, int], str] = {}
-        edge_context_cells = self._edge_context_probe_cells(player_row, player_col, facing_for_view)
+        edge_context_cells = self._edge_context_probe_cells(player_row, player_col, facing_for_view, max_depth=max_depth)
         if include_render_details:
             edge_list = self._visible_edge_opening_cells(player_row, player_col, facing_for_view)
             marked_off_edges = self._visible_verified_empty_opening_edges(player_row, player_col, facing_for_view)
@@ -7647,7 +7748,7 @@ class AIAssistantApp:
         for row in range(self.grid_cells):
             tokens: list[str] = []
             for col in range(self.grid_cells):
-                vis_kind = self._local_visibility_kind(player_row, player_col, row, col, facing=facing_for_view)
+                vis_kind = self._local_visibility_kind(player_row, player_col, row, col, facing=facing_for_view, max_depth=max_depth)
                 if row == player_row and col == player_col:
                     token = 'P'
                 elif vis_kind == 'none':
@@ -7677,9 +7778,9 @@ class AIAssistantApp:
             rows.append(f"Beam side edge marker(s): open={(open_details if open_details else 'none')}; marked_off={(marked_details if marked_details else 'none')}; loop_marked={(loop_marked_details if loop_marked_details else 'none')}")
         return self._apply_ascii_visibility_mode('\n'.join(rows))
 
-    def _build_interpretable_fov_snapshot(self, player_row: int, player_col: int) -> str:
+    def _build_interpretable_fov_snapshot(self, player_row: int, player_col: int, max_depth: int | None=None) -> str:
         edge_markers: dict[tuple[int, int], str] = {}
-        edge_context_cells = self._edge_context_probe_cells(player_row, player_col, self.player_facing)
+        edge_context_cells = self._edge_context_probe_cells(player_row, player_col, self.player_facing, max_depth=max_depth)
         for row, col, side in self._visible_edge_opening_cells(player_row, player_col, self.player_facing):
             edge_markers[row, col] = {'UP': '^', 'RIGHT': '>', 'DOWN': 'v', 'LEFT': '<'}.get(side, '*')
         for row, col, _side in self._visible_verified_empty_opening_edges(player_row, player_col, self.player_facing):
@@ -7696,14 +7797,14 @@ class AIAssistantApp:
                 if row == player_row and col == player_col:
                     tokens.append('P')
                     continue
-                vis_kind = self._local_visibility_kind(player_row, player_col, row, col)
+                vis_kind = self._local_visibility_kind(player_row, player_col, row, col, max_depth=max_depth)
                 if vis_kind == 'none':
                     if (row, col) in edge_context_cells:
                         tokens.append('B' if (row, col) in self.blocked_cells else 'O')
                     else:
                         tokens.append('?')
                     continue
-                strength = self._visibility_strength(player_row, player_col, row, col, facing=self.player_facing)
+                strength = self._visibility_strength(player_row, player_col, row, col, facing=self.player_facing, max_depth=max_depth)
                 strength_bin = int(round(max(0.0, min(1.0, strength)) * 9.0))
                 _los_clear, corner_graze_steps = self._line_of_sight_metrics(player_row, player_col, row, col)
                 if corner_graze_steps > 0:
@@ -7730,6 +7831,10 @@ class AIAssistantApp:
         else:
             rows.append('Corner-graze cells: none')
         return self._apply_ascii_visibility_mode('\n'.join(rows))
+
+    def _machine_vision_grid_snapshot(self, player_row: int, player_col: int) -> str:
+        # Keep MV training input at full grid scale regardless of the runtime FOV depth.
+        return self._build_local_status_snapshot(player_row, player_col, radius=1, include_render_details=False, facing=self.player_facing, max_depth=self.grid_cells)
 
     def _build_mental_sweep(self, player_row: int, player_col: int) -> dict[tuple[int, int], str]:
         """Temporary look-around map from all facings before selecting a move."""
@@ -12949,7 +13054,103 @@ class AIAssistantApp:
         self.game_canvas.bind('<s>', lambda event: self._on_manual_game_key(event, 'DOWN'))
         self.game_canvas.bind('<a>', lambda event: self._on_manual_game_key(event, 'LEFT'))
         self.game_canvas.bind('<d>', lambda event: self._on_manual_game_key(event, 'RIGHT'))
+        self.game_canvas.bind('<F8>', lambda _event: self._toggle_mv_render_debug())
         self.game_canvas.focus_set()
+
+    def _toggle_mv_render_debug(self) -> None:
+        self.mv_render_debug_enable = not bool(self.mv_render_debug_enable)
+        if not self.mv_render_debug_enable:
+            self.game_canvas.delete('mv_render_debug')
+            self._set_mv_render_debug_panel_text('MVDBG disabled (F8 to toggle)')
+            self.status_var.set('MV render debug overlay disabled (F8 to toggle)')
+        else:
+            self._set_mv_render_debug_panel_text('MVDBG enabled (awaiting next frame)')
+            self.status_var.set('MV render debug overlay enabled (F8 to toggle)')
+        self._refresh_game_state()
+
+    def _set_mv_render_debug_panel_text(self, text: str) -> None:
+        if hasattr(self, 'mv_render_debug_panel_var'):
+            self.mv_render_debug_panel_var.set(str(text or '').strip())
+
+    def _mv_render_debug_status_line(self) -> str:
+        info = dict(getattr(self, '_mv_render_debug_last', {}) or {})
+        frame = int(info.get('frame', 0) or 0)
+        step = int(info.get('step', -1) or -1)
+        mode = str(info.get('mode', 'unknown') or 'unknown')
+        self_guess = info.get('self_guess', None)
+        exit_guess = info.get('exit_guess', None)
+        outline_items = int(info.get('outline_items', 0) or 0)
+        debug_items = int(info.get('debug_items', 0) or 0)
+        return (
+            'Machine vision render debug: '
+            f"enabled={(1 if self.mv_render_debug_enable else 0)} frame={frame} step={step} mode={mode} "
+            f'self_guess={self_guess} exit_guess={exit_guess} '
+            f'outline_items={outline_items} debug_items={debug_items}.'
+        )
+
+    def _draw_mv_render_debug_overlay(self, player_row: int, player_col: int, target_row: int, target_col: int) -> None:
+        self.game_canvas.delete('mv_render_debug')
+        if self._normalized_layout_mode() != 'maze':
+            self._set_mv_render_debug_panel_text('')
+            return
+        if not self.mv_render_debug_enable:
+            self._set_mv_render_debug_panel_text('MVDBG disabled (F8 to toggle)')
+            return
+        self._mv_render_debug_frame = int(self._mv_render_debug_frame) + 1
+        self_guess, exit_guess = self._machine_vision_guess_cells_for_maze()
+        hints = self._machine_vision_kernel_hints()
+
+        def _draw_rect(cell: tuple[int, int], color: str, width: int, *, dash: tuple[int, int] | None=None) -> None:
+            row, col = cell
+            inset = max(2, int(self.cell_size * 0.06))
+            x1 = col * self.cell_size + inset
+            y1 = row * self.cell_size + inset
+            x2 = (col + 1) * self.cell_size - inset
+            y2 = (row + 1) * self.cell_size - inset
+            kwargs = {'fill': '', 'outline': color, 'width': width, 'tags': 'mv_render_debug'}
+            if dash:
+                kwargs['dash'] = dash
+            self.game_canvas.create_rectangle(x1, y1, x2, y2, **kwargs)
+            self.game_canvas.create_line(x1, y1, x2, y2, fill=color, width=1, tags='mv_render_debug')
+            self.game_canvas.create_line(x2, y1, x1, y2, fill=color, width=1, tags='mv_render_debug')
+
+        if self.mv_render_debug_show_actual_cells:
+            _draw_rect((int(player_row), int(player_col)), '#ff6b00', 2, dash=(3, 3))
+            _draw_rect((int(target_row), int(target_col)), '#0077ff', 2, dash=(3, 3))
+            pcx, pcy = self._cell_center((int(player_row), int(player_col)))
+            tcx, tcy = self._cell_center((int(target_row), int(target_col)))
+            self.game_canvas.create_text(pcx, pcy, text='ACT-P', fill='#ff6b00', font=('Helvetica', 8, 'bold'), tags='mv_render_debug')
+            self.game_canvas.create_text(tcx, tcy, text='ACT-E', fill='#0077ff', font=('Helvetica', 8, 'bold'), tags='mv_render_debug')
+
+        if self_guess is not None:
+            _draw_rect(self_guess, '#ff00a8', 2)
+        if exit_guess is not None:
+            _draw_rect(exit_guess, '#00c8ff', 2)
+
+        if self.mv_render_debug_show_text:
+            panel_lines = [
+                f"MVDBG frame={self._mv_render_debug_frame} step={int(self.memory_step_index)}",
+                f"drawn_outline_self={self_guess} exit={exit_guess}",
+                f"actual_player=({int(player_row)}, {int(player_col)}) actual_exit=({int(target_row)}, {int(target_col)})",
+                f"hint_enabled={(1 if bool(hints.get('enabled', False)) else 0)} self_fresh={(1 if bool(hints.get('self_fresh', False)) else 0)} exit_fresh={(1 if bool(hints.get('exit_fresh', False)) else 0)}",
+                f"hint_self={tuple(hints.get('self_pred_cell', (-1, -1)) or (-1, -1))} hint_exit={tuple(hints.get('exit_pred_cell', (-1, -1)) or (-1, -1))}",
+            ]
+            self._set_mv_render_debug_panel_text('\n'.join(panel_lines))
+        else:
+            self._set_mv_render_debug_panel_text('MVDBG text hidden (MV_RENDER_DEBUG_SHOW_TEXT=0)')
+
+        self.game_canvas.tag_raise('mv_render_debug')
+        outline_items = len(self.game_canvas.find_withtag('maze_mv_outline'))
+        debug_items = len(self.game_canvas.find_withtag('mv_render_debug'))
+        self._mv_render_debug_last = {
+            'frame': int(self._mv_render_debug_frame),
+            'step': int(self.memory_step_index),
+            'mode': 'drawn',
+            'self_guess': self_guess,
+            'exit_guess': exit_guess,
+            'outline_items': int(outline_items),
+            'debug_items': int(debug_items),
+        }
 
     def _cell_center(self, cell: tuple[int, int]) -> tuple[float, float]:
         row, col = cell
@@ -12982,6 +13183,8 @@ class AIAssistantApp:
         self.game_canvas.delete('vision_route')
         self.game_canvas.delete('vision_pred')
         self.game_canvas.delete('vision_exit_pred')
+        self.game_canvas.delete('maze_mv_outline')
+        self.game_canvas.delete('mv_render_debug')
         light = '#f0f4ff'
         dark = '#dbe4ff'
         for row in range(self.grid_cells):
@@ -13106,7 +13309,7 @@ class AIAssistantApp:
             return (True, 'mode=non-maze')
         if not self._machine_vision_enabled():
             return (True, 'bypass:mv-disabled')
-        if not self.mv_preplan_sweep_enable:
+        if not self.mv_preplan_sweep_enable and (not self.mv_kernel_identification_halt_enable):
             return (True, 'disabled')
         if not self.machine_vision_player_localization_enable:
             return (True, 'bypass:self_localization_disabled')
@@ -13136,7 +13339,7 @@ class AIAssistantApp:
             return (True, 'mode=non-maze')
         if not self._machine_vision_enabled():
             return (True, 'bypass:mv-disabled')
-        if not self.mv_preplan_sweep_enable:
+        if not self.mv_preplan_sweep_enable and (not self.mv_kernel_identification_halt_enable):
             return (True, 'disabled')
         trusted_sources = {'learned_signature', 'prior_sample_context', 'prior_sample'}
 
@@ -13300,6 +13503,99 @@ class AIAssistantApp:
             self.game_canvas.tag_raise(self.end_label)
         if hasattr(self, 'player'):
             self.game_canvas.tag_raise(self.player)
+        self._draw_machine_vision_guess_outlines()
+
+    def _machine_vision_guess_cells_for_maze(self) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+        if self._normalized_layout_mode() != 'maze' or (not self._machine_vision_enabled()):
+            return (None, None)
+
+        def _coerce_cell(raw_cell: object) -> tuple[int, int] | None:
+            if not isinstance(raw_cell, (tuple, list)) or len(raw_cell) != 2:
+                return None
+            try:
+                row = int(raw_cell[0])
+                col = int(raw_cell[1])
+            except Exception:
+                return None
+            if row < 0 or col < 0 or row >= self.grid_cells or col >= self.grid_cells:
+                return None
+            return (row, col)
+
+        self_guess = _coerce_cell(self.machine_vision_last_prediction.get('predicted_cell', (-1, -1)))
+        exit_guess = _coerce_cell(self.machine_vision_exit_last_prediction.get('predicted_cell', (-1, -1)))
+        return (self_guess, exit_guess)
+
+    def _draw_machine_vision_guess_outlines(self) -> None:
+        self.game_canvas.delete('maze_mv_outline')
+        self.game_canvas.delete('vision_pred')
+        self.game_canvas.delete('vision_exit_pred')
+        if self._normalized_layout_mode() != 'maze':
+            self._mv_render_debug_last = {
+                'frame': int(getattr(self, '_mv_render_debug_frame', 0) or 0),
+                'step': int(self.memory_step_index),
+                'mode': 'non_maze',
+                'self_guess': None,
+                'exit_guess': None,
+                'outline_items': 0,
+                'debug_items': int(len(self.game_canvas.find_withtag('mv_render_debug'))),
+            }
+            return
+        if not self._machine_vision_enabled():
+            self._mv_render_debug_last = {
+                'frame': int(getattr(self, '_mv_render_debug_frame', 0) or 0),
+                'step': int(self.memory_step_index),
+                'mode': 'mv_disabled',
+                'self_guess': None,
+                'exit_guess': None,
+                'outline_items': 0,
+                'debug_items': int(len(self.game_canvas.find_withtag('mv_render_debug'))),
+            }
+            return
+        self_guess, exit_guess = self._machine_vision_guess_cells_for_maze()
+        if self_guess is None and exit_guess is None:
+            self._mv_render_debug_last = {
+                'frame': int(getattr(self, '_mv_render_debug_frame', 0) or 0),
+                'step': int(self.memory_step_index),
+                'mode': 'no_guess',
+                'self_guess': None,
+                'exit_guess': None,
+                'outline_items': 0,
+                'debug_items': int(len(self.game_canvas.find_withtag('mv_render_debug'))),
+            }
+            return
+        inset_outer = max(1, int(self.cell_size * 0.02))
+        inset_inner = max(3, int(self.cell_size * 0.14))
+
+        def _draw_cell_outline(cell: tuple[int, int], label: str, *, anchor: str='nw') -> None:
+            row, col = cell
+            x1 = col * self.cell_size + inset_outer
+            y1 = row * self.cell_size + inset_outer
+            x2 = (col + 1) * self.cell_size - inset_outer
+            y2 = (row + 1) * self.cell_size - inset_outer
+            self.game_canvas.create_rectangle(x1, y1, x2, y2, fill='', outline='#000000', width=4, tags='maze_mv_outline')
+            self.game_canvas.create_rectangle(x1 + inset_inner, y1 + inset_inner, x2 - inset_inner, y2 - inset_inner, fill='', outline='#000000', width=2, tags='maze_mv_outline')
+            if anchor == 'se':
+                self.game_canvas.create_text(x2 - 2, y2 - 2, anchor=tk.SE, text=label, fill='#000000', font=('Helvetica', 8, 'bold'), tags='maze_mv_outline')
+            else:
+                self.game_canvas.create_text(x1 + 2, y1 + 2, anchor=tk.NW, text=label, fill='#000000', font=('Helvetica', 8, 'bold'), tags='maze_mv_outline')
+
+        if self_guess is not None and self_guess == exit_guess:
+            _draw_cell_outline(self_guess, 'MV-P/E', anchor='nw')
+        else:
+            if self_guess is not None:
+                _draw_cell_outline(self_guess, 'MV-P', anchor='nw')
+            if exit_guess is not None:
+                _draw_cell_outline(exit_guess, 'MV-E', anchor='se')
+        self.game_canvas.tag_raise('maze_mv_outline')
+        self._mv_render_debug_last = {
+            'frame': int(getattr(self, '_mv_render_debug_frame', 0) or 0),
+            'step': int(self.memory_step_index),
+            'mode': 'outline_drawn',
+            'self_guess': self_guess,
+            'exit_guess': exit_guess,
+            'outline_items': int(len(self.game_canvas.find_withtag('maze_mv_outline'))),
+            'debug_items': int(len(self.game_canvas.find_withtag('mv_render_debug'))),
+        }
 
     def _draw_machine_vision_cellmap_overlay(self) -> None:
         self.game_canvas.delete('vision_grid_pred')
@@ -13397,75 +13693,12 @@ class AIAssistantApp:
             self.game_canvas.tag_raise(self.end_label)
 
     def _draw_machine_vision_prediction_overlay(self, player_row: int, player_col: int) -> None:
-        self.game_canvas.delete('vision_pred')
-        if self._normalized_layout_mode() != 'maze':
-            return
-        if not self._machine_vision_enabled():
-            return
-        if not self.machine_vision_player_localization_enable:
-            return
-        predicted = self.machine_vision_last_prediction.get('predicted_cell', (-1, -1))
-        if not isinstance(predicted, (tuple, list)) or len(predicted) != 2:
-            return
-        try:
-            pred_row = int(predicted[0])
-            pred_col = int(predicted[1])
-        except Exception:
-            return
-        if pred_row < 0 or pred_col < 0 or pred_row >= self.grid_cells or (pred_col >= self.grid_cells):
-            return
-        inset = max(2, int(self.cell_size * 0.08))
-        x1 = pred_col * self.cell_size + inset
-        y1 = pred_row * self.cell_size + inset
-        x2 = (pred_col + 1) * self.cell_size - inset
-        y2 = (pred_row + 1) * self.cell_size - inset
-        confidence = float(self.machine_vision_last_prediction.get('confidence', 0.0) or 0.0)
-        self.game_canvas.create_rectangle(x1, y1, x2, y2, fill=self.machine_vision_overlay_fill, outline='', stipple='gray50', tags='vision_pred')
-        self.game_canvas.create_rectangle(x1, y1, x2, y2, fill='', outline=self.machine_vision_overlay_color, width=3, tags='vision_pred')
-        self.game_canvas.create_text(x1 + 3, y1 + 3, anchor=tk.NW, text=f'MV {int(round(confidence * 100))}%', fill='#2f3e00', font=('Helvetica', 7, 'bold'), tags='vision_pred')
-        self.game_canvas.tag_raise('vision_pred')
-        if hasattr(self, 'player'):
-            self.game_canvas.tag_raise(self.player)
-        if hasattr(self, 'target'):
-            self.game_canvas.tag_raise(self.target)
-        if hasattr(self, 'end_label'):
-            self.game_canvas.tag_raise(self.end_label)
+        _ = (player_row, player_col)
+        self._draw_machine_vision_guess_outlines()
 
     def _draw_machine_vision_exit_prediction_overlay(self, player_row: int, player_col: int) -> None:
         _ = (player_row, player_col)
-        self.game_canvas.delete('vision_exit_pred')
-        if self._normalized_layout_mode() != 'maze':
-            return
-        if not self._machine_vision_enabled():
-            return
-        if not self.machine_vision_exit_localization_enable:
-            return
-        predicted = self.machine_vision_exit_last_prediction.get('predicted_cell', (-1, -1))
-        if not isinstance(predicted, (tuple, list)) or len(predicted) != 2:
-            return
-        try:
-            pred_row = int(predicted[0])
-            pred_col = int(predicted[1])
-        except Exception:
-            return
-        if pred_row < 0 or pred_col < 0 or pred_row >= self.grid_cells or (pred_col >= self.grid_cells):
-            return
-        inset = max(2, int(self.cell_size * 0.08))
-        x1 = pred_col * self.cell_size + inset
-        y1 = pred_row * self.cell_size + inset
-        x2 = (pred_col + 1) * self.cell_size - inset
-        y2 = (pred_row + 1) * self.cell_size - inset
-        confidence = float(self.machine_vision_exit_last_prediction.get('confidence', 0.0) or 0.0)
-        self.game_canvas.create_rectangle(x1, y1, x2, y2, fill=self.machine_vision_exit_overlay_fill, outline='', stipple='gray50', tags='vision_exit_pred')
-        self.game_canvas.create_rectangle(x1, y1, x2, y2, fill='', outline=self.machine_vision_exit_overlay_color, width=3, tags='vision_exit_pred')
-        self.game_canvas.create_text(x1 + 3, y1 + 3, anchor=tk.NW, text=f'MV-E {int(round(confidence * 100))}%', fill='#2f3e00', font=('Helvetica', 7, 'bold'), tags='vision_exit_pred')
-        self.game_canvas.tag_raise('vision_exit_pred')
-        if hasattr(self, 'player'):
-            self.game_canvas.tag_raise(self.player)
-        if hasattr(self, 'target'):
-            self.game_canvas.tag_raise(self.target)
-        if hasattr(self, 'end_label'):
-            self.game_canvas.tag_raise(self.end_label)
+        self._draw_machine_vision_guess_outlines()
 
     def _fov_fill_color(self, strength: float, vis_kind: str, corner_graze_steps: int) -> str:
         full_palette = ['#b9eec7', '#9fe5b1', '#86dd9b', '#6ed586']
@@ -13983,27 +14216,40 @@ class AIAssistantApp:
             difficulty = 'hard'
         self._generate_layout(protected_cell=self._player_cell())
         self.game_canvas.config(width=self.canvas_width, height=self.canvas_height)
+        if hasattr(self, 'mv_render_debug_panel_container'):
+            self.mv_render_debug_panel_container.config(height=self.canvas_height)
         self._draw_blockers()
         self._spawn_target()
         self._refresh_memory_viewer()
         self._save_window_geometry()
         if mode == 'maze':
             self._sync_maze_start_number_to_current()
-            route_suffix = ' [MV route mode ON]' if self._mv_route_mode_active() else ''
+            route_suffix = ''
+            if (not self.mv_routing_deprecated) and self._mv_route_mode_active():
+                route_suffix = ' [MV route mode ON]'
             mv_suffix = ' [MV OFF]' if not self._machine_vision_enabled() else ''
             self.status_var.set(f'Mode set to maze ({difficulty}, {self.grid_cells}x{self.grid_cells}, algo={self.current_maze_algorithm}){route_suffix}{mv_suffix}')
         else:
-            grid_note = ' [MV route mode ON for maze]' if self.mv_route_planning_mode_enable else ''
+            grid_note = ''
+            if (not self.mv_routing_deprecated) and self.mv_route_planning_mode_enable:
+                grid_note = ' [MV route mode ON for maze]'
             mv_note = ' [MV OFF]' if not self._machine_vision_enabled() else ''
             self.status_var.set(f'Mode set to grid ({self.grid_cells}x{self.grid_cells}){grid_note}{mv_note}')
 
     def _sync_machine_vision_toggle_controls(self) -> None:
+        if self.mv_routing_deprecated:
+            self.mv_route_planning_mode_enable = False
+            if self.mv_route_planning_mode_var.get():
+                self.mv_route_planning_mode_var.set(False)
         if not self._machine_vision_enabled():
             self.mv_route_planning_mode_enable = False
             if self.mv_route_planning_mode_var.get():
                 self.mv_route_planning_mode_var.set(False)
         if hasattr(self, 'mv_route_mode_checkbutton'):
-            self.mv_route_mode_checkbutton.config(state=tk.NORMAL if self._machine_vision_enabled() else tk.DISABLED)
+            if self.mv_routing_deprecated:
+                self.mv_route_mode_checkbutton.config(state=tk.DISABLED)
+            else:
+                self.mv_route_mode_checkbutton.config(state=tk.NORMAL if self._machine_vision_enabled() else tk.DISABLED)
         if not self._machine_vision_enabled():
             self._mv_preplan_last_status = 'disabled:mv-master-off'
         elif self._mv_preplan_last_status == 'disabled:mv-master-off':
@@ -14198,6 +14444,14 @@ class AIAssistantApp:
             self.status_var.set('Machine vision disabled')
 
     def _on_mv_route_mode_toggled(self) -> None:
+        if self.mv_routing_deprecated:
+            self.mv_route_planning_mode_enable = False
+            if self.mv_route_planning_mode_var.get():
+                self.mv_route_planning_mode_var.set(False)
+            self._sync_machine_vision_toggle_controls()
+            self._save_window_geometry()
+            self.status_var.set('MV route planning mode is deprecated and disabled (MV localization remains active)')
+            return
         enabled = bool(self.mv_route_planning_mode_var.get())
         self.mv_route_planning_mode_enable = enabled
         self._sync_machine_vision_toggle_controls()

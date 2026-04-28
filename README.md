@@ -217,7 +217,9 @@ STRICT_PROGRESS_GUARD=1
 BLOCKER_DENSITY=0.18
 # Optional: deterministic base seed for maze layouts.
 MAZE_SEED=1337
-# Optional: directional FOV max depth (forward reach in cells).
+# Optional: directional FOV max depth (forward reach in cells) for planner/runtime FOV.
+# MV localization training snapshots are always generated at full grid size (NxN)
+# so MV input dimensions stay aligned with the active maze size.
 MAZE_FOV_DEPTH=5
 # Optional: peripheral expansion amount (widens cone edges).
 MAZE_FOV_PERIPHERAL=1
@@ -795,6 +797,7 @@ Game controls:
 - Use Arrow keys or `W/A/S/D` to move the square.
 - Use `Mode` to switch between `grid` and `maze` training games.
 - In maze mode, use `Difficulty` (`easy`/`medium`/`hard`/`very hard`) for predictable algorithmic layouts.
+- For MV localization training progression, prefer `hard` first, then graduate to `very hard` after stability/accuracy improves.
 - Use `MV Enable` to turn machine vision on/off at runtime (disables MV localization/hints/preplan/overlays/routing when off, and clears MV Route Mode).
 - Use `Fast Mode` to temporarily speed up run throughput (lower move/look delays and reduced telemetry/auto-maintenance overhead) and toggle back to restore normal timing/maintenance behavior.
 - Use `Long-Run Mode` to reduce long-session overhead by slowing non-kernel maintenance/telemetry/storage cadence while preserving planner/kernel behavior.
@@ -810,6 +813,7 @@ Game controls:
 - Repeated trap-loop branches are also marked as persistent red side-edge loop-risk markers; these marks add extra avoidance pressure in move scoring and decay automatically when repeat pressure drops.
 - Beam corridor visibility now contributes one-to-one traversal-equivalent progress credit (seeing N cells down a corridor carries the same planning weight as physically walking N cells there).
 - Pipeline context includes a full-grid "Directional FOV status" representation of what the agent is currently looking at.
+- Pipeline context now also includes `Machine vision sees (grid-sized training snapshot)` and this view is tied directly to the same snapshot source used for MV localization training.
 - The maze canvas now shows an on-map FOV visualizer: semi-transparent green cells indicate what the agent is currently looking at.
 - In maze mode, target location is not provided to the models in context or mapped-memory snapshots.
 - In maze mode, target-derived distance/proximity signals are disabled (no hotter/colder shortcut).
@@ -942,6 +946,7 @@ Then open `http://127.0.0.1:5050`.
 - Local navigation env vars: `LOCAL_NAVIGATION_KERNEL`, `LOCAL_NAVIGATION_API_FALLBACK` (`LOCAL_NAVIGATION_KERNEL=1` makes navigation local-first, and `LOCAL_NAVIGATION_API_FALLBACK=1` lets OpenAI step in if the local kernel stalls or cannot finish cleanly).
 - Low-reliance routing env vars: `ENABLE_LOGIC_REPETITION_RESOLVER`, `ENABLE_LOGIC_FINALIZER_FOR_NAVIGATION`, `MAZE_STEP_MODEL_HINTS`, `MAZE_TARGETED_MODEL_ASSIST_ENABLE`, `MAZE_MODEL_ASSIST_RELIANCE`, `MAZE_MODEL_ASSIST_MAX_CALLS_PER_EPISODE`, `MAZE_MODEL_ASSIST_COOLDOWN_STEPS` (keep normal navigation local-first, optionally allow full per-step hints, or add targeted OpenAI arbitration only during contradiction/stuck/map-doubt states; `MAZE_MODEL_ASSIST_RELIANCE` scales how eagerly those targeted calls trigger and how much override margin they get).
 - Constructive reinforcement env vars: `CONSTRUCTIVE_REINFORCEMENT_ONLY`, `CONSTRUCTIVE_LEARNING_CREDIT_SCALE`, `CONSTRUCTIVE_LEARNING_CREDIT_CAP`, `CONSTRUCTIVE_STAGNATION_CREDIT` (switches maze step feedback away from penalty-based outcome scoring; non-optimal moves contribute bounded positive learning credit and all outcome traces remain constructive for reinforcement).
+- Ouch readiness env vars (inactive by default): `OUCH_RESPONSE_ENABLE`, `OUCH_RESPONSE_TRAIN_ENABLE`, `OUCH_RESPONSE_MIN_PENALTY`, `OUCH_RESPONSE_TAG_BOOST`, `OUCH_RESPONSE_INTENSITY_SCALE`, `OUCH_RESPONSE_BUFFER_SIZE` (adds an aversive-event capture channel and trainer seam without changing policy unless explicitly enabled).
 - Prediction-memory env vars: `PREDICTION_PRIOR_BLEND`, `PREDICTION_REWARD_CORRECT`, `PREDICTION_WRONG_LEARNING_REWARD`, `PREDICTION_WRONG_LEARNING_CREDIT_SCALE`, `PREDICTION_WRONG_OCCUPANCY_PENALTY`, `PREDICTION_WRONG_SHAPE_PENALTY`, `PREDICTION_CONFIDENT_WRONG_PENALTY`, `PREDICTION_CONFIDENT_THRESHOLD`, `PREDICTION_CONFIDENCE_BUCKETS`, `PREDICTION_CONTEXT_CONFIDENCE_BLEND`, `PREDICTION_OCCUPANCY_SCORE_WEIGHT`, `PREDICTION_SHAPE_SCORE_WEIGHT` (wrong predictions no longer stay net-positive by default; these knobs control how much informational credit remains versus how strongly wrong occupancy/shape guesses are penalized).
 - Prediction-to-planning bias env vars: `PREDICTION_JUNCTION_BIAS_WEIGHT`, `PREDICTION_DEAD_END_BIAS_WEIGHT`, `PREDICTION_PLANNING_MIN_CONF`, `PREDICTION_CONTEXT_TRUST_LOW_SHAPE_ACC`, `PREDICTION_CONTEXT_TRUST_HIGH_SHAPE_ACC` (active shape predictions are context-trust weighted before influencing move scoring; low-trust contexts collapse toward occupancy-only behavior; using `0.08` as baseline enables gentle prediction influence instead of waiting for rare high-confidence spikes).
 - Shape observability, lookahead, and projection env vars: `PREDICTION_SHAPE_REQUIRE_OBSERVABILITY`, `PREDICTION_SHAPE_OBSERVABILITY_MIN_NEIGHBORS`, `PREDICTION_LOOKAHEAD_ENABLE`, `PREDICTION_LOOKAHEAD_DISCOUNT`, `PREDICTION_LOOKAHEAD_WEIGHT`, `MAZE_PROJECTION_MODULE_ENABLE`, `MAZE_PROJECTION_FORWARD_DEPTH`, `MAZE_PROJECTION_FORWARD_WEIGHT`, `MAZE_PROJECTION_BACKTRACE_WINDOW`, `MAZE_PROJECTION_BACKTRACE_PENALTY_WEIGHT`, `MAZE_PROJECTION_BACKTRACE_ESCAPE_WEIGHT`, `MAZE_PROJECTION_SCORE_INFLUENCE_CAP`, `MAZE_PROJECTION_SCORE_INFLUENCE_SCALE`, `PROJECTION_TRUST_ADAPT_ENABLE`, `PROJECTION_TRUST_EMA_DECAY`, `PROJECTION_TRUST_MIN_SCALE`, `PROJECTION_TRUST_MAX_SCALE`, `PROJECTION_TRUST_WARMUP_STEPS`, `KERNEL_PROJECTION_REWARD_ENABLE`, `KERNEL_PROJECTION_REWARD_SCALE`, `KERNEL_PROJECTION_REWARD_MAX` (shape calibration updates can be gated until topology is observable; prediction lookahead adds lightweight 2-step rollout signal; projection adds a separate non-core overlay for forward imagined traces and backward trail replay suppression, then contributes as bounded score shaping rather than a hard override path, and can add a small planning feedback reward when projection guidance is net-positive; trust gating further attenuates projection influence dynamically when utility drifts).
