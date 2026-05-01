@@ -78,13 +78,13 @@ def build_ui(app: object) -> None:
     app.debug_output.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
     game_title = tk.Label(game_frame, text="Mini Game", font=("Helvetica", 14, "bold"))
-    game_title.pack(anchor="w")
+    game_title.pack(anchor="center")
 
     game_note = tk.Label(game_frame, text="Move the square to the blue ball. Use Arrow keys or WASD.")
-    game_note.pack(anchor="w", pady=(2, 8))
+    game_note.pack(anchor="center", pady=(2, 8))
 
     visual_row = tk.Frame(game_frame, bg="#0b0b0b")
-    visual_row.pack(anchor="w")
+    visual_row.pack(anchor="center")
 
     app.game_canvas = tk.Canvas(
         visual_row,
@@ -128,7 +128,7 @@ def build_ui(app: object) -> None:
 
     if app.enable_pseudo3d_view:
         pseudo3d_label = tk.Label(game_frame, text="Pseudo-3D Visualizer (preview)")
-        pseudo3d_label.pack(anchor="w", pady=(8, 4))
+        pseudo3d_label.pack(anchor="center", pady=(8, 4))
 
         app.pseudo3d_canvas = tk.Canvas(
             game_frame,
@@ -138,10 +138,37 @@ def build_ui(app: object) -> None:
             highlightthickness=1,
             highlightbackground="#3b4667",
         )
-        app.pseudo3d_canvas.pack(fill=tk.NONE, expand=False)
+        app.pseudo3d_canvas.pack(anchor="center", fill=tk.NONE, expand=False)
 
-    runtime_controls = tk.LabelFrame(game_frame, text="Runtime Controls", padx=8, pady=8)
-    runtime_controls.pack(fill=tk.X, pady=(8, 0))
+    controls_scroll_wrap = tk.Frame(game_frame)
+    controls_scroll_wrap.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+    controls_canvas = tk.Canvas(controls_scroll_wrap, highlightthickness=0, borderwidth=0)
+    controls_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    controls_scrollbar = tk.Scrollbar(controls_scroll_wrap, orient=tk.VERTICAL, command=controls_canvas.yview)
+    controls_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    controls_canvas.configure(yscrollcommand=controls_scrollbar.set)
+
+    controls_canvas_content = tk.Frame(controls_canvas)
+    controls_canvas_window = controls_canvas.create_window((0, 0), window=controls_canvas_content, anchor="n")
+
+    controls_center_col = tk.Frame(controls_canvas_content)
+    controls_center_col.pack(anchor="n")
+
+    def _sync_controls_canvas_layout(_event: tk.Event | None=None) -> None:
+        try:
+            canvas_width = int(controls_canvas.winfo_width())
+            controls_canvas.coords(controls_canvas_window, max(0, canvas_width // 2), 0)
+            controls_canvas.configure(scrollregion=controls_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    controls_canvas_content.bind("<Configure>", _sync_controls_canvas_layout)
+    controls_canvas.bind("<Configure>", _sync_controls_canvas_layout)
+
+    runtime_controls = tk.LabelFrame(controls_center_col, text="Runtime Controls", padx=8, pady=8)
+    runtime_controls.pack(fill=tk.X, pady=(0, 0))
 
     layout_row = tk.Frame(runtime_controls)
     layout_row.pack(fill=tk.X, pady=(0, 6))
@@ -216,7 +243,7 @@ def build_ui(app: object) -> None:
     tk.Button(action_row, text="Reset Score", command=app._reset_score).pack(side=tk.LEFT, padx=(6, 0))
     tk.Label(action_row, textvariable=app.score_var).pack(side=tk.LEFT, padx=(12, 0))
 
-    memory_tools = tk.LabelFrame(game_frame, text="Memory Tools", padx=8, pady=8)
+    memory_tools = tk.LabelFrame(controls_center_col, text="Memory Tools", padx=8, pady=8)
     memory_tools.pack(fill=tk.X, pady=(10, 4))
 
     memory_top_row = tk.Frame(memory_tools)
@@ -235,14 +262,14 @@ def build_ui(app: object) -> None:
     tk.Button(memory_bottom_row, text="Import Snapshot", command=app.import_memory_snapshot).pack(side=tk.LEFT, padx=(6, 0))
     tk.Button(memory_bottom_row, text="Reset Memory", command=app.reset_memory_store).pack(side=tk.LEFT, padx=(6, 0))
 
-    app.memory_view_output = scrolledtext.ScrolledText(game_frame, wrap=tk.WORD, height=11, state=tk.DISABLED)
-    app.memory_view_output.pack(fill=tk.BOTH, expand=True)
+    app.memory_view_output = scrolledtext.ScrolledText(controls_center_col, wrap=tk.WORD, height=11, state=tk.DISABLED)
+    app.memory_view_output.pack(fill=tk.X, expand=False)
 
-    hormone_header = tk.Frame(game_frame)
+    hormone_header = tk.Frame(controls_center_col)
     hormone_header.pack(fill=tk.X, pady=(8, 4))
     tk.Label(hormone_header, text="Hormone Monitor", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT)
 
-    app.hormone_panel_output = scrolledtext.ScrolledText(game_frame, wrap=tk.WORD, height=8, state=tk.DISABLED)
+    app.hormone_panel_output = scrolledtext.ScrolledText(controls_center_col, wrap=tk.WORD, height=8, state=tk.DISABLED)
     app.hormone_panel_output.pack(fill=tk.X, expand=False)
 
     app._init_game()

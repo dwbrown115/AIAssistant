@@ -323,6 +323,29 @@ class AdaptiveKernelPhaseProgram:
             return (phase_id, phase_spec.micro_stages[stage_index].stage_id)
         return None
 
+    def current_baseline_target(self) -> tuple[str, str] | None:
+        """Return the terminal/baseline stage when no active stage remains.
+
+        This keeps runtime stage-gated controls anchored to the integrated end
+        state (phase 9 / WB8) after all micro stages are completed.
+        """
+        for phase_id in reversed(self.phase_order):
+            state = self.phase_state[phase_id]
+            if not state.enabled:
+                continue
+            phase_spec = self.phase_spec_by_id[phase_id]
+            if not phase_spec.micro_stages:
+                continue
+            stage_index = max(0, min(state.micro_index, len(phase_spec.micro_stages) - 1))
+            return (phase_id, phase_spec.micro_stages[stage_index].stage_id)
+        return None
+
+    def current_or_baseline_target(self) -> tuple[str, str] | None:
+        active_target = self.current_active_target()
+        if active_target is not None:
+            return active_target
+        return self.current_baseline_target()
+
     def observe_micro_metrics(
         self,
         phase_id: str,
@@ -374,16 +397,7 @@ class AdaptiveKernelPhaseProgram:
         self._adapt_weights(state)
         self._align_weights_to_objectives_under_deficit(state=state, stage=stage)
         state.score_ema = self._composite_score(state)
-        allow_target_raise = True
-        if self.target_raise_only_when_score_ready and state.observations >= effective_min_observations:
-            allow_target_raise = bool(state.score_ema >= state.promotion_target)
-        self._adapt_target(
-            state,
-            phase_id=phase_id,
-            effective_min_observations=effective_min_observations,
-            allow_raise=allow_target_raise,
-            gate_eligible=bool(state.observations >= effective_min_observations),
-        )
+        self._adapt_target(state)
 
         state.last_autostep_enabled = bool(autostep_enabled)
         state.last_effective_min_observations = int(effective_min_observations)
@@ -487,99 +501,14 @@ class AdaptiveKernelPhaseProgram:
     def _adapt_target(
         self,
         state: AdaptivePhaseRuntime,
-        *,
-        phase_id: str,
-        effective_min_observations: int,
-        allow_raise: bool,
-        gate_eligible: bool,
     ) -> None:
-        prior_target = float(state.promotion_target)
-
-        # Hard disable for adaptive goalpost movement when requested.
-        if not self.target_adapt_enable:
-            state.promotion_target = _clamp(
-                prior_target,
-                self.base_promotion_target,
-                self.promotion_target_hard_max,
-            )
-            return
-
-        # Once a stage has enough observations, keep the quality bar stable by
-        # default so promotion can be decided on score quality, not target drift.
-        if gate_eligible and self.target_freeze_after_observation_gate:
-            # Once the observation gate is met, pin threshold to the base target
-            # so promotion is decided on score quality and not a raised goalpost.
-            state.promotion_target = _clamp(
-                self.base_promotion_target,
-                self.base_promotion_target,
-                self.promotion_target_hard_max,
-            )
-            return
-
-        robustness = (
-            (state.stability_ema * 0.35)
-            + (state.transfer_ema * 0.35)
-            + (state.safety_ema * 0.20)
-            + (state.introspection_ema * 0.10)
-        )
-        adaptive_target = _clamp(0.50 + (robustness * 0.38), 0.45, 0.90)
-        target_candidate = _clamp(
-            ((1.0 - self.target_adapt_rate) * state.promotion_target)
-            + (self.target_adapt_rate * adaptive_target),
-            self.base_promotion_target,
-            self.promotion_target_hard_max,
-        )
-
-        if not bool(allow_raise):
-            target_candidate = min(target_candidate, prior_target)
-
-        if (
-            int(state.observations) >= int(max(0, effective_min_observations))
-            and float(state.score_ema) < prior_target
-            and self.target_deficit_relief_rate > 0.0
-        ):
-            relief_anchor = _clamp(
-                float(state.score_ema) + float(self.target_deficit_margin),
-                self.base_promotion_target,
-                self.promotion_target_hard_max,
-            )
-            target_candidate = (
-                ((1.0 - self.target_deficit_relief_rate) * target_candidate)
-                + (self.target_deficit_relief_rate * relief_anchor)
-            )
-            target_candidate = min(target_candidate, prior_target)
-
+        # Score floor is intentionally fixed to the base target. Dynamic goalpost
+        # movement is disabled so promotion quality is evaluated against a stable bar.
         state.promotion_target = _clamp(
-            float(target_candidate),
+            self.base_promotion_target,
             self.base_promotion_target,
             self.promotion_target_hard_max,
         )
-
-        if self._early_target_cap_applies(
-            phase_id=phase_id, micro_index=int(state.micro_index)
-        ):
-            state.promotion_target = min(
-                state.promotion_target,
-                min(
-                    max(self.early_target_cap, self.base_promotion_target),
-                    self.promotion_target_hard_max,
-                ),
-            )
-
-        if self.warmup_target_dampener_enable:
-            warmup_ratio = _clamp(
-                float(state.observations)
-                / float(max(1, self.warmup_target_dampener_observations)),
-                0.0,
-                1.0,
-            )
-            damp_delta = (1.0 - warmup_ratio) * self.warmup_target_dampener_max_reduction
-            if damp_delta > 0.0 and int(state.observations) < int(max(0, effective_min_observations)):
-                state.promotion_target = _clamp(
-                    state.promotion_target - damp_delta,
-                    self.base_promotion_target,
-                    self.promotion_target_hard_max,
-                )
 
     def _objective_weight_key(self, signal: str) -> str | None:
         token = str(signal or "").strip().lower()
@@ -767,6 +696,7 @@ class AdaptiveKernelPhaseProgram:
             "completed_micro_total": int(self.completed_micro_total),
             "completed_phase_count": int(completed_phase_count),
             "active_target": self.current_active_target(),
+            "baseline_target": self.current_baseline_target(),
             "base_promotion_target": round(float(self.base_promotion_target), 4),
             "target_adapt_enable": int(bool(self.target_adapt_enable)),
             "target_adapt_rate": round(float(self.target_adapt_rate), 4),
@@ -791,14 +721,42 @@ class AdaptiveKernelPhaseProgram:
             "phases": phases,
         }
 
-    def restore_snapshot(self, payload: dict[str, object]) -> bool:
+    def _snapshot_phase_rows(self, payload: object) -> dict[str, dict[str, object]]:
+        if not isinstance(payload, dict):
+            return {}
+        phases = payload.get("phases")
+        if not isinstance(phases, list):
+            return {}
+        rows: dict[str, dict[str, object]] = {}
+        for row in phases:
+            if not isinstance(row, dict):
+                continue
+            phase_id = str(row.get("phase_id", "") or "").strip()
+            if phase_id:
+                rows[phase_id] = row
+        return rows
+
+    def snapshot_is_compatible(self, payload: object) -> bool:
         if not isinstance(payload, dict):
             return False
         payload_signature = str(payload.get("phase_set_signature", "") or "").strip()
-        if payload_signature != str(self.phase_set_signature):
+        if payload_signature and payload_signature == str(self.phase_set_signature):
+            return True
+        rows = self._snapshot_phase_rows(payload)
+        if not rows:
+            return False
+        for phase_id in rows.keys():
+            if phase_id in self.phase_state:
+                return True
+        return False
+
+    def restore_snapshot(self, payload: dict[str, object]) -> bool:
+        if not isinstance(payload, dict):
             return False
         phases = payload.get("phases")
         if not isinstance(phases, list):
+            return False
+        if not self.snapshot_is_compatible(payload):
             return False
 
         def _as_bool(value: object, default: bool) -> bool:
@@ -826,13 +784,12 @@ class AdaptiveKernelPhaseProgram:
             except Exception:
                 return float(default)
 
-        phase_rows: dict[str, dict[str, object]] = {}
-        for row in phases:
-            if not isinstance(row, dict):
-                continue
-            phase_id = str(row.get("phase_id", "")).strip()
-            if phase_id in self.phase_state:
-                phase_rows[phase_id] = row
+        snapshot_rows = self._snapshot_phase_rows(payload)
+        phase_rows: dict[str, dict[str, object]] = {
+            phase_id: row
+            for phase_id, row in snapshot_rows.items()
+            if phase_id in self.phase_state
+        }
 
         if not phase_rows:
             return False
@@ -858,20 +815,13 @@ class AdaptiveKernelPhaseProgram:
             state.transfer_ema = _clamp(_as_float(row.get("transfer_ema", state.transfer_ema), state.transfer_ema), 0.0, 1.0)
             state.safety_ema = _clamp(_as_float(row.get("safety_ema", state.safety_ema), state.safety_ema), 0.0, 1.0)
             state.introspection_ema = _clamp(_as_float(row.get("introspection_ema", state.introspection_ema), state.introspection_ema), 0.0, 1.0)
+            # Keep restored score floor pinned to base; do not carry forward any
+            # previously raised promotion target from older snapshots.
             state.promotion_target = _clamp(
-                _as_float(row.get("promotion_target", state.promotion_target), state.promotion_target),
+                self.base_promotion_target,
                 self.base_promotion_target,
                 self.promotion_target_hard_max,
             )
-            # Normalize restored targets so a previously raised threshold cannot
-            # persist past the observation gate boundary.
-            stage = spec.micro_stages[max(0, min(state.micro_index, max_index))]
-            if self.target_freeze_after_observation_gate and state.observations >= int(stage.min_observations):
-                state.promotion_target = _clamp(
-                    self.base_promotion_target,
-                    self.base_promotion_target,
-                    self.promotion_target_hard_max,
-                )
 
         adaptive_weights = payload.get("adaptive_weights")
         if isinstance(adaptive_weights, dict):
@@ -892,7 +842,7 @@ class AdaptiveKernelPhaseProgram:
         return True
 
 
-def build_exit_goal_capability_and_ouch_readiness_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+def build_mv_input_transition_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     def _stage(
         stage_id: str,
         label: str,
@@ -925,20 +875,20 @@ def build_exit_goal_capability_and_ouch_readiness_phase_specs() -> tuple[Adaptiv
             env_prefixes=tuple((str(prefix).strip() for prefix in tuple(env_prefixes) if str(prefix).strip())),
         )
 
-    egc0_visibility_targets = (
+    wb0_baseline_targets = (
         "adaptive_controller",
         "parallel_reasoning_engine",
         "governance_orchestrator",
         "learned_autonomy_controller",
     )
-    egc1_pursuit_targets = (
+    wb1_stabilization_targets = (
         "learned_autonomy_controller",
         "parallel_reasoning_engine",
         "adaptive_controller",
         "organism_control",
         "maze_agent",
     )
-    egc2_rollback_targets = (
+    wb2_gate_targets = (
         "parallel_reasoning_engine",
         "learned_autonomy_controller",
         "adaptive_controller",
@@ -946,7 +896,7 @@ def build_exit_goal_capability_and_ouch_readiness_phase_specs() -> tuple[Adaptiv
         "maze_agent",
         "governance_orchestrator",
     )
-    egc3_arbitration_targets = (
+    wb3_localization_targets = (
         "learned_autonomy_controller",
         "parallel_reasoning_engine",
         "adaptive_controller",
@@ -955,218 +905,358 @@ def build_exit_goal_capability_and_ouch_readiness_phase_specs() -> tuple[Adaptiv
         "causal_counterfactual_planner",
         "governance_orchestrator",
     )
-    egc4_ouch_targets = (
-        "learned_autonomy_controller",
-        "adaptive_controller",
-        "parallel_reasoning_engine",
-        "governance_orchestrator",
-    )
-    egc5_validation_targets = (
+    wb4_influence_targets = (
         "governance_orchestrator",
         "parallel_reasoning_engine",
         "adaptive_controller",
         "learned_autonomy_controller",
         "causal_counterfactual_planner",
+        "organism_control",
+        "maze_agent",
+    )
+    wb5_experiment_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "organism_control",
+        "maze_agent",
+    )
+    wb6_attenuation_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "causal_counterfactual_planner",
+        "organism_control",
+        "maze_agent",
+    )
+    wb7_shadow_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "causal_counterfactual_planner",
+        "organism_control",
+        "maze_agent",
+    )
+    wb8_cutover_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "causal_counterfactual_planner",
+        "organism_control",
+        "maze_agent",
     )
 
     return (
         AdaptivePhaseSpec(
-            phase_id="phase_egc0_instrumentation_and_behavioral_visibility",
-            label="Phase EGC0 - Instrumentation and Behavioral Visibility",
-            capability="expose directional intent, contradiction tags, and pursuit stability metrics",
-            module_id="egc0_instrumentation_and_behavioral_visibility",
+            phase_id="phase_wb0_baseline_lock_and_measurement_hygiene",
+            label="Phase WB0 - Baseline Lock and Measurement Hygiene",
+            capability="lock measurement hygiene and instrumentation consistency before policy-ladder progression",
+            module_id="wb0_baseline_lock_and_measurement_hygiene",
             micro_stages=(
                 _stage(
-                    "egc0.m1_directional_intent_telemetry",
-                    "EGC0.1 Directional intent telemetry",
+                    "wb0.m1_run_recipe_lock",
+                    "WB0.1 Run recipe lock",
                     mode="integrate",
-                    module_targets=egc0_visibility_targets,
+                    module_targets=wb0_baseline_targets,
                     objective_signals=("integration_quality", "stability", "safety"),
-                    min_observations=56,
-                ),
-                _stage(
-                    "egc0.m2_contradiction_and_reacquire_tags",
-                    "EGC0.2 Contradiction and reacquire tags",
-                    mode="control_integrate",
-                    module_targets=egc0_visibility_targets,
-                    objective_signals=("integration_quality", "safety", "introspection_gain"),
                     min_observations=72,
                 ),
                 _stage(
-                    "egc0.m3_pursuit_window_metrics",
-                    "EGC0.3 Pursuit window metrics",
+                    "wb0.m2_preflight_coverage_discipline",
+                    "WB0.2 Preflight coverage discipline",
                     mode="control_integrate",
-                    module_targets=egc0_visibility_targets,
-                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    module_targets=wb0_baseline_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
                     min_observations=84,
                 ),
+                _stage(
+                    "wb0.m3_dump_integrity_watch",
+                    "WB0.3 Dump integrity watch",
+                    mode="control_integrate",
+                    module_targets=wb0_baseline_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=96,
+                ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_egc1_provisional_directional_pursuit_capability",
-            label="Phase EGC1 - Provisional Directional Pursuit Capability",
-            capability="blend MV evidence with spatial memory to stabilize early directional pursuit",
-            module_id="egc1_provisional_directional_pursuit_capability",
+            phase_id="phase_wb1_beam_anchored_mv_objective_equivalence_stabilization",
+            label="Phase WB1 - Beam-Anchored MV Objective Equivalence Stabilization",
+            capability="stabilize woven MV objective equivalence so activation always requires beam anchor readiness",
+            module_id="wb1_beam_anchored_mv_objective_equivalence_stabilization",
             micro_stages=(
                 _stage(
-                    "egc1.m1_latent_goal_vector_blend",
-                    "EGC1.1 Latent goal vector blend",
+                    "wb1.m1_woven_anchor_activation",
+                    "WB1.1 Woven anchor activation",
                     mode="integrate",
-                    module_targets=egc1_pursuit_targets,
+                    module_targets=wb1_stabilization_targets,
                     objective_signals=("integration_quality", "transfer", "stability"),
-                    min_observations=76,
+                    min_observations=96,
                 ),
                 _stage(
-                    "egc1.m2_pursuit_confidence_ema",
-                    "EGC1.2 Pursuit confidence EMA",
+                    "wb1.m2_anchor_reason_audit",
+                    "WB1.2 Anchor reason audit",
                     mode="integrate",
-                    module_targets=egc1_pursuit_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=88,
-                ),
-                _stage(
-                    "egc1.m3_soft_entry_gate",
-                    "EGC1.3 Soft entry gate",
-                    mode="control_integrate",
-                    module_targets=egc1_pursuit_targets,
-                    objective_signals=("integration_quality", "safety", "introspection_gain"),
-                    min_observations=100,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_egc2_contradiction_recovery_and_rollback",
-            label="Phase EGC2 - Contradiction Recovery and Rollback",
-            capability="rollback and reacquire directional pursuit under contradiction pressure",
-            module_id="egc2_contradiction_recovery_and_rollback",
-            micro_stages=(
-                _stage(
-                    "egc2.m1_rollback_on_evidence_break",
-                    "EGC2.1 Rollback on evidence break",
-                    mode="control_integrate",
-                    module_targets=egc2_rollback_targets,
+                    module_targets=wb1_stabilization_targets,
                     objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=92,
-                ),
-                _stage(
-                    "egc2.m2_reacquisition_cooldown",
-                    "EGC2.2 Reacquisition cooldown",
-                    mode="control_integrate",
-                    module_targets=egc2_rollback_targets,
-                    objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=104,
-                ),
-                _stage(
-                    "egc2.m3_contextual_debt_repayment",
-                    "EGC2.3 Contextual debt repayment",
-                    mode="control_integrate",
-                    module_targets=egc2_rollback_targets,
-                    objective_signals=("integration_quality", "safety", "stability"),
-                    min_observations=116,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_egc3_corridor_and_direction_arbitration",
-            label="Phase EGC3 - Corridor and Direction Arbitration",
-            capability="blend corridor escape and directional pursuit with memory-aware arbitration",
-            module_id="egc3_corridor_and_direction_arbitration",
-            micro_stages=(
-                _stage(
-                    "egc3.m1_corridor_direction_blend",
-                    "EGC3.1 Corridor direction blend",
-                    mode="integrate",
-                    module_targets=egc3_arbitration_targets,
-                    objective_signals=("integration_quality", "transfer", "stability"),
                     min_observations=108,
                 ),
                 _stage(
-                    "egc3.m2_memory_aversive_prior",
-                    "EGC3.2 Memory aversive prior",
-                    mode="integrate",
-                    module_targets=egc3_arbitration_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
-                    min_observations=122,
-                ),
-                _stage(
-                    "egc3.m3_objective_pressure_ramp_smoothing",
-                    "EGC3.3 Objective pressure ramp smoothing",
+                    "wb1.m3_objective_force_suppression_guard",
+                    "WB1.3 Objective force suppression guard",
                     mode="control_integrate",
-                    module_targets=egc3_arbitration_targets,
-                    objective_signals=("integration_quality", "stability", "introspection_gain"),
-                    min_observations=134,
-                ),
-            ),
-        ),
-        AdaptivePhaseSpec(
-            phase_id="phase_egc4_ouch_readiness_training_disabled",
-            label="Phase EGC4 - Ouch Readiness (Training Disabled)",
-            capability="capture ouch-readiness events and training seams while keeping policy actuation disabled",
-            module_id="egc4_ouch_readiness_training_disabled",
-            micro_stages=(
-                _stage(
-                    "egc4.m1_ouch_event_schema_and_buffer",
-                    "EGC4.1 Ouch event schema and buffer",
-                    mode="integrate",
-                    module_targets=egc4_ouch_targets,
+                    module_targets=wb1_stabilization_targets,
                     objective_signals=("integration_quality", "safety", "transfer"),
                     min_observations=120,
                 ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_wb2_dual_evidence_objective_gate_hardening",
+            label="Phase WB2 - Dual-Evidence Objective Gate Hardening",
+            capability="enforce dual evidence with anchored beam context plus MV gate acceptance and bounded probes",
+            module_id="wb2_dual_evidence_objective_gate_hardening",
+            micro_stages=(
                 _stage(
-                    "egc4.m2_training_interface_stub",
-                    "EGC4.2 Training interface stub",
-                    mode="integrate",
-                    module_targets=egc4_ouch_targets,
-                    objective_signals=("integration_quality", "stability", "introspection_gain"),
-                    min_observations=136,
+                    "wb2.m1_dual_evidence_strict_gate",
+                    "WB2.1 Dual-evidence strict gate",
+                    mode="control_integrate",
+                    module_targets=wb2_gate_targets,
+                    objective_signals=("integration_quality", "transfer", "introspection_gain"),
+                    min_observations=112,
                 ),
                 _stage(
-                    "egc4.m3_safety_fences_for_future_activation",
-                    "EGC4.3 Safety fences for future activation",
+                    "wb2.m2_probe_budget_bounds",
+                    "WB2.2 Probe budget bounds",
                     mode="control_integrate",
-                    module_targets=egc4_ouch_targets,
-                    objective_signals=("integration_quality", "safety", "introspection_gain"),
-                    min_observations=152,
+                    module_targets=wb2_gate_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=124,
+                ),
+                _stage(
+                    "wb2.m3_override_pressure_reduction",
+                    "WB2.3 Override pressure reduction",
+                    mode="control_integrate",
+                    module_targets=wb2_gate_targets,
+                    objective_signals=("integration_quality", "transfer", "stability"),
+                    min_observations=136,
                 ),
             ),
         ),
         AdaptivePhaseSpec(
-            phase_id="phase_egc5_validation_and_rollout",
-            label="Phase EGC5 - Validation and Rollout",
-            capability="validate directional pursuit gains and publish canonical rollout metrics",
-            module_id="egc5_validation_and_rollout",
+            phase_id="phase_wb3_localization_reliability_recovery_before_authority_lift",
+            label="Phase WB3 - Localization Reliability Recovery Before Authority Lift",
+            capability="recover localization reliability floors before any additional MV authority lift",
+            module_id="wb3_localization_reliability_recovery_before_authority_lift",
             micro_stages=(
                 _stage(
-                    "egc5.m1_validation_matrix",
-                    "EGC5.1 Validation matrix",
+                    "wb3.m1_preplan_truth_reacquire_strict",
+                    "WB3.1 Preplan truth reacquire strict",
+                    mode="integrate",
+                    module_targets=wb3_localization_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "wb3.m2_player_exit_accuracy_floor_guard",
+                    "WB3.2 Player/exit accuracy floor guard",
+                    mode="integrate",
+                    module_targets=wb3_localization_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=144,
+                ),
+                _stage(
+                    "wb3.m3_contradiction_debt_reduction",
+                    "WB3.3 Contradiction debt reduction",
                     mode="control_integrate",
-                    module_targets=egc5_validation_targets,
-                    objective_signals=("integration_quality", "transfer", "safety"),
+                    module_targets=wb3_localization_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=160,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_wb4_controlled_mv_influence_lift",
+            label="Phase WB4 - Controlled MV Influence Lift",
+            capability="lift MV influence via calibration and tie-break quality without bypassing beam guard channels",
+            module_id="wb4_controlled_mv_influence_lift",
+            micro_stages=(
+                _stage(
+                    "wb4.m1_score_influence_calibration",
+                    "WB4.1 Score influence calibration",
+                    mode="integrate",
+                    module_targets=wb4_influence_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
                     min_observations=136,
                 ),
                 _stage(
-                    "egc5.m2_report_additions",
-                    "EGC5.2 Report additions",
-                    mode="control_integrate",
-                    module_targets=egc5_validation_targets,
-                    objective_signals=("integration_quality", "stability", "safety", "introspection_gain"),
+                    "wb4.m2_tie_break_quality_lift",
+                    "WB4.2 Tie-break quality lift",
+                    mode="integrate",
+                    module_targets=wb4_influence_targets,
+                    objective_signals=("integration_quality", "transfer", "safety"),
                     min_observations=152,
+                ),
+                _stage(
+                    "wb4.m3_guard_channel_stability_verification",
+                    "WB4.3 Guard channel stability verification",
+                    mode="control_integrate",
+                    module_targets=wb4_influence_targets,
+                    objective_signals=("integration_quality", "stability", "safety", "transfer", "introspection_gain"),
+                    min_observations=168,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_wb5_stage_gated_advanced_experiments",
+            label="Phase WB5 - Stage-Gated Advanced Experiments",
+            capability="run bounded perturbation and contradiction stress experiments on isolated windows after stability gates",
+            module_id="wb5_stage_gated_advanced_experiments",
+            micro_stages=(
+                _stage(
+                    "wb5.m1_beam_perturbation_readiness_check",
+                    "WB5.1 Beam perturbation readiness check",
+                    mode="control_integrate",
+                    module_targets=wb5_experiment_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=156,
+                ),
+                _stage(
+                    "wb5.m2_beam_blackout_burst_and_recovery",
+                    "WB5.2 Beam blackout burst and recovery",
+                    mode="control_integrate",
+                    module_targets=wb5_experiment_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=172,
+                ),
+                _stage(
+                    "wb5.m3_contradiction_injection_and_recovery",
+                    "WB5.3 Contradiction injection and recovery",
+                    mode="control_integrate",
+                    module_targets=wb5_experiment_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=188,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_wb6_beam_decoupling_start_guard_attenuation_ladder",
+            label="Phase WB6 - Beam Decoupling Start (Guard Attenuation Ladder)",
+            capability="start beam decoupling through guard attenuation ladder while preserving objective and truth contracts",
+            module_id="wb6_beam_decoupling_start_guard_attenuation_ladder",
+            micro_stages=(
+                _stage(
+                    "wb6.m1_beam_guard_attenuation_step_a",
+                    "WB6.1 Beam guard attenuation step A",
+                    mode="control_integrate",
+                    module_targets=wb6_attenuation_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=168,
+                ),
+                _stage(
+                    "wb6.m2_beam_guard_attenuation_step_b",
+                    "WB6.2 Beam guard attenuation step B",
+                    mode="control_integrate",
+                    module_targets=wb6_attenuation_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=184,
+                ),
+                _stage(
+                    "wb6.m3_beam_shadow_policy_near_zero",
+                    "WB6.3 Beam shadow policy near-zero",
+                    mode="control_integrate",
+                    module_targets=wb6_attenuation_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=200,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_wb7_mv_primary_with_beam_shadow_decoupling_verification",
+            label="Phase WB7 - MV-Primary with Beam Shadow (Decoupling Verification)",
+            capability="verify MV-primary operation while beam runs shadow-only disagreement audits",
+            module_id="wb7_mv_primary_with_beam_shadow_decoupling_verification",
+            micro_stages=(
+                _stage(
+                    "wb7.m1_shadow_disagreement_audit",
+                    "WB7.1 Shadow disagreement audit",
+                    mode="control_integrate",
+                    module_targets=wb7_shadow_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=176,
+                ),
+                _stage(
+                    "wb7.m2_disagreement_failure_prediction_gate",
+                    "WB7.2 Disagreement failure-prediction gate",
+                    mode="control_integrate",
+                    module_targets=wb7_shadow_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=192,
+                ),
+                _stage(
+                    "wb7.m3_shadow_emergency_rollback_drill",
+                    "WB7.3 Shadow emergency rollback drill",
+                    mode="control_integrate",
+                    module_targets=wb7_shadow_targets,
+                    objective_signals=("integration_quality", "stability", "safety", "transfer"),
+                    min_observations=208,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_wb8_full_beam_decoupling_operational_cutover",
+            label="Phase WB8 - Full Beam Decoupling (Operational Cutover)",
+            capability="cut over to MV-only operational path with emergency rollback to WB7 on stability breach",
+            module_id="wb8_full_beam_decoupling_operational_cutover",
+            micro_stages=(
+                _stage(
+                    "wb8.m1_mv_only_operational_cutover",
+                    "WB8.1 MV-only operational cutover",
+                    mode="control_integrate",
+                    module_targets=wb8_cutover_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=188,
+                ),
+                _stage(
+                    "wb8.m2_mixed_window_stability_hold",
+                    "WB8.2 Mixed-window stability hold",
+                    mode="control_integrate",
+                    module_targets=wb8_cutover_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer", "introspection_gain"),
+                    min_observations=204,
+                ),
+                _stage(
+                    "wb8.m3_operational_cutover_freeze",
+                    "WB8.3 Operational cutover freeze",
+                    mode="control_integrate",
+                    module_targets=wb8_cutover_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer", "introspection_gain"),
+                    min_observations=220,
                 ),
             ),
         ),
     )
 
 
+def build_exit_goal_capability_and_ouch_readiness_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+    """Compatibility alias retained for callers still importing the legacy builder name."""
+    return build_mv_input_transition_phase_specs()
+
+
 def build_mv_localization_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     """Compatibility alias retained for migrated callers."""
-    return build_exit_goal_capability_and_ouch_readiness_phase_specs()
+    return build_mv_input_transition_phase_specs()
 
 
 def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     """Compatibility alias retained for runtime callers migrated from older plans."""
-    return build_exit_goal_capability_and_ouch_readiness_phase_specs()
+    return build_mv_input_transition_phase_specs()
 
 
 def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     """Compatibility alias kept for existing callers in the runtime bootstrap path."""
-    return build_exit_goal_capability_and_ouch_readiness_phase_specs()
+    return build_mv_input_transition_phase_specs()

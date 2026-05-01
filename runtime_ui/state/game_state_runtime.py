@@ -172,6 +172,30 @@ def refresh_game_state(app: object) -> None:
             f"exit_pred={mv_exit_pred} exit_conf={round(float(mv_hints.get('exit_conf', 0.0) or 0.0), 3)} "
             f"hint_strength={round(float(mv_hints.get('exit_hint_strength', 0.0) or 0.0), 3)}."
         )
+        mv_runtime_credit_mode = str(getattr(app, '_mv_runtime_beam_credit_mode', 'normal') or 'normal')
+        mv_runtime_blackout_active = 1 if bool(getattr(app, '_mv_runtime_beam_blackout_active', False)) else 0
+        mv_runtime_beam_contradiction_active = 1 if bool(getattr(app, '_mv_runtime_beam_contradiction_active', False)) else 0
+        mv_runtime_mv_contradiction_active = 1 if bool(getattr(app, '_mv_runtime_mv_contradiction_active', False)) else 0
+        mv_runtime_perturbation_type = str(getattr(app, '_mv_runtime_perturbation_type', 'none') or 'none')
+        mv_hint_credit_mode = str(mv_hints.get('mv_beam_credit_mode', mv_runtime_credit_mode) or mv_runtime_credit_mode)
+        mv_hint_blackout_active = int(mv_hints.get('mv_beam_blackout_active', mv_runtime_blackout_active) or mv_runtime_blackout_active)
+        mv_hint_beam_contradiction_active = int(mv_hints.get('mv_beam_contradiction_active', mv_runtime_beam_contradiction_active) or mv_runtime_beam_contradiction_active)
+        mv_hint_mv_contradiction_active = int(mv_hints.get('mv_mv_contradiction_active', mv_runtime_mv_contradiction_active) or mv_runtime_mv_contradiction_active)
+        mv_hint_perturbation_type = str(mv_hints.get('mv_perturbation_type', mv_runtime_perturbation_type) or mv_runtime_perturbation_type)
+        mv_hint_window_key = str(mv_hints.get('mv_perturbation_window_key', 'none::-1') or 'none::-1')
+        beam_vision_state = 'ON'
+        if mv_runtime_credit_mode == 'blackout':
+            beam_vision_state = 'OFF'
+        elif mv_runtime_credit_mode == 'invert':
+            beam_vision_state = 'INVERTED'
+        machine_vision_beam_state_line = (
+            'Machine vision beam state: '
+            f'beam_vision={beam_vision_state} runtime_mode={mv_runtime_credit_mode} hint_mode={mv_hint_credit_mode} '
+            f'runtime_blackout={mv_runtime_blackout_active} runtime_beam_contradiction={mv_runtime_beam_contradiction_active} runtime_mv_contradiction={mv_runtime_mv_contradiction_active} '
+            f'hint_blackout={mv_hint_blackout_active} hint_beam_contradiction={mv_hint_beam_contradiction_active} hint_mv_contradiction={mv_hint_mv_contradiction_active} '
+            f'perturbation_runtime={mv_runtime_perturbation_type} perturbation_hint={mv_hint_perturbation_type} '
+            f'window={mv_hint_window_key}.'
+        )
         last_mv_kernel = dict(getattr(app, "_last_mv_kernel_breakdown", {}) or {})
         machine_vision_kernel_influence_line = (
             "Machine vision kernel scoring (last selected move): "
@@ -195,6 +219,7 @@ def refresh_game_state(app: object) -> None:
         machine_vision_cellmap_line = "Machine vision cell map: disabled (master toggle off)."
         machine_vision_view_line = "Machine vision sees: disabled (master toggle off)."
         machine_vision_kernel_hint_line = "Machine vision kernel hint channel: disabled (master toggle off)."
+        machine_vision_beam_state_line = "Machine vision beam state: disabled (master toggle off)."
         machine_vision_kernel_influence_line = "Machine vision kernel scoring (last selected move): unavailable (master toggle off)."
         machine_vision_render_debug_line = app._mv_render_debug_status_line()
 
@@ -231,6 +256,7 @@ def refresh_game_state(app: object) -> None:
         f"{machine_vision_exit_line}\n"
         f"{machine_vision_cellmap_line}\n"
         f"{machine_vision_kernel_hint_line}\n"
+        f"{machine_vision_beam_state_line}\n"
         f"{machine_vision_kernel_influence_line}\n"
         f"{machine_vision_render_debug_line}\n"
         f"{machine_vision_view_line}\n"

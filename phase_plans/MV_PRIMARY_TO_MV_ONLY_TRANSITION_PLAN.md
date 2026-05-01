@@ -228,6 +228,155 @@ What:
 Exit:
 - MV-only remains stable for required validation windows, with rollback path intact.
 
+## Post-Change Recovery and Extension Path
+
+### Required Immediate Action (Rerun Before Extending)
+
+If recent post-change validation windows are mixed (for example one clean run and one unstable run), rerun `MVT4` before introducing new stressors.
+
+Why:
+- Extension phases (blackouts/contradictions) are useful only after base de-weight behavior is stable.
+- If stage-gated controls are not active in telemetry, extension results are not attributable.
+
+Rerun gate:
+- Re-run `mvt4.m1 -> mvt4.m3` sequence with normal matrix windows.
+- Require two consecutive windows where:
+  - `unresolved_objective_override_rate <= 0.03`
+  - `guard_override_rate <= 0.08`
+  - MV input acceptance is stable without contradiction-debt spikes.
+
+Only after this gate passes, enable the extension phases below.
+
+### Phase MVT5: Beam Reliability Stress (Intermittent Blackout Curriculum)
+
+#### `mvt5.m1_beam_blackout_low_dose`
+What:
+- Inject intermittent beam-only blackouts while keeping MV path fully available.
+- Start with low dose: `5% -> 10%` of decision steps.
+
+Why:
+- Teaches kernel to stop over-trusting beam continuity and rely on MV/facts-fit signal.
+
+Safety bounds:
+- Blackout burst length max: `2-4` steps.
+- Cooldown between bursts: at least `6-10` steps.
+- Do not blackout both beam and MV together.
+
+Exit:
+- No regression in completion/safety.
+- Beam-guard dependence decreases while MV accepted-input share holds or improves.
+
+#### `mvt5.m2_beam_blackout_burst_and_recovery`
+What:
+- Increase blackout burst difficulty slightly (`8% -> 12%` total blackout exposure), still beam-only.
+
+Why:
+- Validates short-horizon recovery quality under sensor intermittency.
+
+Safety bounds:
+- Cap max burst at `5` steps.
+- Roll back if unresolved override rate rises above `0.03` for two consecutive windows.
+
+Exit:
+- Recovery latency remains bounded; no deadlock-loop increase.
+
+#### `mvt5.m3_blackout_failsafe_and_rollforward`
+What:
+- Validate blackout kill-switch and automatic rollback behavior under stress.
+
+Why:
+- Ensures blackouts are a training perturbation, not an uncontrolled deployment mode.
+
+Exit:
+- Kill-switch behaves deterministically.
+- Roll-forward criteria remain satisfied for two windows.
+
+### Phase MVT6: Contradiction Robustness and Source Trust Calibration
+
+#### `mvt6.m1_beam_contradiction_injection`
+What:
+- Inject low-dose contradictory beam evidence against local facts-fit.
+- Start at `3% -> 5%` of steps.
+
+Why:
+- Trains explicit source reliability separation: unreliable beam hints should be demoted.
+
+Safety bounds:
+- Keep clean-data majority (`>= 90%` clean steps).
+- Contradiction events must be labeled in telemetry for attribution.
+
+Exit:
+- Beam contradiction rejection rate rises without safety regression.
+
+#### `mvt6.m2_mv_contradiction_microdose`
+What:
+- Add very small MV contradiction injections (`<= 2%`) with immediate telemetry labeling.
+
+Why:
+- Avoid overfitting to MV as infallible while preserving MV-primary policy.
+
+Safety bounds:
+- Never exceed `5%` MV contradiction exposure.
+- Stop immediately if contradiction-debt or rollback rate breaches policy caps.
+
+Exit:
+- Kernel preserves facts-fit discipline and recovers without oscillation spikes.
+
+#### `mvt6.m3_source_reliability_adaptation`
+What:
+- Adapt source trust weights from recent contradiction utility (beam vs MV), bounded by safety floor.
+
+Why:
+- Encodes reliability as evidence-driven and reversible, not hardcoded.
+
+Exit:
+- Stable reliability separation and no completion/safety regression.
+
+### Blackouts and Contradictions: Beneficial vs Harmful
+
+Beneficial when:
+- Doses are low and staged.
+- Perturbations are source-targeted and labeled.
+- Clean-data majority remains dominant.
+- Event timing is unpredictable to the kernel but bounded by policy caps.
+- Runs are replayable via seeded perturbation schedulers.
+
+Harmful when:
+- Exposure is too high (`> 10-15%` sustained).
+- Perturbations hit beam and MV simultaneously early.
+- Contradiction labels are missing, causing training contamination.
+- Event timing is deterministic/predictable to policy logic (easy to game).
+- Event timing is fully unbounded/noisy (non-reproducible eval drift).
+
+### Perturbation Scheduling Policy (How to Inject)
+
+Use stochastic timing with deterministic control.
+
+Required behavior:
+- Random and unpredictable to the kernel when blackouts/contradictions happen.
+- Fixed target exposure bands per phase window (do not drift upward during a window).
+- Seeded scheduler so runs are reproducible for A/B and regression analysis.
+
+Implementation contract:
+- Sample event starts from seeded PRNG.
+- Apply burst/cooldown constraints:
+  - Max burst length enforced.
+  - Minimum cooldown enforced.
+- Apply hard exposure cap per window (for example, per 15-maze validation window).
+- Keep clean-data majority (recommended `>= 90%` clean steps in early extension phases).
+- Emit event logs for every perturbation: `type`, `source`, `start_step`, `duration`, `seed`, `window_budget_used`.
+
+Recommended defaults for extension phases:
+- `MVT5` blackout schedule:
+  - Event timing: random (seeded)
+  - Exposure band: `5% -> 10%`
+  - Burst max: `4` (phase m1), `5` (phase m2)
+  - Cooldown min: `8`
+- `MVT6` contradiction schedule:
+  - Beam contradiction exposure: `3% -> 5%` (seeded random timing)
+  - MV contradiction exposure: `<= 2%` initially, hard cap `<= 5%`
+  - Never inject beam+MV contradiction on the same step in early windows.
+
 ## Promotion Gates (All Required)
 
 - High-confidence input quality:
@@ -240,6 +389,60 @@ Exit:
   - Beam guard/veto usage decreases each stage without safety/completion regressions.
 - Stability safeguards:
   - No deadlock-loop increase versus baseline.
+- Extension-phase enable gate:
+  - Before `MVT5`/`MVT6`, require two consecutive windows with:
+    - `unresolved_objective_override_rate <= 0.03`
+    - `guard_override_rate <= 0.08`
+
+## Trust Ratchet and Manual Progression Policy
+
+### Trust ratchet contract (MV influence)
+
+Policy:
+- MV influence is multiplied by a bounded trust-ratchet scale, not directly set to full strength.
+- Trust increases slowly on stable evidence and decreases quickly on contradiction/facts-fit failure.
+- Ratchet has promote/demote hysteresis windows to avoid oscillation.
+
+Signals:
+- Positive evidence:
+  - `mv_input_accepted=1`
+  - `mv_input_facts_fit=1`
+  - no active contradiction injection
+  - positive immediate outcome (`progress_delta > 0` or reward > penalty)
+- Negative evidence:
+  - `facts_fit_contradiction_debt` or `facts_fit_cellmap_blocked`
+  - active beam/MV contradiction event
+  - repeated accepted MV influence with negative outcome
+
+Ratchet behavior:
+- Promote window example: `6` stable steps -> small trust increase (`+0.08` level).
+- Demote window example: `2` adverse steps -> stronger trust decrease (`-0.16` level).
+- Scale bounds example: `[0.35, 1.0]`.
+- Low-confidence probe mode remains bounded and additionally ratchet-scaled.
+
+Required telemetry fields:
+- `mv_trust_ratchet_scale`
+- `mv_trust_ratchet_level`
+- `mv_trust_ratchet_quality_ema`
+- `mv_trust_ratchet_promote_streak`
+- `mv_trust_ratchet_demote_streak`
+
+### Manual progression mode (autostep disabled)
+
+Policy:
+- Disable kernel phase autoprogression by default during trust-ratchet validation windows.
+- Progression owner is human-in-the-loop: phase/micro moves happen only after log review.
+
+Required runtime behavior:
+- `kernel_phase_autostep_enable = 0` at startup/restore.
+- Manual controls stay available for explicit micro/phase step changes.
+- Persist disabled state, but also enforce manual mode on restore to prevent drift.
+
+Promotion workflow in manual mode:
+- Run validation window.
+- Review telemetry + safety/contradiction metrics.
+- Decide: hold, advance micro, advance phase, or regress.
+
 
 ## Validation Matrix
 
@@ -257,6 +460,10 @@ Exit:
 
 Promotion rule:
 - Advance phase only when all gates pass for two consecutive validation windows.
+
+Extension rule:
+- Do not start `MVT5` or `MVT6` until `MVT4` rerun gate passes.
+- Pause or rollback extension phases immediately on safety-floor breach.
 
 ## Rollback Policy
 
@@ -278,15 +485,31 @@ Immediate rollback to prior stage if any occur:
 - `BEAM_HARD_CONTRADICTION_VETO_ONLY` (default `1`)
 - `MV_ONLY_CUTOVER_ENABLE` (default `0`)
 - `MV_ONLY_EMERGENCY_FALLBACK_ENABLE` (default `1`)
+- `MV_BEAM_BLACKOUT_ENABLE` (default `0`)
+- `MV_BEAM_BLACKOUT_RATE` (default `0.05`)
+- `MV_BEAM_BLACKOUT_BURST_MAX_STEPS` (default `4`)
+- `MV_BEAM_BLACKOUT_COOLDOWN_STEPS` (default `8`)
+- `MV_BEAM_BLACKOUT_RANDOM_ENABLE` (default `1`)
+- `MV_BEAM_BLACKOUT_SEED` (default `1337`)
+- `MV_BEAM_BLACKOUT_WINDOW_MAX_EVENTS` (default `0`, `0` means rate-driven only)
+- `MV_BEAM_CONTRADICTION_INJECT_ENABLE` (default `0`)
+- `MV_BEAM_CONTRADICTION_RATE` (default `0.03`)
+- `MV_MV_CONTRADICTION_INJECT_ENABLE` (default `0`)
+- `MV_MV_CONTRADICTION_RATE` (default `0.01`)
+- `MV_CONTRADICTION_RANDOM_ENABLE` (default `1`)
+- `MV_CONTRADICTION_SEED` (default `7331`)
+- `MV_CONTRADICTION_WINDOW_MAX_EVENTS` (default `0`, `0` means rate-driven only)
+- `MV_PERTURBATION_NO_OVERLAP_ENABLE` (default `1`)
+- `MV_PERTURBATION_EVENT_LOG_ENABLE` (default `1`)
+- `MV_SOURCE_RELIABILITY_ADAPT_ENABLE` (default `0`)
 
 ## Immediate Implementation Status
 
 Implemented now:
-- Plan definition only.
+- Manual progression mode default (`kernel_phase_autostep_enable=0`) and restore-time enforcement.
+- Runtime MV trust-ratchet integration with hysteresis and bounded scaling.
+- Trust-ratchet telemetry emission in step logs and move breakdown.
 
 Not implemented yet:
-- Runtime trust-hierarchy enforcement.
-- Facts-fit input acceptance gate.
-- Low-confidence probe discipline.
-- Arbitration reactivation tuning.
-- Beam de-weight ladder and MV-only cutover gates.
+- Full automation for promote/demote decisions from aggregated batch windows.
+- Batch-level ratchet governance hooks in phase policy runtime.

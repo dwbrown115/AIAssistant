@@ -3,7 +3,7 @@ from __future__ import annotations
 from runtime_kernel.kernel_contracts import DevelopmentStage, ReasoningBudgetContract, ReasoningProfile
 
 
-DEFAULT_KERNEL_PHASE_AUTOSTEP_ENABLE = True
+DEFAULT_KERNEL_PHASE_AUTOSTEP_ENABLE = False
 DEFAULT_KERNEL_PHASE_OBSERVATION_FLOOR_OVERRIDE: int | None = None
 DEFAULT_KERNEL_PHASE_CAUSAL_COUNTERFACTUAL_ENABLE = True
 DEFAULT_KERNEL_PHASE_PROGRAM_ENABLE = True
@@ -70,11 +70,12 @@ DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP = {
 }
 DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR = "BALANCED"
 DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS = (
-    "phase_egc0_instrumentation_and_behavioral_visibility",
+    "phase_wb8_full_beam_decoupling_operational_cutover",
 )
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER = 0.72
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS = 28
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_RELEASE_PRESSURE_MAX = 0.45
+DEFAULT_KERNEL_PHASE_SUBTHRESHOLD_STABILITY_BAND = 0.07
 DEFAULT_KERNEL_PHASE_SR_CHALLENGE_HORIZON_STEPS = 64
 DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_CONFIDENCE = 0.74
 DEFAULT_KERNEL_PHASE_SR_CHALLENGE_MIN_SAFETY = 0.72
@@ -345,6 +346,7 @@ def init_kernel_phase_policy_runtime(app: object) -> None:
     app.kernel_phase_sr_immune_clamp_trigger = float(DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER)
     app.kernel_phase_sr_immune_cooldown_steps = int(DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS)
     app.kernel_phase_sr_immune_release_pressure_max = float(DEFAULT_KERNEL_PHASE_SR_IMMUNE_RELEASE_PRESSURE_MAX)
+    app.kernel_phase_subthreshold_stability_band = float(DEFAULT_KERNEL_PHASE_SUBTHRESHOLD_STABILITY_BAND)
     app.kernel_phase_sr_immune_state = {
         "clamp_active": False,
         "cooldown_remaining": 0,
@@ -382,10 +384,31 @@ def kernel_phase_active_specs(app: object, *, phase_id: str, stage_id: str) -> t
     return (active_phase_spec, active_micro_spec)
 
 
+def _kernel_phase_current_or_baseline_target(app: object) -> tuple[str, str] | None:
+    if (not getattr(app, "kernel_phase_program_enable", False)) or getattr(app, "kernel_phase_program", None) is None:
+        return None
+    program = app.kernel_phase_program
+    try:
+        active_target = program.current_active_target()
+    except Exception:
+        active_target = None
+    if active_target is not None:
+        return active_target
+    fallback = getattr(program, "current_baseline_target", None)
+    if callable(fallback):
+        try:
+            baseline_target = fallback()
+        except Exception:
+            baseline_target = None
+        if baseline_target is not None:
+            return baseline_target
+    return None
+
+
 def kernel_phase_active_module_targets(app: object) -> tuple[str, ...]:
     if (not getattr(app, "kernel_phase_program_enable", False)) or getattr(app, "kernel_phase_program", None) is None:
         return ()
-    active_target = app.kernel_phase_program.current_active_target()
+    active_target = _kernel_phase_current_or_baseline_target(app)
     if active_target is None:
         return ()
     phase_id, stage_id = active_target
@@ -398,6 +421,62 @@ def kernel_phase_active_module_targets(app: object) -> tuple[str, ...]:
         if token:
             tokens.append(token)
     return tuple(dict.fromkeys(tokens))
+
+
+def _kernel_phase_gate_status(
+    app: object,
+    *,
+    active_target: tuple[str, str] | None,
+) -> dict[str, float | int]:
+    status: dict[str, float | int] = {
+        "gate_ready": 0,
+        "gate_met": 0,
+        "score_ema": 0.0,
+        "promotion_target": 0.0,
+        "score_deficit": 0.0,
+        "observations": 0,
+        "effective_min_observations": 0,
+    }
+    if active_target is None or getattr(app, "kernel_phase_program", None) is None:
+        return status
+
+    phase_id, stage_id = active_target
+    _, active_micro_spec = kernel_phase_active_specs(
+        app, phase_id=str(phase_id), stage_id=str(stage_id)
+    )
+    if active_micro_spec is None:
+        return status
+
+    observation_floor = getattr(app, "kernel_phase_observation_floor_override", None)
+    if (not isinstance(observation_floor, int)) or observation_floor < 0:
+        observation_floor = None
+    effective_min_observations = int(getattr(active_micro_spec, "min_observations", 0) or 0)
+    if isinstance(observation_floor, int):
+        effective_min_observations = max(effective_min_observations, observation_floor)
+
+    phase_runtime = (getattr(app.kernel_phase_program, "phase_state", {}) or {}).get(str(phase_id))
+    if phase_runtime is None:
+        return status
+
+    observations = int(getattr(phase_runtime, "observations", 0) or 0)
+    score_ema = _clip(float(getattr(phase_runtime, "score_ema", 0.0) or 0.0))
+    promotion_target = _clip(float(getattr(phase_runtime, "promotion_target", 0.0) or 0.0))
+    gate_ready = int(observations >= max(0, int(effective_min_observations)))
+    gate_met = int(gate_ready and (score_ema >= promotion_target))
+    score_deficit = max(0.0, float(promotion_target) - float(score_ema))
+
+    status.update(
+        {
+            "gate_ready": int(gate_ready),
+            "gate_met": int(gate_met),
+            "score_ema": float(score_ema),
+            "promotion_target": float(promotion_target),
+            "score_deficit": float(score_deficit),
+            "observations": int(observations),
+            "effective_min_observations": int(effective_min_observations),
+        }
+    )
+    return status
 
 
 def kernel_phase_runtime_module_enabled(app: object, module_id: str, *, base_enabled: bool, active_targets: tuple[str, ...]) -> bool:
@@ -465,7 +544,25 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
 
     active_targets_raw = kernel_phase_active_module_targets(app)
     active_targets = active_targets_raw
-    active_target = app.kernel_phase_program.current_active_target() if ((app.kernel_phase_program_enable) and (app.kernel_phase_program is not None)) else None
+    active_target = _kernel_phase_current_or_baseline_target(app)
+    gate_status = _kernel_phase_gate_status(app, active_target=active_target)
+    gate_ready = bool(gate_status.get("gate_ready", 0))
+    score_deficit = float(gate_status.get("score_deficit", 0.0) or 0.0)
+    subthreshold_stability_band = _clip(
+        getattr(
+            app,
+            "kernel_phase_subthreshold_stability_band",
+            DEFAULT_KERNEL_PHASE_SUBTHRESHOLD_STABILITY_BAND,
+        ),
+        0.01,
+        0.20,
+    )
+    subthreshold_stability_ratio = 0.0
+    if gate_ready and score_deficit > 0.0:
+        subthreshold_stability_ratio = _clip(
+            1.0 - (score_deficit / max(0.01, float(subthreshold_stability_band)))
+        )
+    subthreshold_stability_active = bool(subthreshold_stability_ratio > 0.0)
     target_label = f"{active_target[0]}::{active_target[1]}" if active_target else ("complete" if app.kernel_phase_program_enable else "disabled")
     active_micro_mode = ""
     objective_signals: tuple[str, ...] = ()
@@ -525,13 +622,22 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
             getattr(app, "kernel_phase_safety_profile_floor", "BALANCED"),
             fallback=ReasoningProfile.BALANCED,
         )
-        desired_budget = _scaled_budget(
-            base_budget,
-            branches_scale=0.65,
-            depth_delta=-1,
-            time_budget_scale=0.72,
-            token_budget_scale=0.78,
-        )
+        if subthreshold_stability_active:
+            desired_budget = _scaled_budget(
+                base_budget,
+                branches_scale=0.82 + (0.08 * subthreshold_stability_ratio),
+                depth_delta=0,
+                time_budget_scale=0.88 + (0.08 * subthreshold_stability_ratio),
+                token_budget_scale=0.86 + (0.10 * subthreshold_stability_ratio),
+            )
+        else:
+            desired_budget = _scaled_budget(
+                base_budget,
+                branches_scale=0.65,
+                depth_delta=-1,
+                time_budget_scale=0.72,
+                token_budget_scale=0.78,
+            )
     elif challenge_active:
         desired_budget = _scaled_budget(
             desired_budget,
@@ -566,10 +672,31 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
             "governance_orchestrator": kernel_phase_runtime_module_enabled(app, "governance_orchestrator", base_enabled=bool(base_map.get("governance_orchestrator", False)), active_targets=active_targets),
         }
     if clamp_active:
-        desired_states["learned_autonomy_controller"] = False
-        desired_states["adaptive_controller"] = False
-        desired_states["causal_counterfactual_planner"] = False
-        desired_states["parallel_reasoning_engine"] = bool(base_map.get("parallel_reasoning_engine", False))
+        if subthreshold_stability_active:
+            desired_states["learned_autonomy_controller"] = kernel_phase_runtime_module_enabled(
+                app,
+                "learned_autonomy_controller",
+                base_enabled=bool(base_map.get("learned_autonomy_controller", False)),
+                active_targets=active_targets,
+            )
+            desired_states["adaptive_controller"] = kernel_phase_runtime_module_enabled(
+                app,
+                "adaptive_controller",
+                base_enabled=bool(base_map.get("adaptive_controller", False)),
+                active_targets=active_targets,
+            )
+            desired_states["causal_counterfactual_planner"] = kernel_phase_runtime_module_enabled(
+                app,
+                "causal_counterfactual_planner",
+                base_enabled=bool(base_map.get("causal_counterfactual_planner", True)),
+                active_targets=active_targets,
+            )
+            desired_states["parallel_reasoning_engine"] = bool(base_map.get("parallel_reasoning_engine", False))
+        else:
+            desired_states["learned_autonomy_controller"] = False
+            desired_states["adaptive_controller"] = False
+            desired_states["causal_counterfactual_planner"] = False
+            desired_states["parallel_reasoning_engine"] = bool(base_map.get("parallel_reasoning_engine", False))
         desired_states["organism_control"] = bool(base_map.get("organism_control", False)) or bool(getattr(app, "kernel_phase_force_safety_core_enable", True))
         desired_states["maze_agent"] = bool(base_map.get("maze_agent", False)) or bool(getattr(app, "kernel_phase_force_safety_core_enable", True))
 
@@ -655,6 +782,11 @@ def apply_kernel_phase_runtime_integration(app: object) -> None:
                     "module_states": {key: int(value) for key, value in desired_states.items()},
                     "observability_only_active": int(observability_only_active),
                     "immune_clamp_active": int(clamp_active),
+                    "subthreshold_stability_active": int(subthreshold_stability_active),
+                    "subthreshold_stability_ratio": round(float(subthreshold_stability_ratio), 4),
+                    "gate_ready": int(gate_status.get("gate_ready", 0) or 0),
+                    "gate_met": int(gate_status.get("gate_met", 0) or 0),
+                    "score_deficit": round(float(score_deficit), 4),
                     "override_challenge_active": int(challenge_active),
                     "reasoning_profile": str(desired_profile.value),
                     "reasoning_budget": {
@@ -1143,7 +1275,7 @@ def build_kernel_phase_step_context(
         return None
     if getattr(app, "kernel_phase_program", None) is None:
         return None
-    active_target = app.kernel_phase_program.current_active_target()
+    active_target = _kernel_phase_current_or_baseline_target(app)
     if active_target is None:
         return None
     phase_id, stage_id = active_target
@@ -1151,13 +1283,31 @@ def build_kernel_phase_step_context(
     micro_mode = str(getattr(active_micro_spec, "mode", "integrate") or "integrate")
     module_targets = tuple(getattr(active_micro_spec, "module_targets", ()) or ())
     objective_signals = tuple(getattr(active_micro_spec, "objective_signals", ()) or ())
-    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", True))
+    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", False))
     observation_floor = getattr(app, "kernel_phase_observation_floor_override", None)
     if (not isinstance(observation_floor, int)) or observation_floor < 0:
         observation_floor = None
     effective_min_observations = int(getattr(active_micro_spec, "min_observations", 0) or 0)
     if isinstance(observation_floor, int):
         effective_min_observations = max(effective_min_observations, observation_floor)
+    gate_status = _kernel_phase_gate_status(app, active_target=active_target)
+    score_deficit = float(gate_status.get("score_deficit", 0.0) or 0.0)
+    gate_ready = bool(gate_status.get("gate_ready", 0))
+    subthreshold_stability_band = _clip(
+        getattr(
+            app,
+            "kernel_phase_subthreshold_stability_band",
+            DEFAULT_KERNEL_PHASE_SUBTHRESHOLD_STABILITY_BAND,
+        ),
+        0.01,
+        0.20,
+    )
+    subthreshold_stability_ratio = 0.0
+    if gate_ready and score_deficit > 0.0:
+        subthreshold_stability_ratio = _clip(
+            1.0 - (score_deficit / max(0.01, float(subthreshold_stability_band)))
+        )
+    subthreshold_stability_active = bool(subthreshold_stability_ratio > 0.0)
     autonomy_snapshot = app.learned_autonomy_controller.snapshot() if getattr(app, "learned_autonomy_subphase_enable", False) else {}
     reasoning_snapshot = app._parallel_reasoning_snapshot() if getattr(app, "parallel_reasoning_enable", False) else {}
     utility_anchor = max(0.0, min(1.0, float(getattr(app, "guard_utility_ema", 0.5) or 0.5)))
@@ -1218,6 +1368,8 @@ def build_kernel_phase_step_context(
     immune_state = dict(getattr(app, "kernel_phase_sr_immune_state", {}) or {})
     prior_clamp_active = bool(immune_state.get("clamp_active", False))
     clamp_trigger = _clip(getattr(app, "kernel_phase_sr_immune_clamp_trigger", DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER), 0.35, 0.99)
+    if subthreshold_stability_active:
+        clamp_trigger = _clip(clamp_trigger + (0.08 * subthreshold_stability_ratio), 0.35, 0.99)
     clamp_release_pressure = _clip(
         getattr(
             app,
@@ -1227,6 +1379,12 @@ def build_kernel_phase_step_context(
         0.15,
         0.95,
     )
+    if subthreshold_stability_active:
+        clamp_release_pressure = _clip(
+            clamp_release_pressure + (0.06 * subthreshold_stability_ratio),
+            0.15,
+            0.95,
+        )
     clamp_cooldown_default = max(
         4,
         int(
@@ -1337,7 +1495,7 @@ def build_kernel_phase_step_context(
             challenge_reason = "challenge_horizon_complete"
             challenge_state["last_reason"] = challenge_reason
 
-    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 5 and str(stage_id) == "egc5.m2_report_additions":
+    if (not bool(challenge_state.get("active", False))) and sr_phase_index >= 5 and str(stage_id) == "wb5.m1_beam_perturbation_readiness_check":
         safety_signal = _clip(homeostasis.get("safety", 0.0))
         start_allowed = (
             (not clamp_active)
@@ -1486,6 +1644,12 @@ def build_kernel_phase_step_context(
         "earned_progress_integrity": round(float(earned_progress_integrity), 4),
         "autostep_enabled": int(autostep_enabled),
         "effective_min_observations": int(effective_min_observations),
+        "promotion_gate_ready": int(gate_status.get("gate_ready", 0) or 0),
+        "promotion_gate_met": int(gate_status.get("gate_met", 0) or 0),
+        "promotion_score_deficit": round(float(score_deficit), 4),
+        "subthreshold_stability_active": int(subthreshold_stability_active),
+        "subthreshold_stability_ratio": round(float(subthreshold_stability_ratio), 4),
+        "subthreshold_stability_band": round(float(subthreshold_stability_band), 4),
         "observability_only_active": int(observability_only_active),
         "immune_clamp_active": int(clamp_active),
         "immune_cooldown_remaining": int(immune_state.get("cooldown_remaining", 0) or 0),
@@ -1514,6 +1678,11 @@ def build_kernel_phase_step_context(
         "autostep_enabled": bool(autostep_enabled),
         "observation_floor": observation_floor,
         "effective_min_observations": int(effective_min_observations),
+        "promotion_gate_ready": int(gate_status.get("gate_ready", 0) or 0),
+        "promotion_gate_met": int(gate_status.get("gate_met", 0) or 0),
+        "promotion_score_deficit": round(float(score_deficit), 4),
+        "subthreshold_stability_active": int(subthreshold_stability_active),
+        "subthreshold_stability_ratio": round(float(subthreshold_stability_ratio), 4),
         "observability_only_active": int(observability_only_active),
         "immune_clamp_active": int(clamp_active),
         "immune_cooldown_remaining": int(immune_state.get("cooldown_remaining", 0) or 0),
@@ -1600,7 +1769,7 @@ def observe_kernel_phase_program_step(
         autostep_enabled=autostep_enabled,
         observation_floor=observation_floor,
     )
-    current_target = app.kernel_phase_program.current_active_target()
+    current_target = _kernel_phase_current_or_baseline_target(app)
     target_label = f"{current_target[0]}::{current_target[1]}" if current_target else "complete"
     apply_kernel_phase_runtime_integration(app)
 
@@ -1655,7 +1824,7 @@ def observe_kernel_phase_program_step(
         return
     if getattr(app, "kernel_phase_program", None) is None:
         return
-    active_target = app.kernel_phase_program.current_active_target()
+    active_target = _kernel_phase_current_or_baseline_target(app)
     if active_target is None:
         return
     phase_id, stage_id = active_target
@@ -1663,7 +1832,7 @@ def observe_kernel_phase_program_step(
     micro_mode = str(getattr(active_micro_spec, "mode", "integrate") or "integrate")
     module_targets = tuple(getattr(active_micro_spec, "module_targets", ()) or ())
     objective_signals = tuple(getattr(active_micro_spec, "objective_signals", ()) or ())
-    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", True))
+    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", False))
     observation_floor = getattr(app, "kernel_phase_observation_floor_override", None)
     if (not isinstance(observation_floor, int)) or observation_floor < 0:
         observation_floor = None
@@ -1786,7 +1955,7 @@ def observe_kernel_phase_program_step(
         autostep_enabled=autostep_enabled,
         observation_floor=observation_floor,
     )
-    current_target = app.kernel_phase_program.current_active_target()
+    current_target = _kernel_phase_current_or_baseline_target(app)
     target_label = f"{current_target[0]}::{current_target[1]}" if current_target else "complete"
     apply_kernel_phase_runtime_integration(app)
     if target_label != getattr(app, "kernel_phase_last_target", None):
@@ -1837,7 +2006,7 @@ def observe_kernel_phase_program_step(
 
 
 def kernel_phase_runtime_policy_snapshot(app: object) -> dict[str, object]:
-    active_target = app.kernel_phase_program.current_active_target() if ((app.kernel_phase_program_enable) and (app.kernel_phase_program is not None)) else None
+    active_target = _kernel_phase_current_or_baseline_target(app)
     target_label = f"{active_target[0]}::{active_target[1]}" if active_target else ("complete" if app.kernel_phase_program_enable else "disabled")
     active_micro_mode = "--"
     objective_signals: tuple[str, ...] = ()
@@ -1853,7 +2022,7 @@ def kernel_phase_runtime_policy_snapshot(app: object) -> dict[str, object]:
                 )
                 if signal
             )
-    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", True))
+    autostep_enabled = bool(getattr(app, "kernel_phase_autostep_enable", False))
     observability_only_active = bool(getattr(app, "kernel_phase_sr_observability_only_active", False))
     immune_state = dict(getattr(app, "kernel_phase_sr_immune_state", {}) or {})
     challenge_state = dict(getattr(app, "kernel_phase_sr_override_challenge_state", {}) or {})

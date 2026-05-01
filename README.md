@@ -661,12 +661,17 @@ MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT=10.0
 # Optional: treat high-confidence fresh MV exit localization as beam-sight-equivalent objective evidence.
 MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF=0.9
 MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR=1
+# Optional: how tightly MV objective equivalence is anchored to beam visibility.
+# `woven` keeps MV coupled to beam by requiring current/recent beam exit visibility before MV
+# can act as beam-equivalent objective evidence. `legacy` preserves prior behavior.
+MV_BEAM_INTEGRATION_MODE=woven
+MV_BEAM_INTEGRATION_RECENT_EXIT_STEPS=64
 # Optional: master runtime switch for all machine-vision subsystems (localization, hints, preplan, overlays, MV routing).
 MACHINE_VISION_ENABLE=1
 # Optional: when enabled, disable MV beam-equivalent objective mode and force
 # kernel route-planning from maze start -> exit using MV cellmap predictions.
 MV_ROUTE_PLANNING_MODE_ENABLE=0
-# Optional: before each maze decision, wait for fresh MV localization and run a 4-direction look sweep.
+# Optional: at planning start, take one MV snapshot frame (no per-step MV preplan wait loop).
 MV_PREPLAN_SWEEP_ENABLE=1
 MV_PREPLAN_REQUIRE_EXIT=1
 MV_PREPLAN_SELF_MIN_CONF=0.9
@@ -778,6 +783,17 @@ source .venv/bin/activate
 python app.py
 ```
 
+set 1: medium
+set 2: hard
+set 3: very hard
+set 4: hard
+
+solve 10 mazes; solve 15 mazes x2; solve 15 mazes x2; solve 15 mazes
+
+Tuning and consolidation phase plan:
+- See `phase_plans/TUNING_AND_CONSOLIDATION_PHASE_MICRO_PLAN.md` for the current stabilization phases, micro cadence, gates, and rollback rules.
+
+
 This opens a dedicated app window.
 
 UI quality-of-life:
@@ -859,6 +875,8 @@ Game controls:
 - Use `Log Dump` in the Maze Memory Viewer to write a full memory export file (working/STM/semantic/structural + memory logs + current pipeline debug) into `Log Dump/`.
 - Use `Log Dump Full` in the Maze Memory Viewer when you need an untruncated export for long runs (disables export row/line caps and includes richer full-detail memory sections for that dump).
 - Prompt batch modifier: append `xN` to a counted maze-run instruction (for example, `run 15 mazes x6`) to execute N batches of the base run count; each batch auto-applies `Random #` before the run and writes a `Log Dump Full` file after completion.
+- Batch sequence sets (prompt separators): split a multi-set run with `,`, `;`, or newlines (for example, `solve 10 mazes; solve 15 mazes x2; solve 15 mazes`).
+- Per-set difficulty mapping (assistant instructions): difficulties are applied per sequence set (not per individual maze) and can be specified by index (`set 1: hard`, `set 2: very hard`) or by ordered separator list (`set difficulties: hard; very hard; hard`, or simply `hard; very hard; hard`).
 - Plateau extra-hard responder env vars: `MAZE_PLATEAU_EXTRA_HARD_ENABLE`, `MAZE_PLATEAU_EXTRA_HARD_STREAK`, `MAZE_PLATEAU_EXTRA_HARD_RUNS`, `MAZE_PLATEAU_EXTRA_HARD_MAX_TRIGGERS`, `MAZE_PLATEAU_EXTRA_HARD_MIN_BATCH_LOOP`, `MAZE_PLATEAU_EXTRA_HARD_DIFFICULTY` (during batch mode, if kernel phase progression stalls for the configured streak, the runtime injects extra runs at a higher difficulty and then restores the previous difficulty).
 - Use `Export Snapshot` in the Maze Memory Viewer to save a portable snapshot zip containing persistent memory (`maze_memory.sqlite3`) and adaptive neural pathways (`adaptive_brain.json`) when available.
 - Use `Import Snapshot` to restore memory/neural state from snapshot files (`.zip` or legacy `.json`); you can also select an extracted `snapshot_manifest.json` directly, and the app will load sibling `maze_memory.sqlite3` / `adaptive_brain.json` files when present. Older snapshots are imported in compatibility mode and migrated to the current DB schema automatically.
@@ -889,7 +907,7 @@ Then open `http://127.0.0.1:5050`.
 - Maze-mode exit placement is deterministic per map identity (seed + difficulty + algorithm), so the same deterministic `map_id` resolves to the same exit cell across runs.
 - Layout recalls now support biological-style reconsolidation: each recall has a small configurable mutation chance (`LAYOUT_RECALL_MUTATION_CHANCE`), and the recalled block is written back as the latest memory version.
 - Reconsolidation mutation is now soft: it decays one recalled cell's recency metadata (`LAYOUT_RECALL_MUTATION_DECAY_STEPS`) instead of removing known open/wall occupancy from the recalled map.
-- Machine-vision localization training is available as side-channels (`MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE`, `MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE`): it predicts player and exit cell coordinates from local perception, the maze memory pipeline logs/grades exact-hit and Manhattan error accuracy, and the board renders yellow-green overlays for both (`MV` for player prediction, `MV-E` for exit prediction). Optional kernel-hint knobs (`MACHINE_VISION_KERNEL_HINT_ENABLE`, `MACHINE_VISION_KERNEL_HINT_MIN_CONF`, `MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT`) let MV coordinates act as a soft, source/confidence-gated exploration bias, beam-equivalence knobs (`MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF`, `MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR`) let fresh high-confidence MV exit localization trigger objective routing similarly to visible beam/FOV exit evidence, MV preplan knobs (`MV_PREPLAN_SWEEP_ENABLE`, `MV_PREPLAN_REQUIRE_EXIT`, `MV_PREPLAN_SELF_MIN_CONF`, `MV_PREPLAN_EXIT_MIN_CONF`, `MV_PREPLAN_MAX_SELF_ERROR`, `MV_PREPLAN_ACQUIRE_MAX_SWEEPS`) enforce an active wait-for-MV loop that repeatedly runs 4-direction look sweeps before each maze planning step, and `MACHINE_VISION_ENABLE=0` acts as a master kill-switch for all MV runtime behavior.
+- Machine-vision localization training is available as side-channels (`MACHINE_VISION_PLAYER_LOCALIZATION_ENABLE`, `MACHINE_VISION_PLAYER_LOCALIZATION_TRAIN_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_ENABLE`, `MACHINE_VISION_EXIT_LOCALIZATION_TRAIN_ENABLE`): it predicts player and exit cell coordinates from local perception, the maze memory pipeline logs/grades exact-hit and Manhattan error accuracy, and the board renders yellow-green overlays for both (`MV` for player prediction, `MV-E` for exit prediction). Optional kernel-hint knobs (`MACHINE_VISION_KERNEL_HINT_ENABLE`, `MACHINE_VISION_KERNEL_HINT_MIN_CONF`, `MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT`) let MV coordinates act as a soft, source/confidence-gated exploration bias, beam-equivalence knobs (`MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF`, `MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR`) gate high-confidence MV objective evidence, and beam-integration knobs (`MV_BEAM_INTEGRATION_MODE`, `MV_BEAM_INTEGRATION_RECENT_EXIT_STEPS`) control whether MV equivalence stays beam-anchored (`woven`) or uses legacy behavior. MV preplan knobs (`MV_PREPLAN_SWEEP_ENABLE`, `MV_PREPLAN_REQUIRE_EXIT`, `MV_PREPLAN_SELF_MIN_CONF`, `MV_PREPLAN_EXIT_MIN_CONF`, `MV_PREPLAN_MAX_SELF_ERROR`, `MV_PREPLAN_ACQUIRE_MAX_SWEEPS`) now run one MV snapshot frame at planning start (instead of repeating a per-step wait/sweep loop), and `MACHINE_VISION_ENABLE=0` acts as a master kill-switch for all MV runtime behavior.
 - MV route-planning mode toggle (`MV_ROUTE_PLANNING_MODE_ENABLE=1`) disables MV beam-equivalent objective mode and instead has the kernel plan a start-to-exit route directly from MV cellmap predictions (with rejoin behavior if the current cell is off the planned start-route).
 - Adaptive neural controller (`ADAPTIVE_CONTROLLER_ENABLE`) adds an online-learning score term over maze decisions, stores persistent weights in `adaptive_brain.json`, can grow/prune hidden units (`ADAPTIVE_HIDDEN_MIN`..`ADAPTIVE_HIDDEN_MAX`, growth/prune knobs), supports policy arbitration modes (`ADAPTIVE_POLICY_MODE=hybrid|adaptive_first`) with warmup/margin gates, uses replay-style updates (`ADAPTIVE_REPLAY_*`), and can temporarily isolate from MV hint bias with `ADAPTIVE_DISABLE_MV_HINTS=1` while bootstrapping transferable behavior.
 - STM now supports access-time stale pruning with a small probability (`STM_ACCESS_UNUSED_PRUNE_CHANCE`) so low-use entries can be gradually culled while memory is being accessed.

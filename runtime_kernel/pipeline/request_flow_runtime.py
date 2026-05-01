@@ -3,20 +3,27 @@ from __future__ import annotations
 
 def request_response(app: object, prompt: str, assistant_instructions: str) -> None:
     try:
-        sequence_segments = app._extract_maze_batch_sequence_segments(prompt)
-        if sequence_segments:
-            local_navigation_request = app.local_navigation_kernel and app._is_local_navigation_request(prompt)
-            if local_navigation_request:
-                sequence_result = app._execute_local_navigation_batch_sequence_runs(
-                    sequence_segments,
-                    assistant_instructions,
-                )
-                app.root.after(0, app._set_debug_text, sequence_result["debug_text"])
-                app.root.after(0, app._set_response, sequence_result["answer"])
-                return
+        parsed_prompt = str(prompt or "").strip()
+        if len(parsed_prompt) >= 2 and parsed_prompt[0] == parsed_prompt[-1] and parsed_prompt[0] in {'"', "'"}:
+            parsed_prompt = parsed_prompt[1:-1].strip()
 
-        batch_multiplier = app._extract_maze_batch_multiplier(prompt)
-        normalized_prompt = app._strip_maze_batch_multiplier(prompt) if batch_multiplier > 1 else prompt
+        sequence_segments = app._extract_maze_batch_sequence_segments(parsed_prompt)
+        if sequence_segments:
+            sequence_difficulty_overrides = app._extract_instruction_sequence_difficulty_overrides(
+                assistant_instructions,
+                len(sequence_segments),
+            )
+            sequence_result = app._execute_local_navigation_batch_sequence_runs(
+                sequence_segments,
+                assistant_instructions,
+                sequence_difficulty_overrides,
+            )
+            app.root.after(0, app._set_debug_text, sequence_result["debug_text"])
+            app.root.after(0, app._set_response, sequence_result["answer"])
+            return
+
+        batch_multiplier = app._extract_maze_batch_multiplier(parsed_prompt)
+        normalized_prompt = app._strip_maze_batch_multiplier(parsed_prompt) if batch_multiplier > 1 else parsed_prompt
 
         local_navigation_request = app.local_navigation_kernel and app._is_local_navigation_request(normalized_prompt)
         local_navigation_result: dict | None = None

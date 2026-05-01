@@ -18,7 +18,7 @@ from tkinter import filedialog, scrolledtext
 from dotenv import load_dotenv
 from openai import OpenAI
 from runtime_kernel.adaptive_controller import AdaptiveNeuralController
-from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_exit_goal_capability_and_ouch_readiness_phase_specs
+from runtime_kernel.adaptive_phase_program import AdaptiveKernelPhaseProgram, build_default_kernel_phase_specs
 from runtime_kernel.governance_orchestrator import GovernanceOrchestrator
 from runtime_kernel.kernel_contracts import ActionOutcomeEvent, DevelopmentStage, ErrorHandlingHint, GlobalErrorCategory, GlobalErrorEvent, ModuleCapabilityDescriptor, ReasoningBudgetContract, ReasoningProfile
 from runtime_kernel.learned_autonomy_controller import LearnedAutonomyController
@@ -388,12 +388,12 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='Exit-goal capability + ouch readiness phase program: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
+        self.kernel_phase_program_status_var = tk.StringVar(value='MV beam-woven phase program: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
-        self.kernel_phase_autostep_var = tk.BooleanVar(value=True)
+        self.kernel_phase_autostep_var = tk.BooleanVar(value=False)
         self.kernel_phase_observation_floor_text_var = tk.StringVar(value='')
         self.kernel_phase_toggle_vars: dict[str, tk.BooleanVar] = {}
         self.kernel_phase_toggle_buttons: dict[str, tk.Checkbutton] = {}
@@ -699,6 +699,9 @@ class AIAssistantApp:
         self.mv_preplan_exit_min_conf = min(1.0, max(0.0, float(os.getenv('MV_PREPLAN_EXIT_MIN_CONF', '0.9'))))
         self.mv_preplan_max_self_error = max(0, int(os.getenv('MV_PREPLAN_MAX_SELF_ERROR', '1')))
         self.mv_preplan_acquire_max_sweeps = max(1, int(os.getenv('MV_PREPLAN_ACQUIRE_MAX_SWEEPS', '6')))
+        self.mv_preplan_soft_fail_open_enable = os.getenv('MV_PREPLAN_SOFT_FAIL_OPEN_ENABLE', '1') == '1'
+        self.mv_preplan_soft_fail_open_wait_streak = max(1, int(os.getenv('MV_PREPLAN_SOFT_FAIL_OPEN_WAIT_STREAK', '2')))
+        self.mv_preplan_soft_fail_open_min_exit_conf = min(1.0, max(0.0, float(os.getenv('MV_PREPLAN_SOFT_FAIL_OPEN_MIN_EXIT_CONF', '0.3'))))
         self._mv_preplan_last_status = 'idle'
         self._mv_preplan_no_sweep_wait_streak = 0
         self.machine_vision_cellmap_init_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_INIT_ENABLE'])
@@ -712,6 +715,104 @@ class AIAssistantApp:
         self.mv_route_planning_mode_requested = os.getenv('MV_ROUTE_PLANNING_MODE_ENABLE', '0') == '1'
         self.mv_route_planning_mode_enable = False
         self.mv_route_planning_mode_var = tk.BooleanVar(value=False)
+        self.mv_primary_mode_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_PRIMARY_MODE_ENABLE']) == '1'
+        self.mv_confidence_trust_threshold = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_CONFIDENCE_TRUST_THRESHOLD']))))
+        self.mv_facts_fit_required = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_FACTS_FIT_REQUIRED']) == '1'
+        self.mv_input_max_contradiction_debt = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_INPUT_MAX_CONTRADICTION_DEBT'])))
+        self.mv_contradiction_debt_adaptive_relief_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_ADAPTIVE_RELIEF_ENABLE', '1')) == '1'
+        self.mv_contradiction_debt_relief_max_bonus = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_MAX_BONUS', '0.75'))))
+        self.mv_contradiction_debt_relief_no_progress_min = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_NO_PROGRESS_MIN', '4'))))
+        self.mv_contradiction_debt_relief_no_progress_window = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_NO_PROGRESS_WINDOW', '10'))))
+        self.mv_contradiction_debt_relief_streak_window = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_STREAK_WINDOW', '5'))))
+        self.mv_contradiction_debt_relief_min_conf_scale = min(1.0, max(0.05, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_MIN_CONF_SCALE', '0.4')))))
+        self.mv_contradiction_debt_relief_observability_bonus = max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_OBSERVABILITY_BONUS', '0.12'))))
+        self.mv_contradiction_debt_relief_immune_clamp_scale = min(1.0, max(0.05, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_RELIEF_IMMUNE_CLAMP_SCALE', '0.5')))))
+        self.mv_contradiction_debt_decay_base = min(0.8, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_DECAY_BASE', '0.035')))))
+        self.mv_contradiction_debt_decay_max = min(0.95, max(self.mv_contradiction_debt_decay_base, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_DECAY_MAX', '0.28')))))
+        self.mv_contradiction_debt_decay_progress_bonus = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_DECAY_PROGRESS_BONUS', '0.04')))))
+        self.mv_contradiction_debt_decay_accept_bonus = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_DECAY_ACCEPT_BONUS', '0.03')))))
+        self.mv_contradiction_debt_decay_rejection_bonus = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_DECAY_REJECTION_BONUS', '0.06')))))
+        self.mv_contradiction_debt_decay_observability_bonus = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_DEBT_DECAY_OBSERVABILITY_BONUS', '0.03')))))
+        self.mv_low_conf_probe_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_LOW_CONF_PROBE_ENABLE']) == '1'
+        self.mv_low_conf_probe_max_steps = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_LOW_CONF_PROBE_MAX_STEPS'])))
+        self.mv_low_conf_probe_dynamic_budget_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_LOW_CONF_PROBE_DYNAMIC_BUDGET_ENABLE']) == '1'
+        self.mv_bad_guess_reacquire_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_BAD_GUESS_REACQUIRE_ENABLE']) == '1'
+        self.mv_bad_guess_reacquire_streak = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_BAD_GUESS_REACQUIRE_STREAK'])))
+        self.mv_bad_guess_reacquire_cooldown_steps = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_BAD_GUESS_REACQUIRE_COOLDOWN_STEPS'])))
+        self.mv_bad_guess_reacquire_max_look_dirs = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_BAD_GUESS_REACQUIRE_MAX_LOOK_DIRS'])))
+        self.beam_guard_only_mode = str(_WAVE8_MAZE_POLICY_DEFAULTS['BEAM_GUARD_ONLY_MODE']) == '1'
+        self.beam_hard_contradiction_veto_only = str(_WAVE8_MAZE_POLICY_DEFAULTS['BEAM_HARD_CONTRADICTION_VETO_ONLY']) == '1'
+        self.mv_only_cutover_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_ONLY_CUTOVER_ENABLE']) == '1'
+        self.mv_only_emergency_fallback_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_ONLY_EMERGENCY_FALLBACK_ENABLE']) == '1'
+        self.mv_beam_integration_mode = self._normalize_mv_beam_integration_mode(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_INTEGRATION_MODE', 'woven')))
+        self.mv_beam_integration_recent_exit_steps = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_INTEGRATION_RECENT_EXIT_STEPS', '64'))))
+        self.mv_beam_equivalent_stage_taper_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_EQUIVALENT_STAGE_TAPER_ENABLE', '1')) == '1'
+        self.mv_beam_retirement_stage_prefix = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_RETIREMENT_STAGE_PREFIX', 'wb6.') or '').strip().lower()
+        self.mv_objective_mv_gate_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_ENABLE', '1')) == '1'
+        self.mv_objective_mv_gate_stage_prefix = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_STAGE_PREFIX', 'wb1.') or '').strip().lower()
+        self.mv_objective_mv_gate_allow_low_conf_probe = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_ALLOW_LOW_CONF_PROBE', '1')) == '1'
+        self.mv_beam_blackout_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_ENABLE', '0')) == '1'
+        self.mv_beam_blackout_rate = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_RATE', '0.05')))))
+        self.mv_beam_blackout_burst_max_steps = max(1, min(16, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_BURST_MAX_STEPS', '4')))))
+        self.mv_beam_blackout_cooldown_steps = max(0, min(120, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_COOLDOWN_STEPS', '8')))))
+        self.mv_beam_blackout_random_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_RANDOM_ENABLE', '1')) == '1'
+        self.mv_beam_blackout_seed = int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_SEED', '1337')))
+        self.mv_beam_blackout_window_max_events = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_WINDOW_MAX_EVENTS', '0'))))
+        self.mv_beam_contradiction_inject_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_CONTRADICTION_INJECT_ENABLE', '0')) == '1'
+        self.mv_beam_contradiction_rate = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_CONTRADICTION_RATE', '0.03')))))
+        self.mv_mv_contradiction_inject_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_MV_CONTRADICTION_INJECT_ENABLE', '0')) == '1'
+        self.mv_mv_contradiction_rate = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_MV_CONTRADICTION_RATE', '0.01')))))
+        self.mv_contradiction_random_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_RANDOM_ENABLE', '1')) == '1'
+        self.mv_contradiction_seed = int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_SEED', '7331')))
+        self.mv_contradiction_window_max_events = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONTRADICTION_WINDOW_MAX_EVENTS', '0'))))
+        self.mv_perturbation_no_overlap_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_PERTURBATION_NO_OVERLAP_ENABLE', '1')) == '1'
+        self.mv_perturbation_event_log_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_PERTURBATION_EVENT_LOG_ENABLE', '1')) == '1'
+        self.mv_source_reliability_adapt_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_SOURCE_RELIABILITY_ADAPT_ENABLE', '0')) == '1'
+        self.mv_confidence_support_reference = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_SUPPORT_REFERENCE', '6'))))
+        self.mv_confidence_support_floor = min(1.0, max(0.05, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_SUPPORT_FLOOR', '0.35')))))
+        self.mv_confidence_self_error_damp_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_SELF_ERROR_DAMP_ENABLE', '1')) == '1'
+        self.mv_confidence_self_error_damp_per_cell = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_SELF_ERROR_DAMP_PER_CELL', '0.22')))))
+        self.mv_confidence_self_error_min_scale = min(1.0, max(0.05, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_SELF_ERROR_MIN_SCALE', '0.2')))))
+        self.mv_confidence_exit_error_damp_per_cell = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_EXIT_ERROR_DAMP_PER_CELL', '0.16')))))
+        self.mv_confidence_exit_error_min_scale = min(1.0, max(0.05, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_CONFIDENCE_EXIT_ERROR_MIN_SCALE', '0.25')))))
+        self.mv_high_confidence_mismatch_threshold = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_HIGH_CONFIDENCE_MISMATCH_THRESHOLD', '0.82')))))
+        self.mv_high_conf_wrong_rate_ema_decay = min(0.999, max(0.5, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_HIGH_CONF_WRONG_RATE_EMA_DECAY', '0.92')))))
+        self.mv_high_conf_wrong_rate_guard_threshold = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_HIGH_CONF_WRONG_RATE_GUARD_THRESHOLD', '0.28')))))
+        self.mv_trust_ratchet_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_ENABLE', '1')) == '1'
+        self.mv_trust_ratchet_min_scale = min(1.0, max(0.05, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_MIN_SCALE', '0.35')))))
+        self.mv_trust_ratchet_max_scale = min(1.0, max(self.mv_trust_ratchet_min_scale, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_MAX_SCALE', '1.0')))))
+        self.mv_trust_ratchet_promote_window = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_PROMOTE_WINDOW', '6'))))
+        self.mv_trust_ratchet_demote_window = max(1, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_DEMOTE_WINDOW', '2'))))
+        self.mv_trust_ratchet_promote_step = min(0.4, max(0.01, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_PROMOTE_STEP', '0.08')))))
+        self.mv_trust_ratchet_demote_step = min(0.6, max(0.02, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_DEMOTE_STEP', '0.16')))))
+        self.mv_trust_ratchet_ema_decay = min(0.999, max(0.5, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_EMA_DECAY', '0.9')))))
+        self.mv_trust_ratchet_level = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TRUST_RATCHET_BASE_LEVEL', '0.55')))))
+        self.mv_trust_ratchet_quality_ema = 0.0
+        self.mv_trust_ratchet_promote_streak = 0
+        self.mv_trust_ratchet_demote_streak = 0
+        self.mv_trust_ratchet_observations = 0
+        self.mv_trust_ratchet_last_reason = 'init'
+        self._mv_beam_blackout_rng = random.Random(self.mv_beam_blackout_seed)
+        self._mv_contradiction_rng = random.Random(self.mv_contradiction_seed)
+        self._mv_perturbation_step_cache: dict[str, object] = {}
+        self._mv_perturbation_window_key: tuple[str, int] | None = None
+        self._mv_perturbation_window_beam_blackout_events = 0
+        self._mv_perturbation_window_contradiction_events = 0
+        self._mv_beam_blackout_remaining_steps = 0
+        self._mv_beam_blackout_cooldown_remaining = 0
+        self._mv_runtime_beam_credit_mode = 'normal'
+        self._mv_runtime_beam_blackout_active = False
+        self._mv_runtime_beam_contradiction_active = False
+        self._mv_runtime_mv_contradiction_active = False
+        self._mv_runtime_perturbation_type = 'none'
+        self.mv_low_conf_probe_steps_used = 0
+        self.mv_contradiction_debt_rejection_streak = 0
+        self.mv_contradiction_debt_last_decay = 0.0
+        self.mv_bad_guess_rejection_streak = 0
+        self._mv_last_bad_guess_reacquire_step = -1000000
+        self.mv_high_conf_wrong_events = 0
+        self.mv_high_conf_eval_events = 0
+        self.mv_high_conf_wrong_rate_ema = 0.0
         self.machine_vision_cellmap_min_accuracy = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_ACCURACY'])))
         self.machine_vision_cellmap_min_confident_accuracy = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_MIN_CONFIDENT_ACCURACY'])))
         self.machine_vision_cellmap_refine_passes_per_check = max(1, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_REFINE_PASSES_PER_CHECK']))
@@ -724,7 +825,11 @@ class AIAssistantApp:
         self._machine_vision_cellmap_grade_dirty = True
         self.machine_vision_beam_equivalent_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_BEAM_EQUIVALENT_MIN_CONF'])))
         self.machine_vision_beam_equivalent_max_self_error = max(0, int(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_BEAM_EQUIVALENT_MAX_SELF_ERROR']))
-        self.machine_vision_recent_results: deque[dict[str, object]] = deque(maxlen=80)
+        # Per-step MV frame history is optional; default off to avoid unnecessary app-side caching.
+        self.mv_recent_frame_cache_enable = os.getenv('MV_RECENT_FRAME_CACHE_ENABLE', '0') == '1'
+        self.mv_recent_frame_cache_maxlen = max(0, int(os.getenv('MV_RECENT_FRAME_CACHE_MAXLEN', '80')))
+        mv_recent_cache_maxlen = int(self.mv_recent_frame_cache_maxlen) if self.mv_recent_frame_cache_enable else 0
+        self.machine_vision_recent_results: deque[dict[str, object]] = deque(maxlen=mv_recent_cache_maxlen)
         self.machine_vision_signature_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
         self.machine_vision_global_cell_counts: dict[tuple[int, int], int] = {}
         self.machine_vision_total_samples = 0
@@ -733,7 +838,7 @@ class AIAssistantApp:
         self.machine_vision_last_prediction: dict[str, object] = {'predicted_cell': (-1, -1), 'actual_cell': (-1, -1), 'confidence': 0.0, 'support': 0, 'exact': False, 'manhattan_error': 0, 'source': 'none', 'maze_layout_id': -1, 'step_index': -1}
         self._machine_vision_last_sample_key: tuple[int, int, int, str, str] | None = None
         self._machine_vision_rng = random.Random(self.maze_seed_base + 7919)
-        self.machine_vision_exit_recent_results: deque[dict[str, object]] = deque(maxlen=80)
+        self.machine_vision_exit_recent_results: deque[dict[str, object]] = deque(maxlen=mv_recent_cache_maxlen)
         self.machine_vision_exit_signature_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
         self.machine_vision_exit_context_cell_counts: dict[str, dict[tuple[int, int], int]] = {}
         self.machine_vision_exit_global_cell_counts: dict[tuple[int, int], int] = {}
@@ -744,7 +849,7 @@ class AIAssistantApp:
         self._machine_vision_exit_last_sample_key: tuple[int, int, int, int] | None = None
         self._machine_vision_exit_rng = random.Random(self.maze_seed_base + 104729)
         self._last_mv_kernel_breakdown_step = -1
-        self._last_mv_kernel_breakdown: dict[str, object] = {'move': '', 'mv_exit_usable': 0, 'mv_exit_pred_cell': (-1, -1), 'mv_exit_hint_strength': 0.0, 'mv_exit_alignment_bonus': 0, 'mv_exit_alignment_penalty': 0, 'mv_cellmap_usable': 0, 'mv_cellmap_open_alignment_bonus': 0, 'mv_cellmap_blocked_risk_penalty': 0, 'mv_cellmap_neighbor_open_bonus': 0, 'mv_cellmap_neighbor_blocked_penalty': 0}
+        self._last_mv_kernel_breakdown: dict[str, object] = {'move': '', 'mv_exit_usable': 0, 'mv_exit_pred_cell': (-1, -1), 'mv_exit_hint_strength': 0.0, 'mv_exit_alignment_bonus': 0, 'mv_exit_alignment_penalty': 0, 'mv_cellmap_usable': 0, 'mv_cellmap_open_alignment_bonus': 0, 'mv_cellmap_blocked_risk_penalty': 0, 'mv_cellmap_neighbor_open_bonus': 0, 'mv_cellmap_neighbor_blocked_penalty': 0, 'mv_input_accepted': 0, 'mv_input_rejection_reason': 'none', 'mv_input_facts_fit': 1, 'mv_low_conf_probe_active': 0, 'mv_influence_scale': 1.0, 'mv_trust_ratchet_scale': 1.0, 'mv_trust_ratchet_level': 0.0, 'mv_trust_ratchet_quality_ema': 0.0, 'mv_trust_ratchet_promote_streak': 0, 'mv_trust_ratchet_demote_streak': 0, 'mv_high_conf_wrong_rate_ema': 0.0, 'mv_high_conf_mismatch_active': 0, 'mv_effective_contradiction_budget': 0.0, 'mv_contradiction_relief_headroom': 0.0, 'mv_contradiction_debt_rejection_streak': 0, 'mv_contradiction_debt_decay': 0.0, 'beam_guard_only_mode': 0, 'mv_perturbation_active': 0, 'mv_perturbation_type': 'none', 'mv_beam_blackout_active': 0, 'mv_beam_contradiction_active': 0, 'mv_mv_contradiction_active': 0, 'mv_beam_credit_mode': 'normal'}
         self.endocrine_enabled = bool(_WAVE5_TRUST_MEMORY_DEFAULTS['ENDOCRINE_ENABLE'])
         self.endocrine = EndocrineSystem()
         # Phase 1-4 deprecation channels are retired in the live runtime path.
@@ -761,7 +866,7 @@ class AIAssistantApp:
         self.learned_autonomy_objective_phase_bonus = 0
         self.learned_autonomy_soft_override_scale = 1.0
         self.kernel_phase_program_enable = KERNEL_PHASE_PROGRAM_DEFAULT_ENABLE_RUNTIME
-        self.kernel_phase_specs = build_exit_goal_capability_and_ouch_readiness_phase_specs() if self.kernel_phase_program_enable else ()
+        self.kernel_phase_specs = build_default_kernel_phase_specs() if self.kernel_phase_program_enable else ()
         kernel_phase_program_defaults = dict(KERNEL_PHASE_PROGRAM_DEFAULT_KWARGS_RUNTIME)
         self.kernel_phase_program = AdaptiveKernelPhaseProgram(
             phase_specs=self.kernel_phase_specs,
@@ -837,7 +942,7 @@ class AIAssistantApp:
         self.maze_agent = self._build_maze_agent()
         self.kernel_phase_force_safety_core_enable = KERNEL_PHASE_FORCE_SAFETY_CORE_DEFAULT_ENABLE_RUNTIME
         kernel_init_kernel_phase_policy_runtime(self)
-        self._apply_kernel_phase_runtime_integration()
+        self._enforce_kernel_phase4_trust_profile(refresh_controls=False)
         self.bio_nav_enable = os.getenv('BIO_NAV_ENABLE', '1') == '1'
         self.bio_nav_opening_weight = max(0, int(os.getenv('BIO_NAV_OPENING_WEIGHT', '18')))
         self.bio_nav_dead_end_escape_weight = max(0, int(os.getenv('BIO_NAV_DEAD_END_ESCAPE_WEIGHT', '24')))
@@ -959,6 +1064,13 @@ class AIAssistantApp:
         self.objective_unresolved_force_score_margin_reduction = max(0, int(os.getenv('OBJECTIVE_UNRESOLVED_FORCE_SCORE_MARGIN_REDUCTION', '20')))
         self.objective_unresolved_force_require_repeat_improvement = os.getenv('OBJECTIVE_UNRESOLVED_FORCE_REQUIRE_REPEAT_IMPROVEMENT', '1') == '1'
         self.objective_unresolved_force_repeat_delta_max = max(0, int(os.getenv('OBJECTIVE_UNRESOLVED_FORCE_REPEAT_DELTA_MAX', '0')))
+        self.wb6_objective_force_damp_enable = os.getenv('WB6_OBJECTIVE_FORCE_DAMP_ENABLE', '1') == '1'
+        self.wb6_objective_force_margin_boost = max(0, int(os.getenv('WB6_OBJECTIVE_FORCE_MARGIN_BOOST', '18')))
+        self.wb6_objective_force_max_unresolved_streak = max(1, int(os.getenv('WB6_OBJECTIVE_FORCE_MAX_UNRESOLVED_STREAK', '2')))
+        self.wb6_objective_force_require_mv_accepted = os.getenv('WB6_OBJECTIVE_FORCE_REQUIRE_MV_ACCEPTED', '1') == '1'
+        self.wb6_projection_scale_clamp_enable = os.getenv('WB6_PROJECTION_SCALE_CLAMP_ENABLE', '1') == '1'
+        self.wb6_projection_scale_clamp_trust_ema_max = min(1.0, max(-1.0, float(os.getenv('WB6_PROJECTION_SCALE_CLAMP_TRUST_EMA_MAX', '0.08'))))
+        self.wb6_projection_scale_clamp_factor = min(1.0, max(0.05, float(os.getenv('WB6_PROJECTION_SCALE_CLAMP_FACTOR', '0.72'))))
         self.solved_region_penalty = max(0, int(os.getenv('SOLVED_REGION_PENALTY', '500')))
         self.loop_entropy_window = max(4, int(os.getenv('LOOP_ENTROPY_WINDOW', '8')))
         self.loop_entropy_threshold = max(0.0, float(os.getenv('LOOP_ENTROPY_THRESHOLD', '1.2')))
@@ -1367,6 +1479,8 @@ class AIAssistantApp:
         self._reset_machine_vision_cellmap_state(clear_layout_id=True)
         self.prediction_contradiction_debt.clear()
         self.prediction_context_contradiction_debt.clear()
+        self.mv_contradiction_debt_rejection_streak = 0
+        self.mv_contradiction_debt_last_decay = 0.0
         self._last_saved_structural_signature = ''
         self._last_structural_snapshot_step = -10000
         self._last_saved_layout_cell_signature = ''
@@ -1611,6 +1725,230 @@ class AIAssistantApp:
     def _effective_objective_override_phase_level(self) -> int:
         return 4
 
+    def _kernel_phase_active_stage_id(self) -> str:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return ''
+        try:
+            active_target = self.kernel_phase_program.current_active_target()
+            if (not active_target) and hasattr(self.kernel_phase_program, 'current_baseline_target'):
+                active_target = self.kernel_phase_program.current_baseline_target()
+        except Exception:
+            return ''
+        if not active_target or len(active_target) < 2:
+            return ''
+        return str(active_target[1] or '').strip()
+
+    def _kernel_phase_stage_prefix_active(self, prefix: str, *, stage_id: str='') -> bool:
+        prefix_token = str(prefix or '').strip().lower()
+        if not prefix_token:
+            return False
+        active_stage = str(stage_id or self._kernel_phase_active_stage_id() or '').strip().lower()
+        return bool(active_stage and active_stage.startswith(prefix_token))
+
+    def _mv_objective_mv_gate_active(self, *, stage_id: str='') -> bool:
+        if not self.mv_objective_mv_gate_enable:
+            return False
+        return self._kernel_phase_stage_prefix_active(self.mv_objective_mv_gate_stage_prefix, stage_id=stage_id)
+
+    def _normalize_mv_beam_integration_mode(self, mode: str) -> str:
+        token = str(mode or '').strip().lower().replace('-', '_')
+        if token in {'legacy', 'legacy_equivalent', 'independent'}:
+            return 'legacy'
+        return 'woven'
+
+    def _mv_beam_anchor_ready(self, *, exit_visible_now: bool, target_known_in_episode: bool) -> tuple[bool, str]:
+        if self.mv_beam_integration_mode == 'legacy':
+            return (True, 'legacy')
+        if exit_visible_now:
+            return (True, 'beam_visible')
+        if self.spatial_memory_enable and self.spatial_exit_recall_enable:
+            last_seen_step = int(getattr(self, 'spatial_exit_last_seen_step', -10000) or -10000)
+            if last_seen_step >= 0:
+                age = max(0, int(self.memory_step_index) - last_seen_step)
+                if age <= int(self.mv_beam_integration_recent_exit_steps):
+                    return (True, f'beam_recent:{age}')
+            return (False, 'beam_not_recent')
+        if target_known_in_episode:
+            return (True, 'target_known_fallback')
+        return (False, 'beam_not_visible')
+
+    def _mv_objective_input_gate_passed(self, move: str, *, stage_id: str='', breakdown_cache: dict[str, dict[str, object]] | None=None) -> tuple[bool, str]:
+        if not self._mv_objective_mv_gate_active(stage_id=stage_id):
+            return (True, 'gate_inactive')
+        if not move or (not self._is_valid_traversal_move(move)):
+            return (False, 'invalid_move')
+        breakdown: dict[str, object]
+        if breakdown_cache is not None:
+            cached = breakdown_cache.get(move)
+            if cached is None:
+                cached = self._exploration_move_breakdown(move)
+                breakdown_cache[move] = cached
+            breakdown = cached
+        else:
+            breakdown = self._exploration_move_breakdown(move)
+        mv_input_accepted = int(breakdown.get('mv_input_accepted', 0) or 0) > 0
+        mv_probe_active = int(breakdown.get('mv_low_conf_probe_active', 0) or 0) > 0
+        if mv_input_accepted:
+            return (True, 'accepted')
+        if self.mv_objective_mv_gate_allow_low_conf_probe and mv_probe_active:
+            return (True, 'probe')
+        return (False, str(breakdown.get('mv_input_rejection_reason', 'gate_rejected') or 'gate_rejected'))
+
+    def _mv_perturbation_stage_profile(self, *, stage_id: str='') -> dict[str, object]:
+        stage_token = str(stage_id or self._kernel_phase_active_stage_id() or '').strip().lower()
+        is_wb5 = stage_token.startswith('wb5.')
+        blackout_rate = float(self.mv_beam_blackout_rate)
+        blackout_burst_max = int(self.mv_beam_blackout_burst_max_steps)
+        blackout_cooldown = int(self.mv_beam_blackout_cooldown_steps)
+        beam_contradiction_rate = float(self.mv_beam_contradiction_rate)
+        mv_contradiction_rate = float(self.mv_mv_contradiction_rate)
+        mv_contradiction_enabled = False
+        if stage_token.startswith('wb5.m2_'):
+            blackout_rate = min(0.12, max(0.08, blackout_rate))
+            blackout_burst_max = max(5, blackout_burst_max)
+        elif stage_token.startswith('wb5.m3_'):
+            blackout_rate = min(0.10, max(0.05, blackout_rate))
+            blackout_burst_max = max(3, min(5, blackout_burst_max))
+        if stage_token.startswith('wb5.m1_'):
+            beam_contradiction_rate = min(0.05, max(0.0, beam_contradiction_rate))
+            mv_contradiction_enabled = False
+        elif stage_token.startswith('wb5.m2_'):
+            beam_contradiction_rate = min(0.05, max(0.03, beam_contradiction_rate))
+            mv_contradiction_enabled = bool(self.mv_mv_contradiction_inject_enable)
+            mv_contradiction_rate = min(0.02, max(0.0, mv_contradiction_rate))
+        elif stage_token.startswith('wb5.m3_'):
+            beam_contradiction_rate = min(0.05, max(0.03, beam_contradiction_rate))
+            mv_contradiction_enabled = bool(self.mv_mv_contradiction_inject_enable)
+            mv_contradiction_rate = min(0.03, max(0.0, mv_contradiction_rate))
+        return {
+            'stage_id': stage_token,
+            'blackout_enabled': bool(is_wb5 and self.mv_beam_blackout_enable),
+            'blackout_rate': float(max(0.0, min(0.5, blackout_rate))),
+            'blackout_burst_max': int(max(1, min(16, blackout_burst_max))),
+            'blackout_cooldown': int(max(0, min(120, blackout_cooldown))),
+            'beam_contradiction_enabled': bool(is_wb5 and self.mv_beam_contradiction_inject_enable),
+            'beam_contradiction_rate': float(max(0.0, min(0.5, beam_contradiction_rate))),
+            'mv_contradiction_enabled': bool(is_wb5 and mv_contradiction_enabled),
+            'mv_contradiction_rate': float(max(0.0, min(0.5, mv_contradiction_rate))),
+        }
+
+    def _mv_perturbation_should_trigger(self, *, rate: float, random_enable: bool, rng: random.Random, step_index: int) -> bool:
+        rate_value = max(0.0, min(1.0, float(rate)))
+        if rate_value <= 0.0:
+            return False
+        if random_enable:
+            return bool(rng.random() < rate_value)
+        interval = max(1, int(round(1.0 / max(0.0001, rate_value))))
+        return bool(step_index >= 0 and (step_index % interval) == 0)
+
+    def _mv_contradiction_offset_cell(self, cell: tuple[int, int]) -> tuple[int, int]:
+        row = int(cell[0] if len(cell) > 0 else -1)
+        col = int(cell[1] if len(cell) > 1 else -1)
+        if not (0 <= row < self.grid_cells and 0 <= col < self.grid_cells):
+            row = int(self._mv_contradiction_rng.randrange(0, self.grid_cells))
+            col = int(self._mv_contradiction_rng.randrange(0, self.grid_cells))
+        offsets = ((1, 0), (-1, 0), (0, 1), (0, -1), (2, 0), (0, 2), (-2, 0), (0, -2))
+        d_row, d_col = offsets[self._mv_contradiction_rng.randrange(0, len(offsets))]
+        next_row = max(0, min(self.grid_cells - 1, row + d_row))
+        next_col = max(0, min(self.grid_cells - 1, col + d_col))
+        if next_row == row and next_col == col:
+            next_row = max(0, min(self.grid_cells - 1, row + 1))
+        return (int(next_row), int(next_col))
+
+    def _mv_perturbation_context_for_step(self, *, stage_id: str='') -> dict[str, object]:
+        stage_token = str(stage_id or self._kernel_phase_active_stage_id() or '').strip().lower()
+        step_index = int(getattr(self, 'memory_step_index', -1) or -1)
+        cache = dict(getattr(self, '_mv_perturbation_step_cache', {}) or {})
+        if cache and int(cache.get('step_index', -99999)) == step_index and str(cache.get('stage_id', '')) == stage_token:
+            return cache
+        profile = self._mv_perturbation_stage_profile(stage_id=stage_token)
+        window_key = (str(stage_token), int(getattr(self, 'current_maze_episode_id', -1) or -1))
+        if window_key != getattr(self, '_mv_perturbation_window_key', None):
+            self._mv_perturbation_window_key = window_key
+            self._mv_perturbation_window_beam_blackout_events = 0
+            self._mv_perturbation_window_contradiction_events = 0
+            self._mv_beam_blackout_remaining_steps = 0
+            self._mv_beam_blackout_cooldown_remaining = 0
+
+        blackout_active = False
+        new_blackout_event = False
+        if self._mv_beam_blackout_remaining_steps > 0:
+            blackout_active = True
+            self._mv_beam_blackout_remaining_steps = max(0, self._mv_beam_blackout_remaining_steps - 1)
+            if self._mv_beam_blackout_remaining_steps <= 0:
+                self._mv_beam_blackout_cooldown_remaining = max(self._mv_beam_blackout_cooldown_remaining, int(profile.get('blackout_cooldown', 0) or 0))
+        else:
+            if self._mv_beam_blackout_cooldown_remaining > 0:
+                self._mv_beam_blackout_cooldown_remaining = max(0, self._mv_beam_blackout_cooldown_remaining - 1)
+            under_blackout_cap = self.mv_beam_blackout_window_max_events <= 0 or self._mv_perturbation_window_beam_blackout_events < self.mv_beam_blackout_window_max_events
+            if bool(profile.get('blackout_enabled', False)) and self._mv_beam_blackout_cooldown_remaining <= 0 and under_blackout_cap:
+                should_start_blackout = self._mv_perturbation_should_trigger(rate=float(profile.get('blackout_rate', 0.0) or 0.0), random_enable=bool(self.mv_beam_blackout_random_enable), rng=self._mv_beam_blackout_rng, step_index=step_index)
+                if should_start_blackout:
+                    burst_max = int(profile.get('blackout_burst_max', self.mv_beam_blackout_burst_max_steps) or self.mv_beam_blackout_burst_max_steps)
+                    if self.mv_beam_blackout_random_enable:
+                        burst_len = int(self._mv_beam_blackout_rng.randint(1, max(1, burst_max)))
+                    else:
+                        burst_len = max(1, int(burst_max))
+                    blackout_active = True
+                    new_blackout_event = True
+                    self._mv_beam_blackout_remaining_steps = max(0, burst_len - 1)
+                    self._mv_beam_blackout_cooldown_remaining = max(0, int(profile.get('blackout_cooldown', 0) or 0))
+                    self._mv_perturbation_window_beam_blackout_events += 1
+
+        under_contradiction_cap = self.mv_contradiction_window_max_events <= 0 or self._mv_perturbation_window_contradiction_events < self.mv_contradiction_window_max_events
+        beam_contradiction_active = False
+        mv_contradiction_active = False
+        if under_contradiction_cap and (not (self.mv_perturbation_no_overlap_enable and blackout_active)):
+            beam_candidate = bool(profile.get('beam_contradiction_enabled', False)) and self._mv_perturbation_should_trigger(rate=float(profile.get('beam_contradiction_rate', 0.0) or 0.0), random_enable=bool(self.mv_contradiction_random_enable), rng=self._mv_contradiction_rng, step_index=step_index)
+            mv_candidate = bool(profile.get('mv_contradiction_enabled', False)) and self._mv_perturbation_should_trigger(rate=float(profile.get('mv_contradiction_rate', 0.0) or 0.0), random_enable=bool(self.mv_contradiction_random_enable), rng=self._mv_contradiction_rng, step_index=step_index)
+            if self.mv_perturbation_no_overlap_enable and beam_candidate and mv_candidate:
+                beam_weight = float(profile.get('beam_contradiction_rate', 0.0) or 0.0)
+                mv_weight = float(profile.get('mv_contradiction_rate', 0.0) or 0.0)
+                beam_pick = bool(self._mv_contradiction_rng.random() < (beam_weight / max(0.0001, beam_weight + mv_weight)))
+                beam_candidate = beam_pick
+                mv_candidate = not beam_pick
+            beam_contradiction_active = bool(beam_candidate)
+            mv_contradiction_active = bool(mv_candidate)
+            if beam_contradiction_active or mv_contradiction_active:
+                self._mv_perturbation_window_contradiction_events += 1
+
+        beam_visibility_flip = bool(beam_contradiction_active and (self._mv_contradiction_rng.random() < 0.65))
+        beam_credit_mode = 'normal'
+        if blackout_active:
+            beam_credit_mode = 'blackout'
+        elif beam_contradiction_active:
+            beam_credit_mode = 'invert'
+        perturbation_type_parts: list[str] = []
+        if blackout_active:
+            perturbation_type_parts.append('beam_blackout')
+        if beam_contradiction_active:
+            perturbation_type_parts.append('beam_contradiction')
+        if mv_contradiction_active:
+            perturbation_type_parts.append('mv_contradiction')
+        perturbation_type = '+'.join(perturbation_type_parts) if perturbation_type_parts else 'none'
+        context = {
+            'step_index': int(step_index),
+            'stage_id': str(stage_token),
+            'beam_blackout_active': bool(blackout_active),
+            'beam_contradiction_active': bool(beam_contradiction_active),
+            'mv_contradiction_active': bool(mv_contradiction_active),
+            'beam_visibility_flip': bool(beam_visibility_flip),
+            'beam_credit_mode': str(beam_credit_mode),
+            'perturbation_active': int(1 if perturbation_type != 'none' else 0),
+            'perturbation_type': str(perturbation_type),
+            'beam_blackout_seed': int(self.mv_beam_blackout_seed),
+            'contradiction_seed': int(self.mv_contradiction_seed),
+            'window_key': f'{window_key[0]}::{window_key[1]}',
+            'window_blackout_events': int(self._mv_perturbation_window_beam_blackout_events),
+            'window_contradiction_events': int(self._mv_perturbation_window_contradiction_events),
+        }
+        self._mv_perturbation_step_cache = dict(context)
+        if self.mv_perturbation_event_log_enable and (new_blackout_event or beam_contradiction_active or mv_contradiction_active):
+            self._append_memory_log(
+                f"mv_perturbation step={step_index} stage={stage_token or 'none'} type={perturbation_type} beam_blackout={int(blackout_active)} beam_contradiction={int(beam_contradiction_active)} mv_contradiction={int(mv_contradiction_active)} beam_seed={self.mv_beam_blackout_seed} contradiction_seed={self.mv_contradiction_seed} window_blackout_events={self._mv_perturbation_window_beam_blackout_events} window_contradiction_events={self._mv_perturbation_window_contradiction_events}"
+            )
+        return context
+
     def _effective_maze_model_assist_reliance(self) -> float:
         if not bool(getattr(self, 'runtime_batch_micro_progress_active', False)):
             return float(self.maze_model_assist_reliance)
@@ -1693,7 +2031,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='Exit Goal Capability + Ouch Readiness (EGC V1)', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='MV Beam-Woven Progression (WB V2)', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -1750,9 +2088,9 @@ class AIAssistantApp:
         toggle_canvas.bind('<Configure>', _sync_toggle_canvas_layout)
 
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='Exit-goal capability + ouch readiness phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
-            self.kernel_phase_program_status_var.set('Exit-goal capability + ouch readiness phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
+            tk.Label(toggle_grid, text='MV beam-woven phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
+            self.kernel_phase_program_status_var.set('MV beam-woven phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1783,16 +2121,39 @@ class AIAssistantApp:
         if persist:
             self._save_window_geometry()
 
+    def _enforce_kernel_phase4_trust_profile(self, *, refresh_controls: bool=True) -> None:
+        if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        phase_order = tuple((str(phase_id) for phase_id in tuple(getattr(self.kernel_phase_program, 'phase_order', ()) or ())))
+        if not phase_order:
+            return
+        disabled_tokens = {
+            str(phase_id).strip()
+            for phase_id in tuple(getattr(self, 'kernel_phase_disable_list', ()) or ())
+            if str(phase_id).strip() and str(phase_id).strip() in set(phase_order)
+        }
+        # Legacy MVT disable markers may persist in saved payloads; drop them.
+        disabled_tokens = {phase_id for phase_id in disabled_tokens if not phase_id.startswith('phase_mvt')}
+        self.kernel_phase_disable_list = tuple((phase_id for phase_id in phase_order if phase_id in disabled_tokens))
+        # Manual progression mode is required for phase-review-driven operation.
+        self.kernel_phase_autostep_enable = False
+        self.kernel_phase_autostep_var.set(False)
+        self.kernel_phase_program.set_disabled_phase_ids(self.kernel_phase_disable_list)
+        self._apply_kernel_phase_runtime_integration()
+        if refresh_controls:
+            self._schedule_kernel_phase_controls_refresh()
+            self._schedule_micro_progress_header_update(announce_transition=False)
+
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('Exit-goal capability + ouch readiness phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
+            self.kernel_phase_program_status_var.set('MV beam-woven phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (EGC Ouch Readiness Plan V1)')
-        self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', True)))
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
+        self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', False)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
         focus_widget = self.root.focus_get() if hasattr(self, 'root') else None
@@ -1802,7 +2163,7 @@ class AIAssistantApp:
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('Exit-goal capability + ouch readiness phase program: no phases loaded')
+            self.kernel_phase_program_status_var.set('MV beam-woven phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -1871,7 +2232,7 @@ class AIAssistantApp:
         target_text = 'complete'
         if isinstance(active_target, (tuple, list)) and len(active_target) == 2:
             target_text = f'{active_target[0]}::{active_target[1]}'
-        runtime_autostep_enabled = bool(getattr(self, 'kernel_phase_autostep_enable', True))
+        runtime_autostep_enabled = bool(getattr(self, 'kernel_phase_autostep_enable', False))
         runtime_autostep_text = 'on' if runtime_autostep_enabled else 'off'
         runtime_floor_override = getattr(self, 'kernel_phase_observation_floor_override', None)
         runtime_floor_text = str(int(runtime_floor_override)) if isinstance(runtime_floor_override, int) and runtime_floor_override >= 0 else 'none'
@@ -1882,7 +2243,7 @@ class AIAssistantApp:
         challenge_active = bool(challenge_state.get('active', False))
         challenge_remaining = int(challenge_state.get('remaining_steps', 0) or 0)
         runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text},clamp={(1 if clamp_active else 0)}/{clamp_cooldown_remaining},challenge={(1 if challenge_active else 0)}/{challenge_remaining}'
-        self.kernel_phase_program_status_var.set(f'Exit-goal capability + ouch readiness phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        self.kernel_phase_program_status_var.set(f'MV beam-woven phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -2051,7 +2412,7 @@ class AIAssistantApp:
             self.governance_orchestrator.record_runtime_event(
                 kind='adaptive_phase_runtime_control',
                 payload={
-                    'autostep_enabled': int(bool(getattr(self, 'kernel_phase_autostep_enable', True))),
+                    'autostep_enabled': int(bool(getattr(self, 'kernel_phase_autostep_enable', False))),
                     'observation_floor_override': (int(floor_value) if isinstance(floor_value, int) else None),
                     'disabled_phases': list(self.kernel_phase_disable_list),
                 },
@@ -2145,6 +2506,225 @@ class AIAssistantApp:
         normalized = max(-1.0, min(1.0, float(self.projection_trust_score_ema)))
         blend = (normalized + 1.0) * 0.5
         return float(self.projection_trust_min_scale) + (float(self.projection_trust_max_scale) - float(self.projection_trust_min_scale)) * blend
+
+    def _mv_effective_contradiction_debt_budget(self, *, local_contradiction_debt: float, mv_input_confidence: float) -> tuple[float, float]:
+        base_budget = max(0.0, float(self.mv_input_max_contradiction_debt))
+        if not self.mv_contradiction_debt_adaptive_relief_enable:
+            return (base_budget, 0.0)
+
+        no_progress_steps = max(0, int(getattr(self, '_runtime_no_progress_steps', 0) or 0))
+        no_progress_min = max(0, int(self.mv_contradiction_debt_relief_no_progress_min))
+        no_progress_window = max(1, int(self.mv_contradiction_debt_relief_no_progress_window))
+        no_progress_pressure = 0.0
+        if no_progress_steps > no_progress_min:
+            no_progress_pressure = min(1.0, float(no_progress_steps - no_progress_min) / float(no_progress_window))
+
+        streak_window = max(1, int(self.mv_contradiction_debt_relief_streak_window))
+        rejection_streak = max(0, int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0))
+        streak_pressure = min(1.0, float(rejection_streak) / float(streak_window))
+
+        trust_level = max(0.0, min(1.0, float(getattr(self, 'mv_trust_ratchet_level', 1.0) or 1.0)))
+        trust_pressure = max(0.0, 1.0 - trust_level)
+        trust_quality_ema = max(-1.0, min(1.0, float(getattr(self, 'mv_trust_ratchet_quality_ema', 0.0) or 0.0)))
+        if trust_quality_ema < 0.0:
+            trust_pressure = min(1.0, trust_pressure + abs(trust_quality_ema) * 0.35)
+
+        contradiction_over = max(0.0, float(local_contradiction_debt) - base_budget)
+        contradiction_pressure = min(1.0, contradiction_over / max(0.5, base_budget)) if contradiction_over > 0.0 else 0.0
+        pressure = max(no_progress_pressure, 0.8 * streak_pressure, 0.55 * trust_pressure, 0.45 * contradiction_pressure)
+
+        bonus = max(0.0, float(self.mv_contradiction_debt_relief_max_bonus)) * max(0.0, min(1.0, pressure))
+        observability_bonus = 0.0
+        if bool(getattr(self, 'kernel_phase_sr_observability_only_active', False)):
+            observability_bonus = max(0.0, float(self.mv_contradiction_debt_relief_observability_bonus))
+            bonus += observability_bonus
+        challenge_state = dict(getattr(self, 'kernel_phase_sr_override_challenge_state', {}) or {})
+        if bool(challenge_state.get('active', False)):
+            bonus += 0.5 * observability_bonus
+
+        confidence_threshold = max(0.01, float(self.mv_confidence_trust_threshold))
+        confidence_scale = min(1.0, max(0.0, float(mv_input_confidence)) / confidence_threshold)
+        confidence_scale = max(float(self.mv_contradiction_debt_relief_min_conf_scale), confidence_scale)
+        bonus *= confidence_scale
+
+        immune_state = dict(getattr(self, 'kernel_phase_sr_immune_state', {}) or {})
+        if bool(immune_state.get('clamp_active', False)):
+            bonus *= float(self.mv_contradiction_debt_relief_immune_clamp_scale)
+
+        bonus_cap = max(0.0, float(self.mv_contradiction_debt_relief_max_bonus)) + observability_bonus + (0.5 * observability_bonus)
+        bonus = min(max(0.0, bonus_cap), max(0.0, bonus))
+        return (base_budget + bonus, bonus)
+
+    def _observe_mv_contradiction_debt_feedback(self, *, selected_breakdown: dict[str, object], progress_delta: int, reward_signal: float, penalty_signal: float) -> None:
+        if not self.mv_primary_mode_enable or not self.mv_contradiction_debt_adaptive_relief_enable:
+            self.mv_contradiction_debt_last_decay = 0.0
+            return
+
+        rejection_reason = str(selected_breakdown.get('mv_input_rejection_reason', 'none') or 'none')
+        accepted = int(selected_breakdown.get('mv_input_accepted', 0) or 0) > 0
+        probe_active = int(selected_breakdown.get('mv_low_conf_probe_active', 0) or 0) > 0
+        influence_scale = max(0.0, float(selected_breakdown.get('mv_influence_scale', 0.0) or 0.0))
+        positive_outcome = int(progress_delta) > 0 or float(reward_signal) > float(penalty_signal) + 0.01
+
+        rejection_streak = max(0, int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0))
+        if rejection_reason == 'facts_fit_contradiction_debt':
+            rejection_streak += 1
+        elif accepted or probe_active:
+            rejection_streak = max(0, rejection_streak - 1)
+        else:
+            rejection_streak = max(0, rejection_streak - 1)
+        self.mv_contradiction_debt_rejection_streak = int(rejection_streak)
+
+        decay = max(0.0, float(self.mv_contradiction_debt_decay_base))
+        if positive_outcome:
+            decay += max(0.0, float(self.mv_contradiction_debt_decay_progress_bonus))
+        if accepted and influence_scale >= 0.35:
+            decay += max(0.0, float(self.mv_contradiction_debt_decay_accept_bonus))
+        if rejection_reason == 'facts_fit_contradiction_debt':
+            streak_window = max(1, int(self.mv_contradiction_debt_relief_streak_window))
+            streak_pressure = min(1.0, float(rejection_streak) / float(streak_window))
+            decay += max(0.0, float(self.mv_contradiction_debt_decay_rejection_bonus)) * streak_pressure
+        if bool(getattr(self, 'kernel_phase_sr_observability_only_active', False)):
+            decay += max(0.0, float(self.mv_contradiction_debt_decay_observability_bonus))
+
+        challenge_state = dict(getattr(self, 'kernel_phase_sr_override_challenge_state', {}) or {})
+        if bool(challenge_state.get('active', False)):
+            decay += 0.5 * max(0.0, float(self.mv_contradiction_debt_decay_observability_bonus))
+        immune_state = dict(getattr(self, 'kernel_phase_sr_immune_state', {}) or {})
+        if bool(immune_state.get('clamp_active', False)):
+            decay *= float(self.mv_contradiction_debt_relief_immune_clamp_scale)
+
+        decay = min(float(self.mv_contradiction_debt_decay_max), max(0.0, decay))
+        self.mv_contradiction_debt_last_decay = float(decay)
+        if decay <= 0.0:
+            return
+
+        target_cell_raw = selected_breakdown.get('candidate_cell', (-1, -1))
+        target_cell: tuple[int, int] | None = None
+        if isinstance(target_cell_raw, tuple) and len(target_cell_raw) >= 2:
+            try:
+                target_cell = (int(target_cell_raw[0]), int(target_cell_raw[1]))
+            except Exception:
+                target_cell = None
+        targeted_decay = min(float(self.mv_contradiction_debt_decay_max), decay + (0.5 * max(0.0, float(self.mv_contradiction_debt_decay_rejection_bonus))))
+        targeted_cells: set[tuple[int, int]] = set()
+        if target_cell is not None:
+            targeted_cells.add(target_cell)
+            for neighbor in self._traversable_neighbors(target_cell):
+                targeted_cells.add(neighbor)
+
+        for debt_cell, debt_value in list(self.prediction_contradiction_debt.items()):
+            value = max(0.0, float(debt_value or 0.0))
+            if value <= 0.0:
+                self.prediction_contradiction_debt.pop(debt_cell, None)
+                continue
+            local_decay = targeted_decay if debt_cell in targeted_cells else decay
+            next_value = value * max(0.0, 1.0 - local_decay)
+            if next_value <= 0.015:
+                self.prediction_contradiction_debt.pop(debt_cell, None)
+            else:
+                self.prediction_contradiction_debt[debt_cell] = float(next_value)
+
+        target_context_key = ''
+        if target_cell is not None:
+            prediction_record = self.prediction_memory_active.get(target_cell)
+            if isinstance(prediction_record, dict):
+                target_context_key = str(prediction_record.get('prediction_context_key', '') or '')
+        for context_key, debt_value in list(self.prediction_context_contradiction_debt.items()):
+            value = max(0.0, float(debt_value or 0.0))
+            if value <= 0.0:
+                self.prediction_context_contradiction_debt.pop(context_key, None)
+                continue
+            local_decay = targeted_decay if target_context_key and context_key == target_context_key else decay
+            next_value = value * max(0.0, 1.0 - local_decay)
+            if next_value <= 0.015:
+                self.prediction_context_contradiction_debt.pop(context_key, None)
+            else:
+                self.prediction_context_contradiction_debt[context_key] = float(next_value)
+
+    def _mv_influence_trust_ratchet_scale(self, *, mv_input_accepted: bool, mv_input_facts_fit: int, mv_low_conf_probe_active: bool, mv_input_rejection_reason: str, mv_beam_contradiction_active: int, mv_mv_contradiction_active: int, mv_high_conf_mismatch_active: bool=False) -> float:
+        if not self.mv_primary_mode_enable or not self.mv_trust_ratchet_enable:
+            return 1.0
+        min_scale = float(self.mv_trust_ratchet_min_scale)
+        max_scale = float(self.mv_trust_ratchet_max_scale)
+        level = max(0.0, min(1.0, float(self.mv_trust_ratchet_level)))
+        trend = max(-1.0, min(1.0, float(self.mv_trust_ratchet_quality_ema)))
+        effective_level = max(0.0, min(1.0, level + 0.15 * trend))
+        scale = min_scale + (max_scale - min_scale) * effective_level
+        rejection_reason = str(mv_input_rejection_reason or 'none')
+        contradiction_debt_reject = rejection_reason == 'facts_fit_contradiction_debt'
+        hard_reject = int(mv_input_facts_fit or 0) <= 0 or rejection_reason in {'facts_fit_contradiction_debt', 'facts_fit_cellmap_blocked'}
+        if contradiction_debt_reject and self.mv_contradiction_debt_adaptive_relief_enable:
+            hard_reject = rejection_reason in {'facts_fit_cellmap_blocked'}
+        contradiction_active = int(mv_beam_contradiction_active or 0) > 0 or int(mv_mv_contradiction_active or 0) > 0
+        if hard_reject or contradiction_active:
+            scale = min(scale, max(min_scale, 0.5 * max_scale))
+        elif bool(mv_high_conf_mismatch_active):
+            scale = min(scale, max(min_scale, 0.45 * max_scale))
+        elif (not bool(mv_input_accepted)) and bool(mv_low_conf_probe_active):
+            scale = min(scale, max(min_scale, 0.65 * max_scale))
+        return max(min_scale, min(max_scale, float(scale)))
+
+    def _observe_mv_trust_ratchet_feedback(self, *, selected_breakdown: dict[str, object], progress_delta: int, reward_signal: float, penalty_signal: float) -> None:
+        if not self.mv_primary_mode_enable or not self.mv_trust_ratchet_enable:
+            return
+        accepted = int(selected_breakdown.get('mv_input_accepted', 0) or 0) > 0
+        facts_fit = int(selected_breakdown.get('mv_input_facts_fit', 1) or 0) > 0
+        probe_active = int(selected_breakdown.get('mv_low_conf_probe_active', 0) or 0) > 0
+        rejection_reason = str(selected_breakdown.get('mv_input_rejection_reason', 'none') or 'none')
+        contradiction_active = int(selected_breakdown.get('mv_beam_contradiction_active', 0) or 0) > 0 or int(selected_breakdown.get('mv_mv_contradiction_active', 0) or 0) > 0
+        high_conf_mismatch_active = int(selected_breakdown.get('mv_high_conf_mismatch_active', 0) or 0) > 0
+        influence_scale = max(0.0, float(selected_breakdown.get('mv_influence_scale', 0.0) or 0.0))
+        positive_outcome = int(progress_delta) > 0 or float(reward_signal) > float(penalty_signal) + 0.01
+        negative_outcome = int(progress_delta) < 0 or float(penalty_signal) > float(reward_signal) + 0.01
+        contradiction_debt_only_reject = rejection_reason == 'facts_fit_contradiction_debt' and (not contradiction_active) and (not high_conf_mismatch_active)
+        high_quality = accepted and facts_fit and (not contradiction_active) and influence_scale >= 0.5 and positive_outcome
+        hard_failure = (not facts_fit) or contradiction_active or high_conf_mismatch_active or rejection_reason in {'facts_fit_contradiction_debt', 'facts_fit_cellmap_blocked', 'mv_high_conf_mismatch_guard'}
+        if contradiction_debt_only_reject and self.mv_contradiction_debt_adaptive_relief_enable:
+            hard_failure = False
+        soft_failure = ((not accepted) and (not probe_active)) or (negative_outcome and influence_scale >= 0.5)
+        sample = 0.0
+        if high_quality:
+            sample = 1.0
+            self.mv_trust_ratchet_promote_streak = int(self.mv_trust_ratchet_promote_streak) + 1
+            self.mv_trust_ratchet_demote_streak = max(0, int(self.mv_trust_ratchet_demote_streak) - 1)
+            self.mv_trust_ratchet_last_reason = 'promote_candidate'
+        elif hard_failure:
+            sample = -1.0
+            self.mv_trust_ratchet_demote_streak = int(self.mv_trust_ratchet_demote_streak) + 2
+            self.mv_trust_ratchet_promote_streak = 0
+            self.mv_trust_ratchet_last_reason = f'demote_candidate:{rejection_reason}'
+        elif soft_failure:
+            sample = -0.4
+            self.mv_trust_ratchet_demote_streak = int(self.mv_trust_ratchet_demote_streak) + 1
+            self.mv_trust_ratchet_promote_streak = 0
+            self.mv_trust_ratchet_last_reason = f'demote_soft:{rejection_reason}'
+        else:
+            sample = 0.1 if accepted and facts_fit else -0.1
+            self.mv_trust_ratchet_promote_streak = max(0, int(self.mv_trust_ratchet_promote_streak) - 1)
+            self.mv_trust_ratchet_demote_streak = max(0, int(self.mv_trust_ratchet_demote_streak) - 1)
+            self.mv_trust_ratchet_last_reason = 'hold'
+        decay = float(self.mv_trust_ratchet_ema_decay)
+        self.mv_trust_ratchet_quality_ema = float(self.mv_trust_ratchet_quality_ema) * decay + float(sample) * (1.0 - decay)
+        self.mv_trust_ratchet_quality_ema = max(-1.0, min(1.0, float(self.mv_trust_ratchet_quality_ema)))
+        level = max(0.0, min(1.0, float(self.mv_trust_ratchet_level)))
+        promoted = False
+        demoted = False
+        if int(self.mv_trust_ratchet_demote_streak) >= int(self.mv_trust_ratchet_demote_window):
+            level = max(0.0, level - float(self.mv_trust_ratchet_demote_step))
+            self.mv_trust_ratchet_demote_streak = 0
+            self.mv_trust_ratchet_promote_streak = 0
+            demoted = True
+        elif int(self.mv_trust_ratchet_promote_streak) >= int(self.mv_trust_ratchet_promote_window):
+            level = min(1.0, level + float(self.mv_trust_ratchet_promote_step))
+            self.mv_trust_ratchet_promote_streak = 0
+            promoted = True
+        self.mv_trust_ratchet_level = max(0.0, min(1.0, float(level)))
+        self.mv_trust_ratchet_observations = int(self.mv_trust_ratchet_observations) + 1
+        if promoted:
+            self.mv_trust_ratchet_last_reason = 'promoted_stable_window'
+        elif demoted:
+            self.mv_trust_ratchet_last_reason = f'demoted_risk:{rejection_reason}'
 
     def _observe_projection_trust_feedback(self, *, projection_forward_bonus: float, projection_backward_penalty: float, projection_backward_escape_bonus: float, progress_delta: int, reward_signal: float, penalty_signal: float) -> None:
         if not self.maze_projection_module_enable or not self.projection_trust_adapt_enable:
@@ -3613,7 +4193,38 @@ class AIAssistantApp:
         return f'mode={mode}|difficulty={difficulty}|grid={self.grid_cells}'
 
     def _machine_vision_kernel_hints(self) -> dict[str, object]:
-        disabled_payload = {'enabled': False, 'self_pred_cell': (-1, -1), 'self_conf': 0.0, 'self_source': 'none', 'self_support': 0, 'self_error': -1, 'self_quality_scale': 0.0, 'exit_pred_cell': (-1, -1), 'exit_conf': 0.0, 'exit_source': 'none', 'exit_support': 0, 'exit_source_scale': 0.0, 'exit_hint_strength': 0.0, 'exit_usable': False, 'self_fresh': False, 'exit_fresh': False}
+        disabled_payload = {
+            'enabled': False,
+            'self_pred_cell': (-1, -1),
+            'self_conf': 0.0,
+            'self_conf_raw': 0.0,
+            'self_source': 'none',
+            'self_support': 0,
+            'self_error': -1,
+            'self_conf_scale': 0.0,
+            'self_quality_scale': 0.0,
+            'exit_pred_cell': (-1, -1),
+            'exit_conf': 0.0,
+            'exit_conf_raw': 0.0,
+            'exit_source': 'none',
+            'exit_support': 0,
+            'exit_conf_scale': 0.0,
+            'exit_source_scale': 0.0,
+            'exit_hint_strength': 0.0,
+            'exit_usable': False,
+            'self_fresh': False,
+            'exit_fresh': False,
+            'mv_confidence_scale': 0.0,
+            'mv_high_conf_wrong_rate_ema': 0.0,
+            'mv_perturbation_active': 0,
+            'mv_perturbation_type': 'none',
+            'mv_beam_blackout_active': 0,
+            'mv_beam_contradiction_active': 0,
+            'mv_mv_contradiction_active': 0,
+            'mv_beam_visibility_flip': 0,
+            'mv_beam_credit_mode': 'normal',
+            'mv_perturbation_window_key': 'none::-1',
+        }
         if not self._machine_vision_enabled():
             return disabled_payload
         if self._normalized_layout_mode() != 'maze':
@@ -3634,23 +4245,43 @@ class AIAssistantApp:
             if pred_layout_id != current_layout_id or pred_step < 0:
                 return False
             return True
+
+        def _support_conf_scale(support: int) -> float:
+            support_ref = max(1.0, float(self.mv_confidence_support_reference))
+            floor = float(self.mv_confidence_support_floor)
+            scale = float(support) / support_ref
+            return max(floor, min(1.0, scale))
+
+        def _error_damp_scale(error_cells: int, *, per_cell: float, min_scale: float) -> float:
+            if not self.mv_confidence_self_error_damp_enable:
+                return 1.0
+            damp = 1.0 - max(0, int(error_cells)) * max(0.0, float(per_cell))
+            return max(float(min_scale), min(1.0, float(damp)))
+
         self_pred = tuple(self.machine_vision_last_prediction.get('predicted_cell', (-1, -1)) or (-1, -1))
-        self_conf = float(self.machine_vision_last_prediction.get('confidence', 0.0) or 0.0)
+        self_conf_raw = float(self.machine_vision_last_prediction.get('confidence', 0.0) or 0.0)
         self_source = str(self.machine_vision_last_prediction.get('source', 'none') or 'none')
         self_support = int(self.machine_vision_last_prediction.get('support', 0) or 0)
         self_fresh = _prediction_is_fresh(self.machine_vision_last_prediction)
         self_available = _valid_cell(self_pred) and self_support > 0 and self_fresh
         self_error = -1
         self_quality_scale = 0.6
+        self_conf_scale = _support_conf_scale(self_support)
         if self_available:
             self_error = abs(int(self_pred[0]) - int(self.current_player_cell[0])) + abs(int(self_pred[1]) - int(self.current_player_cell[1]))
             self_quality_scale = max(0.25, 1.0 - 0.25 * float(self_error))
+            self_conf_scale *= _error_damp_scale(self_error, per_cell=self.mv_confidence_self_error_damp_per_cell, min_scale=self.mv_confidence_self_error_min_scale)
+        self_conf = max(0.0, min(1.0, float(self_conf_raw) * float(self_conf_scale)))
         exit_pred = tuple(self.machine_vision_exit_last_prediction.get('predicted_cell', (-1, -1)) or (-1, -1))
-        exit_conf = float(self.machine_vision_exit_last_prediction.get('confidence', 0.0) or 0.0)
+        exit_conf_raw = float(self.machine_vision_exit_last_prediction.get('confidence', 0.0) or 0.0)
         exit_source = str(self.machine_vision_exit_last_prediction.get('source', 'none') or 'none')
         exit_support = int(self.machine_vision_exit_last_prediction.get('support', 0) or 0)
         exit_fresh = _prediction_is_fresh(self.machine_vision_exit_last_prediction)
         exit_available = _valid_cell(exit_pred) and exit_support > 0 and exit_fresh
+        exit_conf_scale = _support_conf_scale(exit_support)
+        if self_available:
+            exit_conf_scale *= _error_damp_scale(self_error, per_cell=self.mv_confidence_exit_error_damp_per_cell, min_scale=self.mv_confidence_exit_error_min_scale)
+        exit_conf = max(0.0, min(1.0, float(exit_conf_raw) * float(exit_conf_scale)))
         source_scale_map = {'learned_signature': 1.0, 'prior_sample_context': 0.75, 'prior_sample': 0.65, 'prior_sample_global': 0.55, 'explore_uniform': 0.35}
         exit_source_scale = float(source_scale_map.get(exit_source, 0.5))
         min_conf = float(self.machine_vision_kernel_hint_min_conf)
@@ -3659,7 +4290,57 @@ class AIAssistantApp:
         exit_hint_strength = 0.0
         if exit_usable:
             exit_hint_strength = max(0.0, min(1.0, conf_strength * exit_source_scale * self_quality_scale))
-        return {'enabled': True, 'self_pred_cell': (int(self_pred[0]), int(self_pred[1])) if self_available else (-1, -1), 'self_conf': self_conf, 'self_source': self_source, 'self_support': self_support, 'self_error': int(self_error), 'self_quality_scale': round(float(self_quality_scale), 3), 'exit_pred_cell': (int(exit_pred[0]), int(exit_pred[1])) if exit_available else (-1, -1), 'exit_conf': exit_conf, 'exit_source': exit_source, 'exit_support': exit_support, 'exit_source_scale': round(float(exit_source_scale), 3), 'exit_hint_strength': round(float(exit_hint_strength), 3), 'exit_usable': exit_usable, 'self_fresh': self_fresh, 'exit_fresh': exit_fresh}
+        perturbation_context = self._mv_perturbation_context_for_step(stage_id=self._kernel_phase_active_stage_id())
+        if bool(perturbation_context.get('mv_contradiction_active', False)):
+            conf_scale = 0.55 if self.mv_source_reliability_adapt_enable else 0.72
+            source_scale_factor = 0.35 if self.mv_source_reliability_adapt_enable else 0.55
+            self_conf_scale = 0.75 if self.mv_source_reliability_adapt_enable else 0.9
+            self_quality_scale_factor = 0.85 if self.mv_source_reliability_adapt_enable else 0.95
+            if exit_available:
+                exit_pred = self._mv_contradiction_offset_cell(exit_pred)
+                exit_conf = max(0.01, min(1.0, float(exit_conf) * conf_scale))
+                exit_source = 'perturbed_mv_contradiction'
+                exit_source_scale = max(0.1, min(1.0, exit_source_scale * source_scale_factor))
+            if self_available:
+                self_conf = max(0.01, min(1.0, float(self_conf) * self_conf_scale))
+                self_quality_scale = max(0.2, min(1.0, float(self_quality_scale) * self_quality_scale_factor))
+            exit_usable = bool(exit_available and self_available and (exit_conf >= min_conf))
+            conf_strength = max(0.2, min(1.0, exit_conf))
+            exit_hint_strength = 0.0
+            if exit_usable:
+                exit_hint_strength = max(0.0, min(1.0, conf_strength * exit_source_scale * self_quality_scale))
+        return {
+            'enabled': True,
+            'self_pred_cell': (int(self_pred[0]), int(self_pred[1])) if self_available else (-1, -1),
+            'self_conf': self_conf,
+            'self_conf_raw': round(float(self_conf_raw), 3),
+            'self_source': self_source,
+            'self_support': self_support,
+            'self_error': int(self_error),
+            'self_conf_scale': round(float(self_conf_scale), 3),
+            'self_quality_scale': round(float(self_quality_scale), 3),
+            'exit_pred_cell': (int(exit_pred[0]), int(exit_pred[1])) if exit_available else (-1, -1),
+            'exit_conf': exit_conf,
+            'exit_conf_raw': round(float(exit_conf_raw), 3),
+            'exit_source': exit_source,
+            'exit_support': exit_support,
+            'exit_conf_scale': round(float(exit_conf_scale), 3),
+            'exit_source_scale': round(float(exit_source_scale), 3),
+            'exit_hint_strength': round(float(exit_hint_strength), 3),
+            'exit_usable': exit_usable,
+            'self_fresh': self_fresh,
+            'exit_fresh': exit_fresh,
+            'mv_confidence_scale': round(float(max(0.0, min(1.0, self_conf_scale * exit_conf_scale))), 3),
+            'mv_high_conf_wrong_rate_ema': round(float(self.mv_high_conf_wrong_rate_ema), 3),
+            'mv_perturbation_active': int(perturbation_context.get('perturbation_active', 0) or 0),
+            'mv_perturbation_type': str(perturbation_context.get('perturbation_type', 'none') or 'none'),
+            'mv_beam_blackout_active': int(1 if perturbation_context.get('beam_blackout_active', False) else 0),
+            'mv_beam_contradiction_active': int(1 if perturbation_context.get('beam_contradiction_active', False) else 0),
+            'mv_mv_contradiction_active': int(1 if perturbation_context.get('mv_contradiction_active', False) else 0),
+            'mv_beam_visibility_flip': int(1 if perturbation_context.get('beam_visibility_flip', False) else 0),
+            'mv_beam_credit_mode': str(perturbation_context.get('beam_credit_mode', 'normal') or 'normal'),
+            'mv_perturbation_window_key': str(perturbation_context.get('window_key', 'none::-1') or 'none::-1'),
+        }
 
     def _sample_machine_vision_unseen_cell(self) -> tuple[tuple[int, int], float, int, str]:
         candidate_cells = [(row, col) for row in range(self.grid_cells) for col in range(self.grid_cells)]
@@ -3745,6 +4426,17 @@ class AIAssistantApp:
             return (best_cell, confidence, support, 'learned_signature')
         return self._sample_machine_vision_unseen_exit_cell(self._machine_vision_exit_context_key())
 
+    def _observe_mv_confidence_calibration(self, *, confidence: float, manhattan_error: int) -> None:
+        conf = max(0.0, min(1.0, float(confidence or 0.0)))
+        error = max(0, int(manhattan_error or 0))
+        mismatch = int(1 if (conf >= float(self.mv_high_confidence_mismatch_threshold) and error > 0) else 0)
+        self.mv_high_conf_eval_events = int(self.mv_high_conf_eval_events) + 1
+        if mismatch > 0:
+            self.mv_high_conf_wrong_events = int(self.mv_high_conf_wrong_events) + 1
+        decay = float(self.mv_high_conf_wrong_rate_ema_decay)
+        self.mv_high_conf_wrong_rate_ema = float(self.mv_high_conf_wrong_rate_ema) * decay + float(mismatch) * (1.0 - decay)
+        self.mv_high_conf_wrong_rate_ema = max(0.0, min(1.0, float(self.mv_high_conf_wrong_rate_ema)))
+
     def _update_machine_vision_localization(self, player_row: int, player_col: int) -> None:
         if not self._machine_vision_enabled():
             return
@@ -3775,8 +4467,10 @@ class AIAssistantApp:
         self.machine_vision_total_samples += 1
         self.machine_vision_exact_hits += is_exact
         self.machine_vision_manhattan_error_total += float(manhattan_error)
+        self._observe_mv_confidence_calibration(confidence=float(confidence), manhattan_error=int(manhattan_error))
         self.machine_vision_last_prediction = {'predicted_cell': (int(pred_row), int(pred_col)), 'actual_cell': actual_cell, 'confidence': float(confidence), 'support': int(support), 'exact': bool(is_exact == 1), 'manhattan_error': int(manhattan_error), 'source': model_source, 'maze_layout_id': int(self.current_maze_episode_id), 'step_index': int(self.memory_step_index)}
-        self.machine_vision_recent_results.appendleft({'step': int(self.memory_step_index), 'predicted_cell': (int(pred_row), int(pred_col)), 'actual_cell': actual_cell, 'confidence': round(float(confidence), 3), 'support': int(support), 'exact': bool(is_exact == 1), 'manhattan_error': int(manhattan_error), 'source': model_source})
+        if self.mv_recent_frame_cache_enable and self.mv_recent_frame_cache_maxlen > 0:
+            self.machine_vision_recent_results.appendleft({'step': int(self.memory_step_index), 'predicted_cell': (int(pred_row), int(pred_col)), 'actual_cell': actual_cell, 'confidence': round(float(confidence), 3), 'support': int(support), 'exact': bool(is_exact == 1), 'manhattan_error': int(manhattan_error), 'source': model_source})
         self._append_memory_log(f'vision_localization pred=({int(pred_row)},{int(pred_col)}) actual=({actual_cell[0]},{actual_cell[1]}) confidence={round(float(confidence), 3)} support={int(support)} exact={is_exact} manhattan_error={int(manhattan_error)} source={model_source}')
         try:
             with sqlite3.connect(self.memory_db_path) as conn:
@@ -3817,8 +4511,10 @@ class AIAssistantApp:
         self.machine_vision_exit_total_samples += 1
         self.machine_vision_exit_exact_hits += is_exact
         self.machine_vision_exit_manhattan_error_total += float(manhattan_error)
+        self._observe_mv_confidence_calibration(confidence=float(confidence), manhattan_error=int(manhattan_error))
         self.machine_vision_exit_last_prediction = {'predicted_cell': (int(pred_row), int(pred_col)), 'actual_cell': actual_exit, 'confidence': float(confidence), 'support': int(support), 'exact': bool(is_exact == 1), 'manhattan_error': int(manhattan_error), 'source': model_source, 'maze_layout_id': int(self.current_maze_episode_id), 'step_index': int(self.memory_step_index)}
-        self.machine_vision_exit_recent_results.appendleft({'step': int(self.memory_step_index), 'predicted_cell': (int(pred_row), int(pred_col)), 'actual_cell': actual_exit, 'confidence': round(float(confidence), 3), 'support': int(support), 'exact': bool(is_exact == 1), 'manhattan_error': int(manhattan_error), 'source': model_source})
+        if self.mv_recent_frame_cache_enable and self.mv_recent_frame_cache_maxlen > 0:
+            self.machine_vision_exit_recent_results.appendleft({'step': int(self.memory_step_index), 'predicted_cell': (int(pred_row), int(pred_col)), 'actual_cell': actual_exit, 'confidence': round(float(confidence), 3), 'support': int(support), 'exact': bool(is_exact == 1), 'manhattan_error': int(manhattan_error), 'source': model_source})
         self._append_memory_log(f'vision_exit_localization pred=({int(pred_row)},{int(pred_col)}) actual=({actual_exit[0]},{actual_exit[1]}) confidence={round(float(confidence), 3)} support={int(support)} exact={is_exact} manhattan_error={int(manhattan_error)} source={model_source}')
         try:
             with sqlite3.connect(self.memory_db_path) as conn:
@@ -5915,6 +6611,7 @@ class AIAssistantApp:
             autonomy_snapshot = self.learned_autonomy_controller.snapshot()
             reasoning_snapshot = self._parallel_reasoning_snapshot()
             return f"telemetry_channel={channel} telemetry_intervention={(1 if intervention_types else 0)} telemetry_intervention_types={intervention_token} telemetry_progress_delta={int(progress_delta)} telemetry_reward_signal={round(float(reward_signal), 3)} telemetry_penalty_signal={round(float(penalty_signal), 3)} telemetry_decision_score={round(float(decision_score), 3)} telemetry_guard_strength={round(self._adaptive_guard_strength(), 3)} telemetry_guard_budget_used={guard_budget_used} telemetry_guard_budget_allowed={guard_budget_allowed} telemetry_guard_utility_ema={round(float(self.guard_utility_ema), 3)} telemetry_autonomy_score={autonomy_snapshot.get('score_ema', 0.0)} telemetry_effective_objective_phase={self._effective_objective_override_phase_level()} telemetry_hard_override_retired=1 telemetry_autonomy_soft_scale={autonomy_snapshot.get('soft_influence_scale', 1.0)} telemetry_reasoning_conf={reasoning_snapshot.get('last_confidence', 0.0)} telemetry_reasoning_conf_margin={reasoning_snapshot.get('last_confidence_margin', 0.0)} telemetry_reasoning_trust_local={reasoning_snapshot.get('plan_trust_local', 0.0)} telemetry_reasoning_trust_adaptive={reasoning_snapshot.get('plan_trust_adaptive', 0.0)} telemetry_reasoning_trust_deliberative={reasoning_snapshot.get('plan_trust_deliberative', 0.0)} telemetry_batch_progress={round(float(getattr(self, 'runtime_batch_micro_progress', 0.0)), 3)} telemetry_batch_ramp={round(float(getattr(self, 'runtime_batch_micro_ramp', 0.0)), 3)} telemetry_batch_hard_bonus={int(getattr(self, 'runtime_batch_micro_hard_phase_bonus', 0) or 0)} telemetry_batch_objective_bonus={int(getattr(self, 'runtime_batch_micro_objective_phase_bonus', 0) or 0)} telemetry_batch_assist_reliance={round(self._effective_maze_model_assist_reliance(), 3)} telemetry_batch_guard_scale={round(self._effective_batch_micro_guard_strength_scale(), 3)} telemetry_batch_stuck_no_progress_bonus={int(getattr(self, 'runtime_batch_micro_stuck_no_progress_bonus', 0) or 0)} telemetry_batch_stuck_repeat_bonus={int(getattr(self, 'runtime_batch_micro_stuck_repeat_bonus', 0) or 0)} telemetry_training_phase={self._effective_training_phase_level()} telemetry_projection_feature_scale={round(self._training_projection_feature_scale(), 3)}"
+        mv_preplan_snapshot_taken = False
         while iterations < iteration_budget:
             completed, remaining = self._goal_session_progress()
             if maze_mode:
@@ -5938,29 +6635,24 @@ class AIAssistantApp:
                 if self._mv_route_mode_active():
                     self._mv_preplan_last_status = 'route-mode-bypass'
                 elif self.mv_preplan_sweep_enable or self.mv_kernel_identification_halt_enable:
-                    mv_preplan_ready, mv_preplan_note = self._mv_preplan_acquire_until_ready()
-                    self._mv_preplan_last_status = mv_preplan_note
-                    if not mv_preplan_ready:
-                        iterations += 1
-                        step_logs.append(f'step={iterations} proposal_source=kernel proposed=(none) selected=(none) approved=False gets_closer=False kernel_move_used=False guard_override=False pattern_name=(none) memory_event=mv-preplan-wait distance_before=hidden distance_after=hidden reason=[MV-PREPLAN-WAIT: {mv_preplan_note}] telemetry_channel=unknown telemetry_intervention=0 telemetry_intervention_types=none telemetry_progress_delta=0 telemetry_reward_signal=0.0 telemetry_penalty_signal=0.0 telemetry_decision_score=0.0')
-                        live_tail = '\n'.join(step_logs[-12:])
-                        live_debug = f'[STEP MODE LIVE]\n{live_tail}'
-                        exploration_snapshot = self._format_exploration_candidates()
-                        live_debug += f'\n\n[EXPLORATION SCORES]\n{exploration_snapshot}'
-                        self.root.after(0, self._set_debug_text, live_debug)
-                        continue
-                    if self.mv_preplan_sweep_enable:
-                        post_ready_hints = self._machine_vision_kernel_hints()
-                        post_ready_directions = self._mv_preplan_select_look_directions(post_ready_hints)
-                        if not post_ready_directions:
-                            post_ready_directions = self._available_look_directions()
-                        self._preview_look_directions_blocking(post_ready_directions)
-                        if post_ready_directions:
-                            mv_preplan_note = f"{mv_preplan_note} look={','.join(post_ready_directions)}".strip()
-                            self._mv_preplan_last_status = mv_preplan_note
+                    if not mv_preplan_snapshot_taken:
+                        player_row, player_col = (int(self.current_player_cell[0]), int(self.current_player_cell[1]))
+                        if self.machine_vision_player_localization_enable:
+                            self._update_machine_vision_localization(player_row, player_col)
+                        if self.machine_vision_exit_localization_enable:
+                            self._update_machine_vision_exit_localization(player_row, player_col)
+                        snapshot_hints = self._machine_vision_kernel_hints()
+                        mv_preplan_note = (
+                            'snapshot-once '
+                            f"self_conf={round(float(snapshot_hints.get('self_conf', 0.0) or 0.0), 3)} "
+                            f"exit_conf={round(float(snapshot_hints.get('exit_conf', 0.0) or 0.0), 3)} "
+                            f"self_src={str(snapshot_hints.get('self_source', 'none') or 'none')} "
+                            f"exit_src={str(snapshot_hints.get('exit_source', 'none') or 'none')}"
+                        )
+                        self._mv_preplan_last_status = mv_preplan_note
+                        mv_preplan_snapshot_taken = True
                 else:
                     self._mv_preplan_last_status = 'disabled'
-                    self._preview_look_directions_blocking(self._available_look_directions())
             use_model_step_calls = not local_kernel_only and (not maze_mode or self.maze_step_model_hints)
             if not use_model_step_calls:
                 pattern_signature = self._current_pattern_signature() if maze_mode else ''
@@ -6023,7 +6715,6 @@ class AIAssistantApp:
                     self._maze_timeout_reset_pulse = False
                 _target_row, _target_col = self.current_target_cell
                 exit_visible_now = self.maze_known_cells.get(self.current_target_cell, '') == 'E' and self._is_local_cell_visible(self.current_player_cell[0], self.current_player_cell[1], _target_row, _target_col, facing=self.player_facing)
-                self._update_spatial_exit_visibility(exit_visible_now)
                 fully_mapped_now = self._maze_episode_fully_mapped() or (_known_open_now > 0 and _unknown_now <= 0 and (_frontier_now <= 0))
                 fully_mapped_context = fully_mapped_now
                 map_doubt_active = self.maze_map_doubt_enable and map_doubt_cooldown > 0
@@ -6032,6 +6723,22 @@ class AIAssistantApp:
                 if self._post_reset_stm_relax_remaining > 0:
                     self._post_reset_stm_relax_remaining = max(0, self._post_reset_stm_relax_remaining - 1)
                 mv_hints_now = self._machine_vision_kernel_hints()
+                mv_beam_blackout_active_now = int(mv_hints_now.get('mv_beam_blackout_active', 0) or 0) > 0
+                mv_beam_contradiction_active_now = int(mv_hints_now.get('mv_beam_contradiction_active', 0) or 0) > 0
+                mv_mv_contradiction_active_now = int(mv_hints_now.get('mv_mv_contradiction_active', 0) or 0) > 0
+                mv_beam_visibility_flip_now = int(mv_hints_now.get('mv_beam_visibility_flip', 0) or 0) > 0
+                mv_beam_credit_mode_now = str(mv_hints_now.get('mv_beam_credit_mode', 'normal') or 'normal')
+                mv_perturbation_type_now = str(mv_hints_now.get('mv_perturbation_type', 'none') or 'none')
+                self._mv_runtime_beam_blackout_active = bool(mv_beam_blackout_active_now)
+                self._mv_runtime_beam_contradiction_active = bool(mv_beam_contradiction_active_now)
+                self._mv_runtime_mv_contradiction_active = bool(mv_mv_contradiction_active_now)
+                self._mv_runtime_beam_credit_mode = str(mv_beam_credit_mode_now)
+                self._mv_runtime_perturbation_type = str(mv_perturbation_type_now)
+                if mv_beam_blackout_active_now:
+                    exit_visible_now = False
+                elif mv_beam_contradiction_active_now and mv_beam_visibility_flip_now:
+                    exit_visible_now = not exit_visible_now
+                self._update_spatial_exit_visibility(exit_visible_now)
                 mv_exit_confident = bool(mv_hints_now.get('exit_usable', False) and float(mv_hints_now.get('exit_conf', 0.0) or 0.0) >= 0.9 and (str(mv_hints_now.get('exit_source', 'none') or 'none') in {'learned_signature', 'prior_sample_context'}))
                 mv_exit_pred_cell = tuple(mv_hints_now.get('exit_pred_cell', (-1, -1)) or (-1, -1))
                 target_known_in_episode = self.maze_known_cells.get(self.current_target_cell, '') == 'E'
@@ -6047,14 +6754,40 @@ class AIAssistantApp:
                 mv_route_mode_path_len = 0
                 mv_route_mode_note = ''
                 mv_exit_beam_equivalent = False
+                kernel_stage_id_now = self._kernel_phase_active_stage_id()
+                mv_beam_equivalent_stage_taper_active = bool(self.mv_beam_equivalent_stage_taper_enable and self._kernel_phase_stage_prefix_active(self.mv_beam_retirement_stage_prefix, stage_id=kernel_stage_id_now))
+                mv_objective_gate_stage_active = bool(self._mv_objective_mv_gate_active(stage_id=kernel_stage_id_now))
+                mv_objective_gate_breakdown_cache: dict[str, dict[str, object]] = {}
+                mv_beam_equivalent_gate_ok = True
+                mv_beam_equivalent_gate_reason = 'none'
+                mv_beam_equivalent_suppressed_note = ''
+                mv_beam_anchor_ok = True
+                mv_beam_anchor_reason = 'legacy'
                 mv_self_conf_now = float(mv_hints_now.get('self_conf', 0.0) or 0.0)
                 mv_self_source_now = str(mv_hints_now.get('self_source', 'none') or 'none')
                 mv_self_error_now_raw = mv_hints_now.get('self_error', -1)
                 mv_self_error_now = int(mv_self_error_now_raw if mv_self_error_now_raw is not None else -1)
                 mv_exit_conf_now = float(mv_hints_now.get('exit_conf', 0.0) or 0.0)
                 mv_exit_source_now = str(mv_hints_now.get('exit_source', 'none') or 'none')
-                if not self._mv_route_mode_active():
-                    mv_exit_beam_equivalent = bool(bool(mv_hints_now.get('enabled', False)) and bool(mv_hints_now.get('exit_usable', False)) and bool(mv_hints_now.get('exit_fresh', False)) and (mv_exit_pred_cell == self.current_target_cell) and (mv_exit_source_now in {'learned_signature', 'prior_sample_context'}) and (mv_exit_conf_now >= float(self.machine_vision_beam_equivalent_min_conf)) and (0 <= mv_self_error_now <= int(self.machine_vision_beam_equivalent_max_self_error)) and bool(target_path_now))
+                if mv_objective_gate_stage_active and target_path_now:
+                    mv_beam_equivalent_gate_ok, mv_beam_equivalent_gate_reason = self._mv_objective_input_gate_passed(target_path_now[0], stage_id=kernel_stage_id_now, breakdown_cache=mv_objective_gate_breakdown_cache)
+                elif mv_objective_gate_stage_active:
+                    mv_beam_equivalent_gate_reason = 'no_target_path'
+                else:
+                    mv_beam_equivalent_gate_reason = 'gate_inactive'
+                mv_beam_equivalent_candidate = bool(bool(mv_hints_now.get('enabled', False)) and bool(mv_hints_now.get('exit_usable', False)) and bool(mv_hints_now.get('exit_fresh', False)) and (mv_exit_pred_cell == self.current_target_cell) and (mv_exit_source_now in {'learned_signature', 'prior_sample_context'}) and (mv_exit_conf_now >= float(self.machine_vision_beam_equivalent_min_conf)) and (0 <= mv_self_error_now <= int(self.machine_vision_beam_equivalent_max_self_error)) and bool(target_path_now))
+                if mv_beam_equivalent_candidate:
+                    mv_beam_anchor_ok, mv_beam_anchor_reason = self._mv_beam_anchor_ready(exit_visible_now=bool(exit_visible_now), target_known_in_episode=bool(target_known_in_episode))
+                if (not self._mv_route_mode_active()) and (not mv_beam_equivalent_stage_taper_active):
+                    mv_exit_beam_equivalent = bool(mv_beam_equivalent_candidate and mv_beam_equivalent_gate_ok and mv_beam_anchor_ok)
+                if mv_beam_equivalent_candidate and (not mv_exit_beam_equivalent):
+                    if mv_beam_equivalent_stage_taper_active:
+                        mv_beam_equivalent_suppressed_note = f'[MV-BEAM-EQUIV-SUPPRESSED: stage={kernel_stage_id_now or "none"} reason=stage_taper conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
+                    elif not mv_beam_equivalent_gate_ok:
+                        mv_beam_equivalent_suppressed_note = f'[MV-BEAM-EQUIV-SUPPRESSED: stage={kernel_stage_id_now or "none"} reason=mv_gate({mv_beam_equivalent_gate_reason}) conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
+                    elif not mv_beam_anchor_ok:
+                        mv_beam_equivalent_gate_reason = f'beam_anchor({mv_beam_anchor_reason})'
+                        mv_beam_equivalent_suppressed_note = f'[MV-BEAM-EQUIV-SUPPRESSED: stage={kernel_stage_id_now or "none"} reason={mv_beam_equivalent_gate_reason} conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
                 visible_exit_latch_active = bool(target_known_in_episode and (exit_visible_now or mv_exit_beam_equivalent))
                 mv_capture_ready = bool(mv_exit_beam_equivalent and (_unknown_now <= 1 and _frontier_now <= 0))
                 mv_self_identified = bool(bool(mv_hints_now.get('enabled', False)) and mv_self_source_now in {'learned_signature', 'prior_sample_context', 'prior_sample'} and (mv_self_conf_now >= float(self.mv_bootstrap_self_min_conf)) and (0 <= mv_self_error_now <= int(self.mv_bootstrap_max_self_error)))
@@ -6300,7 +7033,19 @@ class AIAssistantApp:
                 if objective_move and objective_verification_unresolved and (not fully_mapped_now) and (not mv_bootstrap_route_active) and (not mv_route_mode_active) and (not mv_capture_ready) and (not mv_exit_beam_equivalent):
                     objective_candidates = [(move, self._neighbor_for_move(self.current_player_cell, move)) for move in ['UP', 'DOWN', 'LEFT', 'RIGHT'] if self._is_valid_traversal_move(move)]
                     objective_margin_effective = max(0, int(self.objective_unresolved_force_score_margin) - int(self.objective_unresolved_force_score_margin_reduction))
+                    wb6_force_damp_active = bool(self.wb6_objective_force_damp_enable and self._kernel_phase_stage_prefix_active('wb6.', stage_id=kernel_stage_id_now))
+                    if wb6_force_damp_active:
+                        objective_margin_effective += int(self.wb6_objective_force_margin_boost)
                     objective_force_allowed, objective_force_reason = self._frontier_forced_move_score_guard(objective_move, objective_candidates, margin_override=objective_margin_effective)
+                    if objective_force_allowed and wb6_force_damp_active and objective_unresolved_override_streak >= int(self.wb6_objective_force_max_unresolved_streak):
+                        objective_force_allowed = False
+                        objective_force_reason = f'wb6_unresolved_streak_guard streak={objective_unresolved_override_streak} max={int(self.wb6_objective_force_max_unresolved_streak)}'
+                    if objective_force_allowed and wb6_force_damp_active and self.wb6_objective_force_require_mv_accepted:
+                        objective_breakdown = self._exploration_move_breakdown(objective_move)
+                        objective_mv_gate = int(objective_breakdown.get('mv_input_accepted', 0) or 0) > 0 or int(objective_breakdown.get('mv_low_conf_probe_active', 0) or 0) > 0
+                        if not objective_mv_gate:
+                            objective_force_allowed = False
+                            objective_force_reason = f'wb6_mv_gate_guard reason={str(objective_breakdown.get("mv_input_rejection_reason", "none") or "none")}'
                     if objective_force_allowed and self.objective_unresolved_force_require_repeat_improvement and objective_candidates:
                         objective_candidate_cell = self._neighbor_for_move(self.current_player_cell, objective_move)
                         objective_forward_count, objective_reverse_count = self._recent_transition_counts(self.current_player_cell, objective_candidate_cell)
@@ -6347,6 +7092,8 @@ class AIAssistantApp:
                         reason_suffix += f" [MV-OBJECTIVE-ACTIVATE: pred={mv_exit_pred_cell} conf={round(float(mv_hints_now.get('exit_conf', 0.0) or 0.0), 3)} src={str(mv_hints_now.get('exit_source', 'none') or 'none')}]"
                     if mv_exit_beam_equivalent:
                         reason_suffix += f' [MV-BEAM-EQUIVALENT: pred={mv_exit_pred_cell} conf={round(mv_exit_conf_now, 3)} self_err={mv_self_error_now} src={mv_exit_source_now}]'
+                    elif mv_beam_equivalent_suppressed_note:
+                        reason_suffix += f' {mv_beam_equivalent_suppressed_note}'
                     if mv_bootstrap_route_active:
                         reason_suffix += f' [MV-BOOTSTRAP-ROUTE: target={mv_bootstrap_target} path_len={mv_bootstrap_path_len} self_conf={round(mv_self_conf_now, 3)} self_err={mv_self_error_now} exit_conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
                     if mv_route_mode_active:
@@ -6496,6 +7243,29 @@ class AIAssistantApp:
             projection_backward_penalty_log = 0
             projection_backward_escape_bonus_log = 0
             projection_score_influence_scale_log = 0.0
+            mv_input_accepted_log = 0
+            mv_input_rejection_reason_log = 'none'
+            mv_input_facts_fit_log = 1
+            mv_low_conf_probe_active_log = 0
+            mv_influence_scale_log = 1.0
+            mv_trust_ratchet_scale_log = 1.0
+            mv_trust_ratchet_level_log = max(0.0, min(1.0, float(getattr(self, 'mv_trust_ratchet_level', 0.0))))
+            mv_trust_ratchet_quality_ema_log = max(-1.0, min(1.0, float(getattr(self, 'mv_trust_ratchet_quality_ema', 0.0))))
+            mv_trust_ratchet_promote_streak_log = int(getattr(self, 'mv_trust_ratchet_promote_streak', 0) or 0)
+            mv_trust_ratchet_demote_streak_log = int(getattr(self, 'mv_trust_ratchet_demote_streak', 0) or 0)
+            mv_high_conf_wrong_rate_ema_log = max(0.0, min(1.0, float(getattr(self, 'mv_high_conf_wrong_rate_ema', 0.0))))
+            mv_high_conf_mismatch_active_log = 0
+            mv_effective_contradiction_budget_log = max(0.0, float(getattr(self, 'mv_input_max_contradiction_debt', 0.0) or 0.0))
+            mv_contradiction_relief_headroom_log = 0.0
+            mv_contradiction_debt_rejection_streak_log = max(0, int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0))
+            mv_contradiction_debt_decay_log = max(0.0, float(getattr(self, 'mv_contradiction_debt_last_decay', 0.0) or 0.0))
+            beam_guard_only_mode_log = 0
+            mv_objective_gate_stage_active_log = 0
+            mv_beam_equivalent_stage_taper_active_log = 0
+            mv_beam_equivalent_gate_reason_log = 'none'
+            mv_beam_equivalent_suppressed_log = 0
+            mv_beam_integration_mode_log = str(self.mv_beam_integration_mode or 'woven')
+            mv_beam_anchor_reason_log = 'none'
             if not maze_mode and self.strict_progress_guard and selected_move and (selected_distance > current_distance):
                 guard_move = self._best_progress_move()
                 if guard_move:
@@ -6523,6 +7293,19 @@ class AIAssistantApp:
                     objective_steps += 1
             if maze_mode and self._is_valid_traversal_move(selected_move):
                 selected_breakdown = self._exploration_move_breakdown(selected_move)
+                mv_rejection_reason_now = str(selected_breakdown.get('mv_input_rejection_reason', 'none') or 'none')
+                if mv_rejection_reason_now in {'facts_fit_contradiction_debt', 'facts_fit_cellmap_blocked'}:
+                    self.mv_bad_guess_rejection_streak += 1
+                else:
+                    self.mv_bad_guess_rejection_streak = 0
+                if self.mv_bad_guess_reacquire_enable and self.mv_bad_guess_rejection_streak >= int(self.mv_bad_guess_reacquire_streak):
+                    steps_since_reacquire = int(self.memory_step_index) - int(self._mv_last_bad_guess_reacquire_step)
+                    if steps_since_reacquire >= int(self.mv_bad_guess_reacquire_cooldown_steps):
+                        reacquire_note = self._mv_reacquire_after_bad_guess(mv_rejection_reason_now)
+                        self._mv_last_bad_guess_reacquire_step = int(self.memory_step_index)
+                        self.mv_bad_guess_rejection_streak = 0
+                        selected_breakdown = self._exploration_move_breakdown(selected_move)
+                        guard_reason = self._append_guard_reason(guard_reason, f'MV re-acquire: {reacquire_note}')
                 mv_exit_pred_cell = tuple(selected_breakdown.get('mv_exit_pred_cell', (-1, -1)) or (-1, -1))
                 if (not isinstance(mv_exit_pred_cell, (tuple, list))) or len(mv_exit_pred_cell) != 2:
                     mv_exit_pred_cell = (-1, -1)
@@ -6539,6 +7322,29 @@ class AIAssistantApp:
                     'mv_cellmap_blocked_risk_penalty': int(selected_breakdown.get('mv_cellmap_blocked_risk_penalty', 0) or 0),
                     'mv_cellmap_neighbor_open_bonus': int(selected_breakdown.get('mv_cellmap_neighbor_open_bonus', 0) or 0),
                     'mv_cellmap_neighbor_blocked_penalty': int(selected_breakdown.get('mv_cellmap_neighbor_blocked_penalty', 0) or 0),
+                    'mv_input_accepted': int(selected_breakdown.get('mv_input_accepted', 0) or 0),
+                    'mv_input_rejection_reason': str(selected_breakdown.get('mv_input_rejection_reason', 'none') or 'none'),
+                    'mv_input_facts_fit': int(selected_breakdown.get('mv_input_facts_fit', 1) or 0),
+                    'mv_low_conf_probe_active': int(selected_breakdown.get('mv_low_conf_probe_active', 0) or 0),
+                    'mv_influence_scale': round(float(selected_breakdown.get('mv_influence_scale', 1.0) or 1.0), 3),
+                    'mv_trust_ratchet_scale': round(float(selected_breakdown.get('mv_trust_ratchet_scale', 1.0) or 1.0), 3),
+                    'mv_trust_ratchet_level': round(float(selected_breakdown.get('mv_trust_ratchet_level', 0.0) or 0.0), 3),
+                    'mv_trust_ratchet_quality_ema': round(float(selected_breakdown.get('mv_trust_ratchet_quality_ema', 0.0) or 0.0), 3),
+                    'mv_trust_ratchet_promote_streak': int(selected_breakdown.get('mv_trust_ratchet_promote_streak', 0) or 0),
+                    'mv_trust_ratchet_demote_streak': int(selected_breakdown.get('mv_trust_ratchet_demote_streak', 0) or 0),
+                    'mv_high_conf_wrong_rate_ema': round(float(selected_breakdown.get('mv_high_conf_wrong_rate_ema', 0.0) or 0.0), 3),
+                    'mv_high_conf_mismatch_active': int(selected_breakdown.get('mv_high_conf_mismatch_active', 0) or 0),
+                    'mv_effective_contradiction_budget': round(float(selected_breakdown.get('mv_effective_contradiction_budget', self.mv_input_max_contradiction_debt) or self.mv_input_max_contradiction_debt), 3),
+                    'mv_contradiction_relief_headroom': round(float(selected_breakdown.get('mv_contradiction_relief_headroom', 0.0) or 0.0), 3),
+                    'mv_contradiction_debt_rejection_streak': int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0),
+                    'mv_contradiction_debt_decay': round(float(getattr(self, 'mv_contradiction_debt_last_decay', 0.0) or 0.0), 3),
+                    'beam_guard_only_mode': int(selected_breakdown.get('beam_guard_only_mode', 0) or 0),
+                    'mv_perturbation_active': int(selected_breakdown.get('mv_perturbation_active', 0) or 0),
+                    'mv_perturbation_type': str(selected_breakdown.get('mv_perturbation_type', 'none') or 'none'),
+                    'mv_beam_blackout_active': int(selected_breakdown.get('mv_beam_blackout_active', 0) or 0),
+                    'mv_beam_contradiction_active': int(selected_breakdown.get('mv_beam_contradiction_active', 0) or 0),
+                    'mv_mv_contradiction_active': int(selected_breakdown.get('mv_mv_contradiction_active', 0) or 0),
+                    'mv_beam_credit_mode': str(selected_breakdown.get('mv_beam_credit_mode', 'normal') or 'normal'),
                 }
                 current_pattern_signature = self._canonical_pattern_signature(self._current_pattern_signature())
                 current_pattern_name = self._sanitize_pattern_name(str(evaluation.get('pattern_name', '') or ''))
@@ -6557,6 +7363,40 @@ class AIAssistantApp:
                     progress_delta > 0
                     and ((not maze_mode) or (selected_distance < best_distance_seen))
                 )
+                mv_input_accepted_log = int(selected_breakdown.get('mv_input_accepted', 0) or 0)
+                mv_input_rejection_reason_log = str(selected_breakdown.get('mv_input_rejection_reason', 'none') or 'none')
+                mv_input_facts_fit_log = int(selected_breakdown.get('mv_input_facts_fit', 1) or 0)
+                mv_low_conf_probe_active_log = int(selected_breakdown.get('mv_low_conf_probe_active', 0) or 0)
+                mv_influence_scale_log = float(selected_breakdown.get('mv_influence_scale', 1.0) or 1.0)
+                mv_trust_ratchet_scale_log = float(selected_breakdown.get('mv_trust_ratchet_scale', 1.0) or 1.0)
+                mv_trust_ratchet_level_log = float(selected_breakdown.get('mv_trust_ratchet_level', 0.0) or 0.0)
+                mv_trust_ratchet_quality_ema_log = float(selected_breakdown.get('mv_trust_ratchet_quality_ema', 0.0) or 0.0)
+                mv_trust_ratchet_promote_streak_log = int(selected_breakdown.get('mv_trust_ratchet_promote_streak', 0) or 0)
+                mv_trust_ratchet_demote_streak_log = int(selected_breakdown.get('mv_trust_ratchet_demote_streak', 0) or 0)
+                mv_high_conf_wrong_rate_ema_log = float(selected_breakdown.get('mv_high_conf_wrong_rate_ema', 0.0) or 0.0)
+                mv_high_conf_mismatch_active_log = int(selected_breakdown.get('mv_high_conf_mismatch_active', 0) or 0)
+                mv_effective_contradiction_budget_log = float(selected_breakdown.get('mv_effective_contradiction_budget', self.mv_input_max_contradiction_debt) or self.mv_input_max_contradiction_debt)
+                mv_contradiction_relief_headroom_log = float(selected_breakdown.get('mv_contradiction_relief_headroom', 0.0) or 0.0)
+                mv_contradiction_debt_rejection_streak_log = int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0)
+                mv_contradiction_debt_decay_log = float(getattr(self, 'mv_contradiction_debt_last_decay', 0.0) or 0.0)
+                beam_guard_only_mode_log = int(selected_breakdown.get('beam_guard_only_mode', 0) or 0)
+                mv_objective_gate_stage_active_log = int(1 if mv_objective_gate_stage_active else 0)
+                mv_beam_equivalent_stage_taper_active_log = int(1 if mv_beam_equivalent_stage_taper_active else 0)
+                mv_beam_equivalent_gate_reason_log = str(mv_beam_equivalent_gate_reason or 'none')
+                mv_beam_equivalent_suppressed_log = int(1 if mv_beam_equivalent_suppressed_note else 0)
+                mv_beam_integration_mode_log = str(self.mv_beam_integration_mode or 'woven')
+                mv_beam_anchor_reason_log = str(mv_beam_anchor_reason or 'none')
+                mv_perturbation_active_log = int(mv_hints_now.get('mv_perturbation_active', 0) or 0)
+                mv_perturbation_type_log = str(mv_hints_now.get('mv_perturbation_type', 'none') or 'none')
+                mv_beam_blackout_active_log = int(mv_hints_now.get('mv_beam_blackout_active', 0) or 0)
+                mv_beam_contradiction_active_log = int(mv_hints_now.get('mv_beam_contradiction_active', 0) or 0)
+                mv_mv_contradiction_active_log = int(mv_hints_now.get('mv_mv_contradiction_active', 0) or 0)
+                mv_beam_credit_mode_log = str(mv_hints_now.get('mv_beam_credit_mode', 'normal') or 'normal')
+                mv_perturbation_window_key_log = str(mv_hints_now.get('mv_perturbation_window_key', 'none::-1') or 'none::-1')
+                if mv_low_conf_probe_active_log > 0:
+                    self.mv_low_conf_probe_steps_used += 1
+                elif meaningful_progress_gain:
+                    self.mv_low_conf_probe_steps_used = max(0, self.mv_low_conf_probe_steps_used - 1)
                 if self.constructive_reinforcement_only:
                     repeat_pressure = max(0, int(selected_breakdown.get('recent_transition_count', 0) or 0) + int(selected_breakdown.get('recent_reverse_transition_count', 0) or 0))
                     unknown_neighbors = max(0, int(selected_breakdown.get('unknown_neighbors', 0) or 0))
@@ -6612,6 +7452,10 @@ class AIAssistantApp:
                 terminal_guidance_pressure_log = float(selected_breakdown.get('terminal_hard_veto_penalty', 0) or 0) + float(selected_breakdown.get('dead_end_end_slap_penalty', 0) or 0) + float(selected_breakdown.get('dead_end_tip_revisit_slap_penalty', 0) or 0) + float(selected_breakdown.get('visible_terminal_end_penalty', 0) or 0) + float(selected_breakdown.get('boxed_corridor_penalty', 0) or 0)
                 self._observe_projection_trust_feedback(projection_forward_bonus=float(selected_breakdown.get('projection_forward_bonus', 0) or 0), projection_backward_penalty=float(selected_breakdown.get('projection_backward_penalty', 0) or 0), projection_backward_escape_bonus=float(selected_breakdown.get('projection_backward_escape_bonus', 0) or 0), progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
                 self._observe_terminal_trust_feedback(terminal_guidance_pressure=terminal_guidance_pressure_log, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, forced_single_exit=bool(selected_breakdown.get('forced_single_exit', 0) or 0), terminal_filtered=bool(self._terminal_hard_filter_applied_last))
+                self._observe_mv_contradiction_debt_feedback(selected_breakdown=selected_breakdown, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
+                mv_contradiction_debt_rejection_streak_log = int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0)
+                mv_contradiction_debt_decay_log = float(getattr(self, 'mv_contradiction_debt_last_decay', 0.0) or 0.0)
+                self._observe_mv_trust_ratchet_feedback(selected_breakdown=selected_breakdown, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
                 self._observe_parallel_reasoning_feedback(selected_move=selected_move, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, intervention_applied=bool(guard_override), unresolved_override=bool(locals().get('objective_unresolved_override_streak', 0) or 0), context_bucket_hint=str(self.parallel_reasoning_last_result.get('context_bucket', '') if isinstance(getattr(self, 'parallel_reasoning_last_result', {}), dict) else ''))
                 tags: list[str] = []
                 risk_tag_fields = [('dead_end_end_slap_penalty', 'dead_end_slap'), ('dead_end_tip_revisit_slap_penalty', 'dead_end_tip_revisit'), ('revisit_dead_end_entrance_penalty', 'dead_end_entrance_revisit'), ('transition_repeat_penalty', 'transition_repeat'), ('cycle_pair_penalty', 'cycle_pair'), ('loop_risk_marked_edge_penalty', 'loop_marker'), ('visible_terminal_end_penalty', 'visible_terminal'), ('boxed_corridor_penalty', 'boxed_corridor'), ('immediate_backtrack_hard_penalty', 'immediate_backtrack'), ('branch_diversity_penalty', 'branch_diversity')]
@@ -6642,7 +7486,9 @@ class AIAssistantApp:
                             tags.append('junction_visible')
                 if projection_guidance_reward > 0.0:
                     tags.append('projection_guidance_reward')
-                self._record_action_outcome_memory(action_taken=f'MOVE_{selected_move}', outcome_value=outcome_value, reward_signal=reward_signal, penalty_signal=penalty_signal, reason_tags=tags, details={'score': decision_score, 'base_score': selected_breakdown.get('base_score_without_noise', decision_score), 'decision_noise': selected_breakdown.get('decision_noise', 0), 'unknown_neighbors': selected_breakdown.get('unknown_neighbors', 0), 'open_degree': selected_breakdown.get('open_degree', 0), 'frontier_distance': selected_breakdown.get('frontier_distance', 0), 'edge_type': selected_breakdown.get('edge_type', ''), 'corridor_verification_mark_bonus': selected_breakdown.get('corridor_verification_mark_bonus', 0), 'corridor_verification_mark_applied': selected_breakdown.get('corridor_verification_mark_applied', 0), 'corridor_verification_mark_key': selected_breakdown.get('corridor_verification_mark_key', ''), 'hazard_preparedness_penalty': selected_breakdown.get('hazard_preparedness_penalty', 0), 'hazard_preparedness_relative_pressure': selected_breakdown.get('hazard_preparedness_relative_pressure', 0.0), 'spatial_transition_bonus': selected_breakdown.get('spatial_transition_bonus', 0), 'spatial_transition_penalty': selected_breakdown.get('spatial_transition_penalty', 0), 'spatial_branch_risk_penalty': selected_breakdown.get('spatial_branch_risk_penalty', 0), 'spatial_exit_recall_bonus': selected_breakdown.get('spatial_exit_recall_bonus', 0), 'spatial_exit_recall_penalty': selected_breakdown.get('spatial_exit_recall_penalty', 0), 'spatial_exit_progress_norm': selected_breakdown.get('spatial_exit_progress_norm', 0.0), 'projection_guidance_reward': round(projection_guidance_reward, 3), 'meaningful_progress_gain': int(1 if meaningful_progress_gain else 0), 'best_distance_before_step': int(best_distance_seen), 'adaptive_features': selected_breakdown.get('adaptive_features', []), 'from_cell': list(self.current_player_cell), 'to_cell': list(self._neighbor_for_move(self.current_player_cell, selected_move))}, player_cell=self.current_player_cell)
+                if mv_perturbation_active_log > 0:
+                    tags.append('mv_perturbation')
+                self._record_action_outcome_memory(action_taken=f'MOVE_{selected_move}', outcome_value=outcome_value, reward_signal=reward_signal, penalty_signal=penalty_signal, reason_tags=tags, details={'score': decision_score, 'base_score': selected_breakdown.get('base_score_without_noise', decision_score), 'decision_noise': selected_breakdown.get('decision_noise', 0), 'unknown_neighbors': selected_breakdown.get('unknown_neighbors', 0), 'open_degree': selected_breakdown.get('open_degree', 0), 'frontier_distance': selected_breakdown.get('frontier_distance', 0), 'edge_type': selected_breakdown.get('edge_type', ''), 'corridor_verification_mark_bonus': selected_breakdown.get('corridor_verification_mark_bonus', 0), 'corridor_verification_mark_applied': selected_breakdown.get('corridor_verification_mark_applied', 0), 'corridor_verification_mark_key': selected_breakdown.get('corridor_verification_mark_key', ''), 'hazard_preparedness_penalty': selected_breakdown.get('hazard_preparedness_penalty', 0), 'hazard_preparedness_relative_pressure': selected_breakdown.get('hazard_preparedness_relative_pressure', 0.0), 'spatial_transition_bonus': selected_breakdown.get('spatial_transition_bonus', 0), 'spatial_transition_penalty': selected_breakdown.get('spatial_transition_penalty', 0), 'spatial_branch_risk_penalty': selected_breakdown.get('spatial_branch_risk_penalty', 0), 'spatial_exit_recall_bonus': selected_breakdown.get('spatial_exit_recall_bonus', 0), 'spatial_exit_recall_penalty': selected_breakdown.get('spatial_exit_recall_penalty', 0), 'spatial_exit_progress_norm': selected_breakdown.get('spatial_exit_progress_norm', 0.0), 'mv_input_accepted': selected_breakdown.get('mv_input_accepted', 0), 'mv_input_rejection_reason': selected_breakdown.get('mv_input_rejection_reason', 'none'), 'mv_input_facts_fit': selected_breakdown.get('mv_input_facts_fit', 1), 'mv_low_conf_probe_active': selected_breakdown.get('mv_low_conf_probe_active', 0), 'mv_influence_scale': selected_breakdown.get('mv_influence_scale', 1.0), 'mv_trust_ratchet_scale': selected_breakdown.get('mv_trust_ratchet_scale', 1.0), 'mv_trust_ratchet_level': selected_breakdown.get('mv_trust_ratchet_level', 0.0), 'mv_trust_ratchet_quality_ema': selected_breakdown.get('mv_trust_ratchet_quality_ema', 0.0), 'mv_trust_ratchet_promote_streak': selected_breakdown.get('mv_trust_ratchet_promote_streak', 0), 'mv_trust_ratchet_demote_streak': selected_breakdown.get('mv_trust_ratchet_demote_streak', 0), 'mv_effective_contradiction_budget': selected_breakdown.get('mv_effective_contradiction_budget', self.mv_input_max_contradiction_debt), 'mv_contradiction_relief_headroom': selected_breakdown.get('mv_contradiction_relief_headroom', 0.0), 'mv_contradiction_debt_rejection_streak': self.mv_contradiction_debt_rejection_streak, 'mv_contradiction_debt_decay': self.mv_contradiction_debt_last_decay, 'beam_guard_only_mode': selected_breakdown.get('beam_guard_only_mode', 0), 'projection_guidance_reward': round(projection_guidance_reward, 3), 'meaningful_progress_gain': int(1 if meaningful_progress_gain else 0), 'best_distance_before_step': int(best_distance_seen), 'adaptive_features': selected_breakdown.get('adaptive_features', []), 'from_cell': list(self.current_player_cell), 'to_cell': list(self._neighbor_for_move(self.current_player_cell, selected_move))}, player_cell=self.current_player_cell)
                 self._recent_step_penalties.append(penalty_signal)
             if maze_mode:
                 self._set_player_facing_from_move(selected_move)
@@ -6657,6 +7503,7 @@ class AIAssistantApp:
                 if layout_advanced or hit_advanced:
                     no_progress_steps = 0
                     best_distance_seen = self._distance_from_target_for_cell(self.current_player_cell)
+                    mv_preplan_snapshot_taken = False
                     objective_unresolved_override_streak = 0
                     map_doubt_cooldown = 0
                     map_doubt_stall_count = 0
@@ -6672,6 +7519,11 @@ class AIAssistantApp:
                     self._maze_stuck_trigger_count = 0
                     self._maze_model_assist_calls_used = 0
                     self._maze_model_assist_cooldown_remaining = 0
+                    self.mv_low_conf_probe_steps_used = 0
+                    self.mv_contradiction_debt_rejection_streak = 0
+                    self.mv_contradiction_debt_last_decay = 0.0
+                    self.mv_bad_guess_rejection_streak = 0
+                    self._mv_last_bad_guess_reacquire_step = -1000000
                     self.adaptive_guard_escape_lock_move = ''
                     self.adaptive_guard_escape_lock_steps = 0
                     self.adaptive_guard_escape_lock_repeat_floor = 0
@@ -6684,7 +7536,7 @@ class AIAssistantApp:
             unresolved_objective_override_active = bool(maze_mode and 'objective_override' in step_intervention_types and (locals().get('_unknown_now', 0) > 0 or locals().get('_frontier_now', 0) > 0))
             self._update_adaptive_guard_learning(guard_override=guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
             self._observe_learned_autonomy_step(telemetry_channel=step_telemetry_channel, intervention_types=step_intervention_types, unresolved_objective_override=unresolved_objective_override_active, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal)
-            step_logs.append(f"step={iterations} proposal_source={evaluation.get('proposal_source', 'model')} proposed={proposed_move or '(none)'} selected={selected_move} approved={evaluation['approved']} gets_closer={evaluation['gets_closer']} kernel_move_used={fallback_used} guard_override={guard_override} pattern_name={evaluation.get('pattern_name', '') or '(none)'} memory_event={evaluation.get('memory_event', '') or 'memory:unknown'} distance_before={('hidden' if maze_mode else current_distance)} distance_after={('hidden' if maze_mode else selected_distance)} reason={step_reason_text} projection_score_delta={projection_score_delta_log} projection_score_delta_scaled={round(projection_score_delta_scaled_log, 3)} projection_score_delta_clipped={projection_score_delta_clipped_log} projection_forward_bonus={projection_forward_bonus_log} projection_backward_penalty={projection_backward_penalty_log} projection_backward_escape_bonus={projection_backward_escape_bonus_log} projection_score_influence_scale={round(projection_score_influence_scale_log, 3)} projection_trust_scale={round(self._projection_trust_scale(), 3)} projection_trust_score_ema={round(float(self.projection_trust_score_ema), 3)} terminal_guidance_pressure={round(terminal_guidance_pressure_log, 3)} terminal_trust_scale={round(self._terminal_risk_trust_scale(), 3)} terminal_trust_score_ema={round(float(self.terminal_trust_score_ema), 3)} terminal_hard_avoid_active={(1 if self._terminal_hard_avoid_active() else 0)} terminal_filtered={(1 if self._terminal_hard_filter_applied_last else 0)} {_phase1_telemetry_fields(step_memory_event, step_reason_text, guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, decision_score=telemetry_decision_score)} {('[MV-PREPLAN: ' + mv_preplan_note + ']' if mv_preplan_note else '')}".strip())
+            step_logs.append(f"step={iterations} proposal_source={evaluation.get('proposal_source', 'model')} proposed={proposed_move or '(none)'} selected={selected_move} approved={evaluation['approved']} gets_closer={evaluation['gets_closer']} kernel_move_used={fallback_used} guard_override={guard_override} pattern_name={evaluation.get('pattern_name', '') or '(none)'} memory_event={evaluation.get('memory_event', '') or 'memory:unknown'} distance_before={('hidden' if maze_mode else current_distance)} distance_after={('hidden' if maze_mode else selected_distance)} reason={step_reason_text} projection_score_delta={projection_score_delta_log} projection_score_delta_scaled={round(projection_score_delta_scaled_log, 3)} projection_score_delta_clipped={projection_score_delta_clipped_log} projection_forward_bonus={projection_forward_bonus_log} projection_backward_penalty={projection_backward_penalty_log} projection_backward_escape_bonus={projection_backward_escape_bonus_log} projection_score_influence_scale={round(projection_score_influence_scale_log, 3)} projection_trust_scale={round(self._projection_trust_scale(), 3)} projection_trust_score_ema={round(float(self.projection_trust_score_ema), 3)} terminal_guidance_pressure={round(terminal_guidance_pressure_log, 3)} terminal_trust_scale={round(self._terminal_risk_trust_scale(), 3)} terminal_trust_score_ema={round(float(self.terminal_trust_score_ema), 3)} terminal_hard_avoid_active={(1 if self._terminal_hard_avoid_active() else 0)} terminal_filtered={(1 if self._terminal_hard_filter_applied_last else 0)} mv_input_accepted={mv_input_accepted_log} mv_input_rejection_reason={mv_input_rejection_reason_log} mv_input_facts_fit={mv_input_facts_fit_log} mv_low_conf_probe_active={mv_low_conf_probe_active_log} mv_influence_scale={round(mv_influence_scale_log, 3)} mv_trust_ratchet_scale={round(mv_trust_ratchet_scale_log, 3)} mv_trust_ratchet_level={round(mv_trust_ratchet_level_log, 3)} mv_trust_ratchet_quality_ema={round(mv_trust_ratchet_quality_ema_log, 3)} mv_trust_ratchet_promote_streak={mv_trust_ratchet_promote_streak_log} mv_trust_ratchet_demote_streak={mv_trust_ratchet_demote_streak_log} mv_high_conf_wrong_rate_ema={round(mv_high_conf_wrong_rate_ema_log, 3)} mv_high_conf_mismatch_active={mv_high_conf_mismatch_active_log} mv_effective_contradiction_budget={round(mv_effective_contradiction_budget_log, 3)} mv_contradiction_relief_headroom={round(mv_contradiction_relief_headroom_log, 3)} mv_contradiction_debt_rejection_streak={mv_contradiction_debt_rejection_streak_log} mv_contradiction_debt_decay={round(mv_contradiction_debt_decay_log, 3)} beam_guard_only_mode={beam_guard_only_mode_log} mv_objective_gate_stage_active={mv_objective_gate_stage_active_log} mv_beam_equivalent_stage_taper_active={mv_beam_equivalent_stage_taper_active_log} mv_beam_equivalent_gate_reason={mv_beam_equivalent_gate_reason_log} mv_beam_equivalent_suppressed={mv_beam_equivalent_suppressed_log} mv_beam_integration_mode={mv_beam_integration_mode_log} mv_beam_anchor_reason={mv_beam_anchor_reason_log} mv_perturbation_active={mv_perturbation_active_log} mv_perturbation_type={mv_perturbation_type_log} mv_beam_blackout_active={mv_beam_blackout_active_log} mv_beam_contradiction_active={mv_beam_contradiction_active_log} mv_mv_contradiction_active={mv_mv_contradiction_active_log} mv_beam_credit_mode={mv_beam_credit_mode_log} mv_perturbation_window={mv_perturbation_window_key_log} {_phase1_telemetry_fields(step_memory_event, step_reason_text, guard_override, progress_delta=telemetry_progress_delta, reward_signal=telemetry_reward_signal, penalty_signal=telemetry_penalty_signal, decision_score=telemetry_decision_score)} {('[MV-PREPLAN: ' + mv_preplan_note + ']' if mv_preplan_note else '')}".strip())
             if maze_mode:
                 recent_objective_routing_flags.append(1 if objective_routing_step else 0)
                 recent_objective_intervention_flags.append(1 if objective_routing_intervention else 0)
@@ -6803,7 +7655,23 @@ class AIAssistantApp:
             baseline_match = baseline_signature == active_signature
             candidate_match = candidate_signature == active_signature
             if (not baseline_match) and (not candidate_match):
-                return None
+                baseline_compatible = bool(self.kernel_phase_program.snapshot_is_compatible(baseline_dict)) if self.kernel_phase_program is not None else False
+                candidate_compatible = bool(self.kernel_phase_program.snapshot_is_compatible(candidate_dict)) if self.kernel_phase_program is not None else False
+                if baseline_compatible and (not candidate_compatible):
+                    selected = dict(baseline_dict)
+                    selected['phase_set_signature'] = active_signature
+                    return selected
+                if candidate_compatible and (not baseline_compatible):
+                    selected = dict(candidate_dict)
+                    selected['phase_set_signature'] = active_signature
+                    return selected
+                if (not baseline_compatible) and (not candidate_compatible):
+                    return None
+                baseline_progress = self._phase_snapshot_progress_score(baseline_dict)
+                candidate_progress = self._phase_snapshot_progress_score(candidate_dict)
+                selected = dict(candidate_dict if candidate_progress >= baseline_progress else baseline_dict)
+                selected['phase_set_signature'] = active_signature
+                return selected
             if baseline_match and (not candidate_match):
                 return baseline_dict
             if candidate_match and (not baseline_match):
@@ -6876,6 +7744,23 @@ class AIAssistantApp:
         if isinstance(weights, dict):
             merged['adaptive_weights'] = weights
         return merged
+
+    def _phase_snapshot_progress_score(self, snapshot: object) -> int:
+        if not isinstance(snapshot, dict):
+            return 0
+        phases = snapshot.get('phases')
+        if not isinstance(phases, list):
+            return 0
+        total = 0
+        for row in phases:
+            if not isinstance(row, dict):
+                continue
+            completed_flag, micro_index, observations, score_ema = self._phase_snapshot_row_rank(row)
+            total += int(completed_flag) * 1000000
+            total += int(max(0, micro_index)) * 10000
+            total += int(max(0, observations)) * 10
+            total += int(max(0.0, min(1.0, float(score_ema))) * 10)
+        return int(total)
 
     def _save_phase_progress_state(self) -> None:
         if (not self.kernel_phase_program_enable) and (not self.maze_micro_progression_persist_enable):
@@ -7023,6 +7908,8 @@ class AIAssistantApp:
                         self.kernel_phase_autostep_enable = True
                     elif parsed_text in {'0', 'false', 'no', 'off'}:
                         self.kernel_phase_autostep_enable = False
+            # Force manual progression mode at restore time for gated phase reviews.
+            self.kernel_phase_autostep_enable = False
             if 'kernel_phase_observation_floor_override' in payload:
                 saved_kernel_phase_floor = payload.get('kernel_phase_observation_floor_override')
                 parsed_kernel_phase_floor = self._coerce_optional_int(saved_kernel_phase_floor)
@@ -7041,6 +7928,7 @@ class AIAssistantApp:
                         self._apply_kernel_phase_runtime_integration()
                         self._schedule_kernel_phase_controls_refresh()
                         self._schedule_micro_progress_header_update(announce_transition=False)
+            self._enforce_kernel_phase4_trust_profile(refresh_controls=True)
             self._sync_machine_vision_toggle_controls()
             self._on_layout_settings_changed()
             saved_sash = payload.get('pane_sash_x')
@@ -7113,7 +8001,7 @@ class AIAssistantApp:
             payload['long_run_mode_enabled'] = bool(getattr(self, 'long_run_mode_enabled', False))
             payload['challenge_mode_enabled'] = bool(self.challenge_mode_enabled)
             payload['kernel_phase_disabled'] = list(self.kernel_phase_disable_list)
-            payload['kernel_phase_autostep_enable'] = bool(getattr(self, 'kernel_phase_autostep_enable', True))
+            payload['kernel_phase_autostep_enable'] = bool(getattr(self, 'kernel_phase_autostep_enable', False))
             payload['kernel_phase_observation_floor_override'] = (int(self.kernel_phase_observation_floor_override) if isinstance(self.kernel_phase_observation_floor_override, int) else None)
             if self.kernel_phase_program_enable and self.kernel_phase_program is not None:
                 payload['kernel_phase_program_state'] = self.kernel_phase_program.snapshot()
@@ -8650,6 +9538,82 @@ class AIAssistantApp:
             segments.append({'base_prompt': base_prompt, 'loops': loops})
         return segments if len(segments) >= 2 else []
 
+    def _normalize_instruction_difficulty_token(self, token: str) -> str:
+        normalized = re.sub('[^a-z]+', ' ', str(token or '').strip().lower())
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        if normalized in {'easy', 'medium', 'hard', 'very hard'}:
+            return normalized
+        if normalized in {'veryhard', 'very hard mode', 'vhard'}:
+            return 'very hard'
+        return ''
+
+    def _extract_instruction_sequence_difficulty_overrides(self, assistant_instructions: str, segment_count: int) -> dict[int, str]:
+        text = str(assistant_instructions or '').strip()
+        if not text or segment_count <= 0:
+            return {}
+        normalized_text = text.lower()
+        overrides: dict[int, str] = {}
+
+        # Supports directives like "set 1: hard" or "segment2=very hard".
+        explicit_patterns = [
+            re.compile(r'\b(?:set|segment|batch)\s*(\d+)\s*(?:=|:|->|to|as)?\s*(very\s*[-_]?\s*hard|hard|medium|easy)\b', flags=re.IGNORECASE),
+            re.compile(r'\b(very\s*[-_]?\s*hard|hard|medium|easy)\s*(?:for|on)\s*(?:set|segment|batch)\s*(\d+)\b', flags=re.IGNORECASE),
+        ]
+        for pattern in explicit_patterns:
+            for match in pattern.finditer(normalized_text):
+                first = match.group(1)
+                second = match.group(2)
+                if str(first).isdigit():
+                    set_index = int(first)
+                    token = second
+                else:
+                    set_index = int(second)
+                    token = first
+                if set_index < 1 or set_index > int(segment_count):
+                    continue
+                difficulty = self._normalize_instruction_difficulty_token(token)
+                if difficulty:
+                    overrides[set_index] = difficulty
+
+        # Supports ordered directives like:
+        # "set difficulties: hard; very hard; medium"
+        # "sequence: hard | very hard | hard"
+        ordered_sources: list[str] = []
+        ordered_patterns = [
+            re.compile(r'\b(?:set|segment|batch)\s+difficult(?:y|ies)\s*[:=]\s*([^\n]+)', flags=re.IGNORECASE),
+            re.compile(r'\bdifficult(?:y|ies)\s+for\s+(?:sets?|segments?|batches?)\s*[:=]\s*([^\n]+)', flags=re.IGNORECASE),
+            re.compile(r'\b(?:set\s+sequence|segment\s+sequence|batch\s+sequence|sequence)\s*[:=]\s*([^\n]+)', flags=re.IGNORECASE),
+        ]
+        for pattern in ordered_patterns:
+            for match in pattern.finditer(normalized_text):
+                ordered_sources.append(str(match.group(1) or '').strip())
+        for source in ordered_sources:
+            ordered_tokens = [part.strip() for part in re.split(r'[,;|\n]+', source) if part.strip()]
+            for index, token in enumerate(ordered_tokens, start=1):
+                if index > int(segment_count):
+                    break
+                difficulty = self._normalize_instruction_difficulty_token(token)
+                if difficulty:
+                    overrides[index] = difficulty
+
+        # Fallback: pure separator list with no labels, for example:
+        # "hard; very hard; hard"
+        fallback_parts = [part.strip() for part in re.split(r'[,;|\n]+', normalized_text) if part.strip()]
+        fallback_difficulties: list[str] = []
+        for token in fallback_parts:
+            difficulty = self._normalize_instruction_difficulty_token(token)
+            if not difficulty:
+                fallback_difficulties = []
+                break
+            fallback_difficulties.append(difficulty)
+        if len(fallback_difficulties) >= 2:
+            for index, difficulty in enumerate(fallback_difficulties, start=1):
+                if index > int(segment_count):
+                    break
+                overrides[index] = difficulty
+
+        return overrides
+
     def _extract_local_execution_count(self, prompt: str) -> int:
         text = (prompt or '').strip().lower()
         text = re.sub('\\b(?:max(?:imum)?\\s+)?(?:steps?|moves?|turns?|iterations?)\\s*(?:limit)?\\s*(?:=|:|to|of)?\\s*\\d+\\b', ' ', text)
@@ -8813,9 +9777,21 @@ class AIAssistantApp:
             self.runtime_batch_session_completed_count = 0
             self._schedule_micro_progress_header_update(announce_transition=False)
 
-    def _execute_local_navigation_batch_sequence_runs(self, segments: list[dict[str, int | str]], assistant_instructions: str) -> dict[str, str]:
+    def _execute_local_navigation_batch_sequence_runs(self, segments: list[dict[str, int | str]], assistant_instructions: str, segment_difficulty_overrides: dict[int, str] | None=None) -> dict[str, str]:
         if not segments:
             return {'debug_text': '[LOCAL KERNEL BATCH SEQUENCE]\n(no segments)', 'answer': 'No batch sequence segments were parsed.'}
+        normalized_overrides: dict[int, str] = {}
+        raw_overrides = segment_difficulty_overrides or {}
+        for raw_index, raw_difficulty in raw_overrides.items():
+            try:
+                set_index = int(raw_index)
+            except Exception:
+                continue
+            if set_index < 1 or set_index > len(segments):
+                continue
+            normalized_difficulty = self._normalize_instruction_difficulty_token(str(raw_difficulty or ''))
+            if normalized_difficulty:
+                normalized_overrides[set_index] = normalized_difficulty
         total_requested = 0
         total_completed = 0
         total_iterations = 0
@@ -8837,17 +9813,28 @@ class AIAssistantApp:
                 base_prompt = str(segment.get('base_prompt', '') or '').strip()
                 loops = max(1, min(self.max_repeat_executions, int(segment.get('loops', 1) or 1)))
                 base_count = self._extract_local_execution_count(base_prompt)
+                forced_segment_difficulty = str(normalized_overrides.get(segment_index, '') or '').strip().lower()
+                if forced_segment_difficulty not in {'easy', 'medium', 'hard', 'very hard'}:
+                    forced_segment_difficulty = ''
                 total_requested += base_count * loops
                 total_loops += loops
                 self.runtime_batch_session_requested_count = max(0, int(total_requested))
                 self._schedule_micro_progress_header_update(announce_transition=False)
                 for loop_index in range(1, loops + 1):
                     self.root.after(0, lambda s=segment_index, n=len(segments), i=loop_index, l=loops: self.status_var.set(f'Batch sequence {s}/{n}, run {i}/{l}: randomizing maze, executing local kernel, dumping full log...'))
+                    restore_segment_override = str(getattr(self, 'runtime_maze_difficulty_override', '') or '').strip().lower()
+                    if restore_segment_override not in {'easy', 'medium', 'hard', 'very hard'}:
+                        restore_segment_override = ''
                     random_info = '(maze randomization skipped: non-maze mode)'
-                    if self._normalized_layout_mode() == 'maze':
-                        self._randomize_maze_start_number()
-                        random_info = f'map_id={self._current_maze_map_id()} difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}'
-                    run_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
+                    try:
+                        if self._normalized_layout_mode() == 'maze':
+                            if forced_segment_difficulty:
+                                self.runtime_maze_difficulty_override = forced_segment_difficulty
+                            self._randomize_maze_start_number()
+                            random_info = f'map_id={self._current_maze_map_id()} difficulty={self._normalized_maze_difficulty()} algo={self.current_maze_algorithm}'
+                        run_result = self._execute_local_navigation_request(base_prompt, assistant_instructions)
+                    finally:
+                        self.runtime_maze_difficulty_override = restore_segment_override if restore_segment_override else None
                     step_session = run_result.get('step_session', {})
                     completed = int(step_session.get('completed', 0) or 0)
                     iterations = int(step_session.get('iterations', 0) or 0)
@@ -8865,13 +9852,13 @@ class AIAssistantApp:
                     dump_name = '(failed)'
                     dump_error = ''
                     try:
-                        debug_for_dump = f'[LOCAL KERNEL BATCH SEQUENCE LOOP]\nsegment={segment_index}/{len(segments)} loop={loop_index}/{loops}\nbase_prompt={base_prompt}\n\n' + self._format_local_navigation_debug(run_result, header='[LOCAL KERNEL BATCH SEQUENCE RUN]')
+                        debug_for_dump = f'[LOCAL KERNEL BATCH SEQUENCE LOOP]\nsegment={segment_index}/{len(segments)} loop={loop_index}/{loops}\nsegment_forced_difficulty={forced_segment_difficulty or "(none)"}\nbase_prompt={base_prompt}\n\n' + self._format_local_navigation_debug(run_result, header='[LOCAL KERNEL BATCH SEQUENCE RUN]')
                         output_path = self._write_memory_bundle_to_file(force_full=True, debug_text_override=debug_for_dump)
                         dump_name = os.path.basename(output_path)
                     except Exception as exc:
                         dump_failures += 1
                         dump_error = str(exc)
-                    batch_line = f'segment={segment_index}/{len(segments)} segment_loops={loop_index}/{loops} base_prompt={base_prompt!r} base_count={base_count} {random_info} completed={completed}/{base_count} iterations={iterations} success={success} remaining={remaining} full_dump={dump_name}'
+                    batch_line = f'segment={segment_index}/{len(segments)} segment_loops={loop_index}/{loops} base_prompt={base_prompt!r} base_count={base_count} segment_forced_difficulty={forced_segment_difficulty or "(none)"} {random_info} completed={completed}/{base_count} iterations={iterations} success={success} remaining={remaining} full_dump={dump_name}'
                     if dump_error:
                         batch_line += f' dump_error={dump_error}'
                     batch_line += f' kernel_progress={int(plateau_now_micro)}/{int(plateau_now_phase)} plateau_streak={int(plateau_no_progress_streak)}'
@@ -8941,8 +9928,11 @@ class AIAssistantApp:
                             self.runtime_maze_difficulty_override = restore_override if restore_override else None
             completion_label = 'maze runs' if self._normalized_layout_mode() == 'maze' else 'target hits'
             total_requested_with_plateau = total_requested + plateau_extra_requested
-            debug_text = f'[LOCAL KERNEL BATCH SEQUENCE]\nsegments: {len(segments)}\ntotal_segment_loops: {total_loops}\ntotal_requested: {total_requested}\nplateau_extra_requested: {plateau_extra_requested}\ntotal_requested_with_plateau: {total_requested_with_plateau}\ntotal_completed: {total_completed}\ntotal_iterations: {total_iterations}\nplateau_triggers: {plateau_triggers}\nplateau_extra_runs_executed: {plateau_extra_runs_executed}\ndump_failures: {dump_failures}\n\n[BATCH DETAILS]\n' + ('\n'.join(batch_lines) if batch_lines else '(none)')
+            overrides_line = ', '.join((f'set{idx}={difficulty}' for idx, difficulty in sorted(normalized_overrides.items()))) if normalized_overrides else '(none)'
+            debug_text = f'[LOCAL KERNEL BATCH SEQUENCE]\nsegments: {len(segments)}\nset_difficulty_overrides: {overrides_line}\ntotal_segment_loops: {total_loops}\ntotal_requested: {total_requested}\nplateau_extra_requested: {plateau_extra_requested}\ntotal_requested_with_plateau: {total_requested_with_plateau}\ntotal_completed: {total_completed}\ntotal_iterations: {total_iterations}\nplateau_triggers: {plateau_triggers}\nplateau_extra_runs_executed: {plateau_extra_runs_executed}\ndump_failures: {dump_failures}\n\n[BATCH DETAILS]\n' + ('\n'.join(batch_lines) if batch_lines else '(none)')
             answer = f'Batch sequence complete. Executed {len(segments)} segment(s) across {total_loops} total batch loops, requested {total_requested} total {completion_label}, and completed {total_completed} in {total_iterations} step iterations.'
+            if normalized_overrides:
+                answer += f' Set difficulty overrides applied: {overrides_line}.'
             if plateau_extra_runs_executed > 0:
                 answer += f' Plateau control injected {plateau_extra_runs_executed} extra {self.maze_plateau_extra_hard_difficulty} batch run(s) after stagnation detection ({plateau_extra_requested} additional requested).'
             answer += ' Automatic Random # and Full Log Dump executed after each batch loop' + (' (some dumps failed).' if dump_failures else '.')
@@ -10223,7 +11213,22 @@ class AIAssistantApp:
             nxt_distance = self._distance_between_cells(nxt, self.current_target_cell)
             if nxt_distance == current_distance - 1:
                 progress_candidates.append(move)
-        if preferred_move not in progress_candidates or len(progress_candidates) <= 1:
+        kernel_stage_id_now = self._kernel_phase_active_stage_id()
+        mv_gate_stage_active = bool(self._mv_objective_mv_gate_active(stage_id=kernel_stage_id_now))
+        mv_gate_breakdown_cache: dict[str, dict[str, object]] = {}
+        if mv_gate_stage_active:
+            preferred_gate_ok, preferred_gate_reason = self._mv_objective_input_gate_passed(preferred_move, stage_id=kernel_stage_id_now, breakdown_cache=mv_gate_breakdown_cache)
+            if not preferred_gate_ok:
+                note = f'[OBJECTIVE-MV-GATE: tiebreak-suppressed move={preferred_move} reason={preferred_gate_reason} stage={kernel_stage_id_now or "none"}]'
+                return (preferred_move, note)
+        gated_progress_candidates: list[str] = []
+        for move in progress_candidates:
+            if mv_gate_stage_active:
+                gate_ok, _gate_reason = self._mv_objective_input_gate_passed(move, stage_id=kernel_stage_id_now, breakdown_cache=mv_gate_breakdown_cache)
+                if not gate_ok:
+                    continue
+            gated_progress_candidates.append(move)
+        if preferred_move not in gated_progress_candidates or len(gated_progress_candidates) <= 1:
             return (preferred_move, '')
         mv_hints = self._machine_vision_kernel_hints()
         if not bool(mv_hints.get('enabled')):
@@ -10246,7 +11251,7 @@ class AIAssistantApp:
         if current_mv_dist <= 0:
             return (preferred_move, '')
         ranked: list[tuple[int, int, str]] = []
-        for move in progress_candidates:
+        for move in gated_progress_candidates:
             nxt = self._neighbor_for_move(self.current_player_cell, move)
             mv_dist_next = abs(int(nxt[0]) - mv_row) + abs(int(nxt[1]) - mv_col)
             mv_delta = int(current_mv_dist - mv_dist_next)
@@ -12150,15 +13155,29 @@ class AIAssistantApp:
         episodic_exploration_locked = local_map_authority_scale >= 0.999
         mv_hints = self._machine_vision_kernel_hints()
         mv_self_pred_cell = tuple(mv_hints.get('self_pred_cell', (-1, -1)) or (-1, -1))
+        mv_self_conf = float(mv_hints.get('self_conf', 0.0) or 0.0)
+        mv_self_conf_raw = float(mv_hints.get('self_conf_raw', mv_self_conf) or mv_self_conf)
+        mv_self_conf_scale = float(mv_hints.get('self_conf_scale', 1.0) or 1.0)
         mv_self_error_raw = mv_hints.get('self_error', -1)
         mv_self_error = int(mv_self_error_raw if mv_self_error_raw is not None else -1)
         mv_self_quality_scale = float(mv_hints.get('self_quality_scale', 0.0) or 0.0)
         mv_exit_pred_cell = tuple(mv_hints.get('exit_pred_cell', (-1, -1)) or (-1, -1))
         mv_exit_conf = float(mv_hints.get('exit_conf', 0.0) or 0.0)
+        mv_exit_conf_raw = float(mv_hints.get('exit_conf_raw', mv_exit_conf) or mv_exit_conf)
+        mv_exit_conf_scale = float(mv_hints.get('exit_conf_scale', 1.0) or 1.0)
         mv_exit_source = str(mv_hints.get('exit_source', 'none') or 'none')
         mv_exit_source_scale = float(mv_hints.get('exit_source_scale', 0.0) or 0.0)
         mv_exit_hint_strength = float(mv_hints.get('exit_hint_strength', 0.0) or 0.0)
         mv_exit_usable = bool(mv_hints.get('exit_usable', False))
+        mv_confidence_scale = float(mv_hints.get('mv_confidence_scale', 1.0) or 1.0)
+        mv_high_conf_wrong_rate_ema = float(mv_hints.get('mv_high_conf_wrong_rate_ema', 0.0) or 0.0)
+        mv_high_conf_mismatch_active = bool(mv_high_conf_wrong_rate_ema >= float(self.mv_high_conf_wrong_rate_guard_threshold))
+        mv_perturbation_active = int(mv_hints.get('mv_perturbation_active', 0) or 0)
+        mv_perturbation_type = str(mv_hints.get('mv_perturbation_type', 'none') or 'none')
+        mv_beam_blackout_active = int(mv_hints.get('mv_beam_blackout_active', 0) or 0)
+        mv_beam_contradiction_active = int(mv_hints.get('mv_beam_contradiction_active', 0) or 0)
+        mv_mv_contradiction_active = int(mv_hints.get('mv_mv_contradiction_active', 0) or 0)
+        mv_beam_credit_mode = str(mv_hints.get('mv_beam_credit_mode', getattr(self, '_mv_runtime_beam_credit_mode', 'normal')) or 'normal')
         if self.adaptive_controller_enable and self.adaptive_disable_mv_hints:
             mv_exit_usable = False
             mv_exit_hint_strength = 0.0
@@ -12189,6 +13208,75 @@ class AIAssistantApp:
         mv_cellmap_neighbor_known = int(mv_cellmap_bias.get('neighbor_known', 0) or 0)
         mv_cellmap_neighbor_open = int(mv_cellmap_bias.get('neighbor_open', 0) or 0)
         mv_cellmap_neighbor_blocked = int(mv_cellmap_bias.get('neighbor_blocked', 0) or 0)
+        local_contradiction_debt = self._prediction_local_contradiction_debt(candidate)
+        mv_input_confidence = max(mv_exit_conf if mv_exit_usable else 0.0, mv_cellmap_candidate_conf if mv_cellmap_usable else 0.0)
+        mv_effective_contradiction_budget = max(0.0, float(self.mv_input_max_contradiction_debt))
+        mv_contradiction_relief_headroom = 0.0
+        mv_input_facts_fit = 1
+        mv_input_rejection_reason = 'none'
+        if self.mv_primary_mode_enable:
+            if not (mv_exit_usable or mv_cellmap_usable):
+                mv_input_rejection_reason = 'mv_signal_missing'
+            elif mv_input_confidence < float(self.mv_confidence_trust_threshold):
+                mv_input_rejection_reason = 'mv_conf_below_threshold'
+            elif mv_high_conf_mismatch_active and mv_input_confidence >= float(self.mv_high_confidence_mismatch_threshold):
+                mv_input_facts_fit = 0
+                mv_input_rejection_reason = 'mv_high_conf_mismatch_guard'
+            elif self.mv_facts_fit_required:
+                mv_effective_contradiction_budget, mv_contradiction_relief_headroom = self._mv_effective_contradiction_debt_budget(local_contradiction_debt=float(local_contradiction_debt), mv_input_confidence=float(mv_input_confidence))
+                if local_contradiction_debt > float(mv_effective_contradiction_budget):
+                    mv_input_facts_fit = 0
+                    mv_input_rejection_reason = 'facts_fit_contradiction_debt'
+                elif mv_cellmap_usable and mv_cellmap_candidate_label == 'blocked' and mv_cellmap_candidate_conf >= float(self.mv_confidence_trust_threshold):
+                    mv_input_facts_fit = 0
+                    mv_input_rejection_reason = 'facts_fit_cellmap_blocked'
+        mv_input_accepted = (not self.mv_primary_mode_enable) or (mv_input_rejection_reason == 'none')
+        probe_budget = int(self.mv_low_conf_probe_max_steps)
+        if self.mv_low_conf_probe_dynamic_budget_enable:
+            runtime_no_progress_steps = max(0, int(getattr(self, '_runtime_no_progress_steps', 0) or 0))
+            probe_budget += min(2, runtime_no_progress_steps // 4)
+        mv_low_conf_probe_active = False
+        if self.mv_primary_mode_enable and (not mv_input_accepted) and self.mv_low_conf_probe_enable and probe_budget > 0 and (self.mv_low_conf_probe_steps_used < probe_budget) and (mv_input_confidence > 0.0):
+            mv_low_conf_probe_active = True
+            if mv_input_rejection_reason == 'mv_conf_below_threshold':
+                mv_input_rejection_reason = 'mv_probe_low_confidence'
+        mv_influence_scale = 1.0
+        if self.mv_primary_mode_enable:
+            if mv_input_accepted:
+                mv_influence_scale = 1.0
+            elif mv_low_conf_probe_active:
+                mv_influence_scale = 0.25
+            else:
+                mv_influence_scale = 0.0
+        mv_trust_ratchet_scale = 1.0
+        mv_trust_ratchet_level = max(0.0, min(1.0, float(getattr(self, 'mv_trust_ratchet_level', 1.0))))
+        mv_trust_ratchet_quality_ema = max(-1.0, min(1.0, float(getattr(self, 'mv_trust_ratchet_quality_ema', 0.0))))
+        mv_trust_ratchet_promote_streak = int(getattr(self, 'mv_trust_ratchet_promote_streak', 0) or 0)
+        mv_trust_ratchet_demote_streak = int(getattr(self, 'mv_trust_ratchet_demote_streak', 0) or 0)
+        if self.mv_primary_mode_enable and mv_influence_scale > 0.0:
+            mv_trust_ratchet_scale = self._mv_influence_trust_ratchet_scale(
+                mv_input_accepted=bool(mv_input_accepted),
+                mv_input_facts_fit=mv_input_facts_fit,
+                mv_low_conf_probe_active=bool(mv_low_conf_probe_active),
+                mv_input_rejection_reason=mv_input_rejection_reason,
+                mv_beam_contradiction_active=mv_beam_contradiction_active,
+                mv_mv_contradiction_active=mv_mv_contradiction_active,
+                mv_high_conf_mismatch_active=mv_high_conf_mismatch_active,
+            )
+            mv_influence_scale *= mv_trust_ratchet_scale
+        if mv_high_conf_mismatch_active and mv_influence_scale > 0.0:
+            mv_influence_scale *= 0.6
+        if (not mv_input_accepted) and (not mv_low_conf_probe_active):
+            mv_influence_scale = 0.0
+        if mv_influence_scale < 1.0:
+            mv_exit_hint_strength *= mv_influence_scale
+            mv_exit_progress_norm *= mv_influence_scale
+            mv_exit_alignment_bonus = int(round(mv_exit_alignment_bonus * mv_influence_scale))
+            mv_exit_alignment_penalty = int(round(mv_exit_alignment_penalty * mv_influence_scale))
+            mv_cellmap_open_alignment_bonus = int(round(mv_cellmap_open_alignment_bonus * mv_influence_scale))
+            mv_cellmap_blocked_risk_penalty = int(round(mv_cellmap_blocked_risk_penalty * mv_influence_scale))
+            mv_cellmap_neighbor_open_bonus = int(round(mv_cellmap_neighbor_open_bonus * mv_influence_scale))
+            mv_cellmap_neighbor_blocked_penalty = int(round(mv_cellmap_neighbor_blocked_penalty * mv_influence_scale))
         prediction_junction_bonus = 0
         prediction_dead_end_penalty = 0
         prediction_used = False
@@ -12227,7 +13315,26 @@ class AIAssistantApp:
             visible_open_decision += 1
             if max_open_width >= 4:
                 visible_open_decision += 1
-        visual_traversal_credit = self._beam_progress_credit(frontier_distance, edge_scan)
+        beam_visual_traversal_credit_raw = self._beam_progress_credit(frontier_distance, edge_scan)
+        if mv_beam_credit_mode == 'blackout':
+            beam_visual_traversal_credit_raw = 0
+        elif mv_beam_credit_mode == 'invert':
+            if beam_visual_traversal_credit_raw == 0:
+                beam_visual_traversal_credit_raw = -1
+            else:
+                beam_visual_traversal_credit_raw = -max(1, abs(int(round(float(beam_visual_traversal_credit_raw) * 0.7))))
+        visual_traversal_credit = beam_visual_traversal_credit_raw
+        if self.mv_primary_mode_enable:
+            if self.mv_only_cutover_enable:
+                if (not mv_input_accepted) and (not mv_low_conf_probe_active) and self.mv_only_emergency_fallback_enable:
+                    visual_traversal_credit = min(1, beam_visual_traversal_credit_raw)
+                    if mv_input_rejection_reason == 'mv_signal_missing':
+                        mv_input_rejection_reason = 'mv_only_fallback_beam_guard'
+                else:
+                    visual_traversal_credit = 0
+            elif self.beam_guard_only_mode:
+                guard_scale = 0.15 if mv_input_accepted else 0.35
+                visual_traversal_credit = int(round(beam_visual_traversal_credit_raw * guard_scale))
         frontier_distance_effective = max(0, frontier_distance - visual_traversal_credit)
         visible_closed_structure = 1 if edge_scan['edge_type'] in {'blocked', 'bounds', 'occluded'} and (not edge_scan['frontier_visible']) and (not edge_scan['junction_visible']) and (not wide_open_visible) else 0
         row, col = candidate
@@ -12459,7 +13566,7 @@ class AIAssistantApp:
             if dead_end_risk_depth <= 1 and visits == 0:
                 endocrine_confidence_bonus = int(round(H_confidence * confidence_weight))
             endocrine_momentum_bonus = int(round(max(0.0, endocrine_momentum) * momentum_weight))
-            if mv_exit_usable or mv_cellmap_usable:
+            if (mv_exit_usable or mv_cellmap_usable) and mv_influence_scale > 0.0:
                 mv_hint_signal = max(0.0, min(1.0, 0.45 + 0.35 * mv_exit_hint_strength + 0.2 * mv_cellmap_candidate_conf))
                 endocrine_mv_trust_bonus = int(round(max(0.0, H_mv_trust) * self.hormone_mv_trust_bonus_weight * mv_hint_signal))
         bio_nav = self._biological_navigation_signals(origin, move, candidate, edge_scan, unknown_neighbors, dead_end_risk_depth, visits, frontier_distance_effective, transition_pressure_bucket, backtrack)
@@ -12521,6 +13628,8 @@ class AIAssistantApp:
                     break
             if has_non_terminal_alternative and (dead_end_risk_depth >= 1 or visits > 0):
                 terminal_hard_veto_penalty = max(0, int(self.terminal_corridor_hard_veto_penalty))
+        if self.mv_primary_mode_enable and self.beam_hard_contradiction_veto_only and mv_input_accepted and mv_cellmap_usable and mv_cellmap_candidate_label == 'blocked' and mv_cellmap_candidate_conf >= float(self.mv_confidence_trust_threshold):
+            terminal_hard_veto_penalty = max(terminal_hard_veto_penalty, int(round(float(self.terminal_corridor_hard_veto_penalty) * 0.6)))
         terminal_hard_veto_penalty_base = int(terminal_hard_veto_penalty)
         terminal_hard_veto_penalty = int(round(terminal_hard_veto_penalty_base * terminal_trust_scale))
         branch_tightening_abort_penalty = 0
@@ -12802,7 +13911,6 @@ class AIAssistantApp:
             score -= wide_open_escape_bonus
         raw_prediction_junction_bonus = prediction_junction_bonus
         raw_prediction_dead_end_penalty = prediction_dead_end_penalty
-        local_contradiction_debt = self._prediction_local_contradiction_debt(candidate)
         prediction_contradiction_scale = 1.0
         if prediction_used and local_contradiction_debt > 0.0:
             suppression = min(0.85, local_contradiction_debt * 0.28)
@@ -12838,6 +13946,16 @@ class AIAssistantApp:
         projection_score_delta_raw = int(projection_backward_penalty) - int(projection_forward_bonus) - int(projection_backward_escape_bonus)
         projection_trust_scale = self._projection_trust_scale()
         projection_score_influence_scale_effective = float(self.maze_projection_score_influence_scale) * float(projection_trust_scale)
+        wb6_projection_clamp_active = False
+        kernel_stage_id_now = self._kernel_phase_active_stage_id()
+        if self.wb6_projection_scale_clamp_enable and self._kernel_phase_stage_prefix_active('wb6.', stage_id=kernel_stage_id_now):
+            projection_trust_ema_now = float(self.projection_trust_score_ema)
+            low_projection_trust = projection_trust_ema_now <= float(self.wb6_projection_scale_clamp_trust_ema_max)
+            if low_projection_trust or mv_high_conf_mismatch_active:
+                projection_scale_cap = float(self.maze_projection_score_influence_scale) * float(self.wb6_projection_scale_clamp_factor)
+                if projection_score_influence_scale_effective > projection_scale_cap:
+                    projection_score_influence_scale_effective = projection_scale_cap
+                    wb6_projection_clamp_active = True
         projection_score_delta_scaled = float(projection_score_delta_raw) * float(projection_score_influence_scale_effective)
         projection_score_delta_unclipped = int(round(projection_score_delta_scaled))
         projection_score_cap = max(0, int(self.maze_projection_score_influence_cap))
@@ -12898,7 +14016,7 @@ class AIAssistantApp:
             adaptive_score_adjustment = int(round(max(-max_adjust, min(max_adjust, raw_adjust))))
             score += adaptive_score_adjustment
         base_score_without_noise = score - decision_noise - stuck_extra_noise
-        return {'score': score, 'base_score_without_noise': base_score_without_noise, 'blocked': False, 'visits': visits, 'backtrack': backtrack, 'recent': recent_penalty, 'recent_recency_penalty': recent_recency_penalty, 'known': is_known, 'known_dead_area': known_dead_area, 'frontier_distance': frontier_distance, 'frontier_distance_effective': frontier_distance_effective, 'visual_traversal_credit': visual_traversal_credit, 'corridor_commit': corridor_commit, 'dead_end_risk_depth': dead_end_risk_depth, 'dead_end_exp_penalty': dead_end_exp_penalty, 'short_dead_end_penalty': short_dead_end_penalty, 'revisit_dead_end_entrance_penalty': revisit_dead_end_entrance_penalty, 'dead_end_end_slap_penalty': dead_end_end_slap_penalty, 'dead_end_end_slap_penalty_base': dead_end_end_slap_penalty_base, 'dead_end_tip_revisit_slap_penalty': dead_end_tip_revisit_slap_penalty, 'dead_end_tip_revisit_slap_penalty_base': dead_end_tip_revisit_slap_penalty_base, 'narrow_corridor_additive_penalty': narrow_corridor_additive_penalty, 'dead_end_learning_grace': dead_end_learning_grace, 'dead_end_allowance_remaining': dead_end_allowance_remaining, 'attempt_dead_end_scale': round(attempt_dead_end_scale, 2), 'edge_clear_run': int(edge_scan['clear_run']), 'edge_type': str(edge_scan['edge_type']), 'edge_frontier': effective_edge_frontier, 'edge_junction': effective_edge_junction, 'edge_exit_visible': bool(edge_scan['exit_visible']), 'edge_side_open_steps': int(edge_scan.get('side_open_steps', 0) or 0), 'edge_side_blocked_steps': int(edge_scan.get('side_blocked_steps', 0) or 0), 'edge_verified_empty_opening_steps': int(edge_scan.get('verified_empty_opening_steps', 0) or 0), 'edge_verified_empty_opening_contacts': int(edge_scan.get('verified_empty_opening_contacts', 0) or 0), 'edge_new_verified_empty_opening_contacts': int(edge_scan.get('new_verified_empty_opening_contacts', 0) or 0), 'edge_anchor_row': int(edge_scan.get('edge_anchor_row', candidate[0]) or candidate[0]), 'edge_anchor_col': int(edge_scan.get('edge_anchor_col', candidate[1]) or candidate[1]), 'edge_wide_open_visible': 1 if wide_open_visible else 0, 'edge_wide_open_steps': wide_open_steps, 'edge_max_open_width': max_open_width, 'visible_open_decision': effective_visible_open_decision, 'visible_closed_structure': visible_closed_structure, 'boundary_hug': boundary_hug, 'visible_terminal_end_penalty': visible_terminal_end_penalty, 'visible_terminal_end_penalty_base': visible_terminal_end_penalty_base, 'boxed_corridor_no_exit': boxed_corridor_no_exit, 'boxed_corridor_penalty': boxed_corridor_penalty, 'boxed_corridor_penalty_base': boxed_corridor_penalty_base, 'terminal_reentry_penalty': terminal_reentry_penalty, 'visible_exit_corridor': visible_exit_corridor, 'visible_exit_reward': visible_exit_reward, 'corridor_verification_mark_bonus': corridor_verification_mark_bonus, 'corridor_verification_mark_applied': corridor_verification_mark_applied, 'corridor_verification_mark_repeat_blocked': corridor_verification_mark_repeat_blocked, 'corridor_verification_mark_repeat_pressure': corridor_verification_mark_repeat_pressure, 'corridor_verification_mark_new_contacts': corridor_verification_mark_new_contacts, 'corridor_verification_mark_long_run_threshold': corridor_verification_mark_long_run_threshold, 'corridor_verification_mark_key': corridor_verification_mark_key, 'objective_excitement_level': round(runtime_objective_excitement_level, 3), 'objective_excitement_scale': round(objective_excitement_scale, 3), 'objective_excitement_bonus': objective_excitement_bonus, 'objective_excitement_progress_gain': objective_excitement_progress_gain, 'objective_excitement_regression_penalty': objective_excitement_regression_penalty, 'branch_diversity_penalty': branch_diversity_penalty, 'seen_corridor_continue_penalty': seen_corridor_continue_penalty, 'candidate_fully_known_current_maze': 1 if candidate_fully_known_current_maze else 0, 'episodic_constraint_active': 1 if episodic_constraint_active else 0, 'cross_maze_influence_allowed': 1 if cross_maze_influence_allowed else 0, 'cross_maze_influence_factor': round(cross_maze_influence_factor, 3), 'strict_risk_context': strict_risk_context, 'strict_risk_memory_floor_applied': strict_risk_memory_floor_applied, 'local_map_authority_mode': self.local_map_authority_mode, 'local_map_authority_scale': round(local_map_authority_scale, 3), 'episodic_exploration_locked': 1 if episodic_exploration_locked else 0, 'episodic_relevance_penalty': episodic_relevance_penalty, 'corridor_suppression_active': 1 if corridor_suppression_active else 0, 'corridor_suppression_penalty': corridor_suppression_penalty, 'recent_transition_count': recent_transition_count, 'recent_reverse_transition_count': recent_reverse_transition_count, 'transition_repeat_penalty': transition_repeat_penalty, 'cycle_pair_penalty': cycle_pair_penalty, 'loop_risk_marked_edge_penalty': loop_risk_marked_edge_penalty, 'loop_risk_marked_edge': 1 if loop_risk_marked_edge else 0, 'pattern_uncertainty_score': round(pattern_uncertainty_score, 3), 'pattern_confidence_score': round(pattern_confidence_score, 3), 'stuck_transition_taboo_boost': stuck_transition_taboo_boost, 'no_progress_repeat_penalty': no_progress_repeat_penalty, 'loop_commitment_penalty': loop_commitment_penalty, 'immediate_backtrack_hard_penalty': immediate_backtrack_hard_penalty, 'transition_pressure_repeat_penalty': transition_pressure_repeat_penalty, 'long_trap_transition_penalty': long_trap_transition_penalty, 'long_trap_cell_penalty': long_trap_cell_penalty, 'long_trap_transition_hits': long_trap_transition_hits, 'long_trap_cell_hits': long_trap_cell_hits, 'long_loop_subtype_penalty': long_loop_subtype_penalty, 'long_loop_subtype_risk_ema': round(long_loop_subtype_risk_ema, 3), 'long_loop_subtype_relief_ema': round(long_loop_subtype_relief_ema, 3), 'long_loop_subtype_confidence': round(long_loop_subtype_confidence, 3), 'runtime_no_progress_steps': runtime_no_progress_steps, 'hazard_preparedness_penalty': hazard_preparedness_penalty, 'hazard_preparedness_relative_pressure': round(hazard_preparedness_relative_pressure, 3), 'hazard_preparedness_move_pressure': round(hazard_preparedness_move_pressure, 3), 'hazard_preparedness_baseline_pressure': round(hazard_preparedness_baseline_pressure, 3), 'hazard_preparedness_confidence': round(hazard_preparedness_confidence, 3), 'hazard_preparedness_samples': hazard_preparedness_samples, 'post_reset_exhaustion_penalty': post_reset_exhaustion_penalty, 'reset_failure_transition_penalty': reset_failure_transition_penalty, 'reset_failure_cell_penalty': reset_failure_cell_penalty, 'reset_success_transition_bonus': reset_success_transition_bonus, 'frontier_lock_active': 1 if frontier_lock_active else 0, 'frontier_lock_progress_bonus': frontier_lock_progress_bonus, 'frontier_lock_loop_penalty': frontier_lock_loop_penalty, 'solved_region_penalty': solved_region_penalty, 'move_entropy': move_entropy, 'transition_pressure_bucket': transition_pressure_bucket, 'forced_corridor_reentry_penalty': forced_corridor_reentry_penalty, 'structural_recall_penalty': structural_recall_penalty, 'structural_recall_hits': structural_recall_hits, 'structural_recall_rate': round(structural_recall_rate, 3), 'structural_recall_key': structural_recall_key, 'taboo_transition_penalty': taboo_transition_penalty, 'terminal_hard_veto_penalty': terminal_hard_veto_penalty, 'terminal_hard_veto_penalty_base': terminal_hard_veto_penalty_base, 'terminal_trust_scale': round(terminal_trust_scale, 3), 'terminal_trust_score_ema': round(float(self.terminal_trust_score_ema), 3), 'terminal_hard_avoid_active': 1 if self._terminal_hard_avoid_active() else 0, 'branch_tightening_score': branch_tightening_score, 'branch_tightening_mode_active': 1 if branch_tightening_mode_active else 0, 'branch_tightening_abort_penalty': branch_tightening_abort_penalty, 'branch_tightening_escape_bonus': branch_tightening_escape_bonus, 'recent_frontier_seen': 1 if recent_frontier_seen else 0, 'high_risk_frontier_override_bonus': high_risk_frontier_override_bonus, 'escape_bias_bonus': escape_bias_bonus, 'uncertainty_reverify_bonus': uncertainty_reverify_bonus, 'uncertainty_mark_replay_penalty': uncertainty_mark_replay_penalty, 'wide_open_escape_bonus': wide_open_escape_bonus, 'bio_opening_bonus': effective_bio_opening_bonus, 'bio_dead_end_escape_bonus': int(bio_nav['bio_dead_end_escape_bonus']), 'bio_novelty_bonus': effective_bio_novelty_bonus, 'bio_corridor_flow_bonus': effective_bio_corridor_flow_bonus, 'bio_dead_end_predictive_penalty': int(bio_nav['bio_dead_end_predictive_penalty']), 'bio_loop_risk_penalty': int(bio_nav['bio_loop_risk_penalty']), 'bio_opening_evidence': int(bio_nav['bio_opening_evidence']), 'endocrine_stress_penalty': endocrine_stress_penalty, 'endocrine_fatigue_penalty': endocrine_fatigue_penalty, 'endocrine_curiosity_bonus': effective_endocrine_curiosity_bonus, 'endocrine_confidence_bonus': endocrine_confidence_bonus, 'endocrine_momentum_bonus': endocrine_momentum_bonus, 'endocrine_mv_trust_bonus': endocrine_mv_trust_bonus, 'endocrine_exploration_drive': round(endocrine_exploration_drive, 3), 'endocrine_risk_aversion': round(endocrine_risk_aversion, 3), 'endocrine_momentum': round(endocrine_momentum, 3), 'endocrine_mv_reliance': round(endocrine_mv_reliance, 3), 'cause_effect_memory_penalty': cause_effect_memory_penalty, 'cause_effect_memory_reward': cause_effect_memory_reward, 'cause_effect_retrieved_tags': ','.join(retrieved_cause_tags), 'spatial_transition_bonus': spatial_transition_bonus, 'spatial_transition_penalty': spatial_transition_penalty, 'spatial_transition_confidence': round(spatial_transition_confidence, 3), 'spatial_transition_outcome': round(spatial_transition_outcome, 3), 'spatial_branch_risk_penalty': spatial_branch_risk_penalty, 'spatial_branch_risk_norm': round(spatial_branch_risk_norm, 3), 'spatial_exit_recall_bonus': spatial_exit_recall_bonus, 'spatial_exit_recall_penalty': spatial_exit_recall_penalty, 'spatial_exit_recall_confidence': round(spatial_exit_recall_confidence, 3), 'spatial_exit_progress_norm': round(spatial_exit_progress_norm, 3), 'mv_self_pred_cell': mv_self_pred_cell, 'mv_self_error': mv_self_error, 'mv_self_quality_scale': round(mv_self_quality_scale, 3), 'mv_exit_pred_cell': mv_exit_pred_cell, 'mv_exit_conf': round(mv_exit_conf, 3), 'mv_exit_source': mv_exit_source, 'mv_exit_source_scale': round(mv_exit_source_scale, 3), 'mv_exit_hint_strength': round(mv_exit_hint_strength, 3), 'mv_exit_usable': 1 if mv_exit_usable else 0, 'mv_exit_origin_distance': mv_exit_origin_distance, 'mv_exit_candidate_distance': mv_exit_candidate_distance, 'mv_exit_alignment_bonus': mv_exit_alignment_bonus, 'mv_exit_alignment_penalty': mv_exit_alignment_penalty, 'mv_exit_progress_norm': round(mv_exit_progress_norm, 3), 'mv_cellmap_usable': mv_cellmap_usable, 'mv_cellmap_candidate_label': mv_cellmap_candidate_label, 'mv_cellmap_candidate_conf': mv_cellmap_candidate_conf, 'mv_cellmap_open_alignment_bonus': mv_cellmap_open_alignment_bonus, 'mv_cellmap_blocked_risk_penalty': mv_cellmap_blocked_risk_penalty, 'mv_cellmap_neighbor_open_bonus': mv_cellmap_neighbor_open_bonus, 'mv_cellmap_neighbor_blocked_penalty': mv_cellmap_neighbor_blocked_penalty, 'mv_cellmap_neighbor_known': mv_cellmap_neighbor_known, 'mv_cellmap_neighbor_open': mv_cellmap_neighbor_open, 'mv_cellmap_neighbor_blocked': mv_cellmap_neighbor_blocked, 'adaptive_prediction': round(adaptive_prediction, 4), 'adaptive_score_adjustment': adaptive_score_adjustment, 'adaptive_features': adaptive_features, 'move_personality_bias': move_personality_bias, 'decision_noise': decision_noise, 'novelty_reward': novelty_reward, 'known_degree': known_degree, 'unknown_neighbors': unknown_neighbors, 'open_degree': open_degree, 'forced_single_exit': 1 if forced_single_exit else 0, 'prediction_junction_bonus': prediction_junction_bonus, 'prediction_dead_end_penalty': prediction_dead_end_penalty, 'prediction_junction_bonus_raw': raw_prediction_junction_bonus, 'prediction_dead_end_penalty_raw': raw_prediction_dead_end_penalty, 'prediction_contradiction_scale': round(prediction_contradiction_scale, 3), 'prediction_context_trust': round(prediction_context_trust, 3), 'prediction_effective_conf': round(prediction_effective_conf, 3), 'prediction_lookahead_bonus': prediction_lookahead_bonus, 'projection_forward_bonus': projection_forward_bonus, 'projection_backward_penalty': projection_backward_penalty, 'projection_backward_escape_bonus': projection_backward_escape_bonus, 'projection_forward_path_len': len(projection_forward_path), 'projection_forward_path': projection_forward_path, 'projection_forward_progress_signal': round(projection_forward_progress_signal, 3), 'projection_forward_novelty_signal': round(projection_forward_novelty_signal, 3), 'projection_forward_trap_signal': round(projection_forward_trap_signal, 3), 'projection_backward_loop_pressure': round(projection_backward_loop_pressure, 3), 'projection_backward_seen_ratio': round(projection_backward_seen_ratio, 3), 'projection_score_delta_raw': projection_score_delta_raw, 'projection_score_delta_scaled': round(projection_score_delta_scaled, 3), 'projection_score_influence_scale': round(projection_score_influence_scale_effective, 3), 'projection_score_influence_scale_base': round(self.maze_projection_score_influence_scale, 3), 'projection_trust_scale': round(projection_trust_scale, 3), 'projection_trust_score_ema': round(float(self.projection_trust_score_ema), 3), 'projection_score_delta': projection_score_delta, 'projection_score_delta_clipped': projection_score_delta_clipped, 'local_contradiction_debt': round(local_contradiction_debt, 3), 'contradiction_probe_bonus': contradiction_probe_bonus, 'stuck_frontier_seek_bonus': stuck_frontier_seek_bonus, 'stuck_uncertainty_probe_bonus': stuck_uncertainty_probe_bonus, 'stuck_dead_end_penalty_relief': stuck_dead_end_penalty_relief, 'stuck_extra_noise': stuck_extra_noise, 'micro_frontier_escape_score_bonus': micro_frontier_escape_score_bonus, 'micro_frontier_loop_score_penalty': micro_frontier_loop_score_penalty, 'prediction_used': 1 if prediction_used else 0}
+        return {'score': score, 'base_score_without_noise': base_score_without_noise, 'blocked': False, 'visits': visits, 'backtrack': backtrack, 'recent': recent_penalty, 'recent_recency_penalty': recent_recency_penalty, 'known': is_known, 'known_dead_area': known_dead_area, 'frontier_distance': frontier_distance, 'frontier_distance_effective': frontier_distance_effective, 'visual_traversal_credit': visual_traversal_credit, 'beam_visual_traversal_credit_raw': beam_visual_traversal_credit_raw, 'beam_guard_only_mode': 1 if self.beam_guard_only_mode else 0, 'mv_only_cutover_enable': 1 if self.mv_only_cutover_enable else 0, 'corridor_commit': corridor_commit, 'dead_end_risk_depth': dead_end_risk_depth, 'dead_end_exp_penalty': dead_end_exp_penalty, 'short_dead_end_penalty': short_dead_end_penalty, 'revisit_dead_end_entrance_penalty': revisit_dead_end_entrance_penalty, 'dead_end_end_slap_penalty': dead_end_end_slap_penalty, 'dead_end_end_slap_penalty_base': dead_end_end_slap_penalty_base, 'dead_end_tip_revisit_slap_penalty': dead_end_tip_revisit_slap_penalty, 'dead_end_tip_revisit_slap_penalty_base': dead_end_tip_revisit_slap_penalty_base, 'narrow_corridor_additive_penalty': narrow_corridor_additive_penalty, 'dead_end_learning_grace': dead_end_learning_grace, 'dead_end_allowance_remaining': dead_end_allowance_remaining, 'attempt_dead_end_scale': round(attempt_dead_end_scale, 2), 'edge_clear_run': int(edge_scan['clear_run']), 'edge_type': str(edge_scan['edge_type']), 'edge_frontier': effective_edge_frontier, 'edge_junction': effective_edge_junction, 'edge_exit_visible': bool(edge_scan['exit_visible']), 'edge_side_open_steps': int(edge_scan.get('side_open_steps', 0) or 0), 'edge_side_blocked_steps': int(edge_scan.get('side_blocked_steps', 0) or 0), 'edge_verified_empty_opening_steps': int(edge_scan.get('verified_empty_opening_steps', 0) or 0), 'edge_verified_empty_opening_contacts': int(edge_scan.get('verified_empty_opening_contacts', 0) or 0), 'edge_new_verified_empty_opening_contacts': int(edge_scan.get('new_verified_empty_opening_contacts', 0) or 0), 'edge_anchor_row': int(edge_scan.get('edge_anchor_row', candidate[0]) or candidate[0]), 'edge_anchor_col': int(edge_scan.get('edge_anchor_col', candidate[1]) or candidate[1]), 'edge_wide_open_visible': 1 if wide_open_visible else 0, 'edge_wide_open_steps': wide_open_steps, 'edge_max_open_width': max_open_width, 'visible_open_decision': effective_visible_open_decision, 'visible_closed_structure': visible_closed_structure, 'boundary_hug': boundary_hug, 'visible_terminal_end_penalty': visible_terminal_end_penalty, 'visible_terminal_end_penalty_base': visible_terminal_end_penalty_base, 'boxed_corridor_no_exit': boxed_corridor_no_exit, 'boxed_corridor_penalty': boxed_corridor_penalty, 'boxed_corridor_penalty_base': boxed_corridor_penalty_base, 'terminal_reentry_penalty': terminal_reentry_penalty, 'visible_exit_corridor': visible_exit_corridor, 'visible_exit_reward': visible_exit_reward, 'corridor_verification_mark_bonus': corridor_verification_mark_bonus, 'corridor_verification_mark_applied': corridor_verification_mark_applied, 'corridor_verification_mark_repeat_blocked': corridor_verification_mark_repeat_blocked, 'corridor_verification_mark_repeat_pressure': corridor_verification_mark_repeat_pressure, 'corridor_verification_mark_new_contacts': corridor_verification_mark_new_contacts, 'corridor_verification_mark_long_run_threshold': corridor_verification_mark_long_run_threshold, 'corridor_verification_mark_key': corridor_verification_mark_key, 'objective_excitement_level': round(runtime_objective_excitement_level, 3), 'objective_excitement_scale': round(objective_excitement_scale, 3), 'objective_excitement_bonus': objective_excitement_bonus, 'objective_excitement_progress_gain': objective_excitement_progress_gain, 'objective_excitement_regression_penalty': objective_excitement_regression_penalty, 'branch_diversity_penalty': branch_diversity_penalty, 'seen_corridor_continue_penalty': seen_corridor_continue_penalty, 'candidate_fully_known_current_maze': 1 if candidate_fully_known_current_maze else 0, 'episodic_constraint_active': 1 if episodic_constraint_active else 0, 'cross_maze_influence_allowed': 1 if cross_maze_influence_allowed else 0, 'cross_maze_influence_factor': round(cross_maze_influence_factor, 3), 'strict_risk_context': strict_risk_context, 'strict_risk_memory_floor_applied': strict_risk_memory_floor_applied, 'local_map_authority_mode': self.local_map_authority_mode, 'local_map_authority_scale': round(local_map_authority_scale, 3), 'episodic_exploration_locked': 1 if episodic_exploration_locked else 0, 'episodic_relevance_penalty': episodic_relevance_penalty, 'corridor_suppression_active': 1 if corridor_suppression_active else 0, 'corridor_suppression_penalty': corridor_suppression_penalty, 'recent_transition_count': recent_transition_count, 'recent_reverse_transition_count': recent_reverse_transition_count, 'transition_repeat_penalty': transition_repeat_penalty, 'cycle_pair_penalty': cycle_pair_penalty, 'loop_risk_marked_edge_penalty': loop_risk_marked_edge_penalty, 'loop_risk_marked_edge': 1 if loop_risk_marked_edge else 0, 'pattern_uncertainty_score': round(pattern_uncertainty_score, 3), 'pattern_confidence_score': round(pattern_confidence_score, 3), 'stuck_transition_taboo_boost': stuck_transition_taboo_boost, 'no_progress_repeat_penalty': no_progress_repeat_penalty, 'loop_commitment_penalty': loop_commitment_penalty, 'immediate_backtrack_hard_penalty': immediate_backtrack_hard_penalty, 'transition_pressure_repeat_penalty': transition_pressure_repeat_penalty, 'long_trap_transition_penalty': long_trap_transition_penalty, 'long_trap_cell_penalty': long_trap_cell_penalty, 'long_trap_transition_hits': long_trap_transition_hits, 'long_trap_cell_hits': long_trap_cell_hits, 'long_loop_subtype_penalty': long_loop_subtype_penalty, 'long_loop_subtype_risk_ema': round(long_loop_subtype_risk_ema, 3), 'long_loop_subtype_relief_ema': round(long_loop_subtype_relief_ema, 3), 'long_loop_subtype_confidence': round(long_loop_subtype_confidence, 3), 'runtime_no_progress_steps': runtime_no_progress_steps, 'hazard_preparedness_penalty': hazard_preparedness_penalty, 'hazard_preparedness_relative_pressure': round(hazard_preparedness_relative_pressure, 3), 'hazard_preparedness_move_pressure': round(hazard_preparedness_move_pressure, 3), 'hazard_preparedness_baseline_pressure': round(hazard_preparedness_baseline_pressure, 3), 'hazard_preparedness_confidence': round(hazard_preparedness_confidence, 3), 'hazard_preparedness_samples': hazard_preparedness_samples, 'post_reset_exhaustion_penalty': post_reset_exhaustion_penalty, 'reset_failure_transition_penalty': reset_failure_transition_penalty, 'reset_failure_cell_penalty': reset_failure_cell_penalty, 'reset_success_transition_bonus': reset_success_transition_bonus, 'frontier_lock_active': 1 if frontier_lock_active else 0, 'frontier_lock_progress_bonus': frontier_lock_progress_bonus, 'frontier_lock_loop_penalty': frontier_lock_loop_penalty, 'solved_region_penalty': solved_region_penalty, 'move_entropy': move_entropy, 'transition_pressure_bucket': transition_pressure_bucket, 'forced_corridor_reentry_penalty': forced_corridor_reentry_penalty, 'structural_recall_penalty': structural_recall_penalty, 'structural_recall_hits': structural_recall_hits, 'structural_recall_rate': round(structural_recall_rate, 3), 'structural_recall_key': structural_recall_key, 'taboo_transition_penalty': taboo_transition_penalty, 'terminal_hard_veto_penalty': terminal_hard_veto_penalty, 'terminal_hard_veto_penalty_base': terminal_hard_veto_penalty_base, 'terminal_trust_scale': round(terminal_trust_scale, 3), 'terminal_trust_score_ema': round(float(self.terminal_trust_score_ema), 3), 'terminal_hard_avoid_active': 1 if self._terminal_hard_avoid_active() else 0, 'branch_tightening_score': branch_tightening_score, 'branch_tightening_mode_active': 1 if branch_tightening_mode_active else 0, 'branch_tightening_abort_penalty': branch_tightening_abort_penalty, 'branch_tightening_escape_bonus': branch_tightening_escape_bonus, 'recent_frontier_seen': 1 if recent_frontier_seen else 0, 'high_risk_frontier_override_bonus': high_risk_frontier_override_bonus, 'escape_bias_bonus': escape_bias_bonus, 'uncertainty_reverify_bonus': uncertainty_reverify_bonus, 'uncertainty_mark_replay_penalty': uncertainty_mark_replay_penalty, 'wide_open_escape_bonus': wide_open_escape_bonus, 'bio_opening_bonus': effective_bio_opening_bonus, 'bio_dead_end_escape_bonus': int(bio_nav['bio_dead_end_escape_bonus']), 'bio_novelty_bonus': effective_bio_novelty_bonus, 'bio_corridor_flow_bonus': effective_bio_corridor_flow_bonus, 'bio_dead_end_predictive_penalty': int(bio_nav['bio_dead_end_predictive_penalty']), 'bio_loop_risk_penalty': int(bio_nav['bio_loop_risk_penalty']), 'bio_opening_evidence': int(bio_nav['bio_opening_evidence']), 'endocrine_stress_penalty': endocrine_stress_penalty, 'endocrine_fatigue_penalty': endocrine_fatigue_penalty, 'endocrine_curiosity_bonus': effective_endocrine_curiosity_bonus, 'endocrine_confidence_bonus': endocrine_confidence_bonus, 'endocrine_momentum_bonus': endocrine_momentum_bonus, 'endocrine_mv_trust_bonus': endocrine_mv_trust_bonus, 'endocrine_exploration_drive': round(endocrine_exploration_drive, 3), 'endocrine_risk_aversion': round(endocrine_risk_aversion, 3), 'endocrine_momentum': round(endocrine_momentum, 3), 'endocrine_mv_reliance': round(endocrine_mv_reliance, 3), 'cause_effect_memory_penalty': cause_effect_memory_penalty, 'cause_effect_memory_reward': cause_effect_memory_reward, 'cause_effect_retrieved_tags': ','.join(retrieved_cause_tags), 'spatial_transition_bonus': spatial_transition_bonus, 'spatial_transition_penalty': spatial_transition_penalty, 'spatial_transition_confidence': round(spatial_transition_confidence, 3), 'spatial_transition_outcome': round(spatial_transition_outcome, 3), 'spatial_branch_risk_penalty': spatial_branch_risk_penalty, 'spatial_branch_risk_norm': round(spatial_branch_risk_norm, 3), 'spatial_exit_recall_bonus': spatial_exit_recall_bonus, 'spatial_exit_recall_penalty': spatial_exit_recall_penalty, 'spatial_exit_recall_confidence': round(spatial_exit_recall_confidence, 3), 'spatial_exit_progress_norm': round(spatial_exit_progress_norm, 3), 'mv_self_pred_cell': mv_self_pred_cell, 'mv_self_conf': round(mv_self_conf, 3), 'mv_self_conf_raw': round(mv_self_conf_raw, 3), 'mv_self_conf_scale': round(mv_self_conf_scale, 3), 'mv_self_error': mv_self_error, 'mv_self_quality_scale': round(mv_self_quality_scale, 3), 'mv_exit_pred_cell': mv_exit_pred_cell, 'mv_exit_conf': round(mv_exit_conf, 3), 'mv_exit_conf_raw': round(mv_exit_conf_raw, 3), 'mv_exit_conf_scale': round(mv_exit_conf_scale, 3), 'mv_exit_source': mv_exit_source, 'mv_exit_source_scale': round(mv_exit_source_scale, 3), 'mv_exit_hint_strength': round(mv_exit_hint_strength, 3), 'mv_exit_usable': 1 if mv_exit_usable else 0, 'mv_exit_origin_distance': mv_exit_origin_distance, 'mv_exit_candidate_distance': mv_exit_candidate_distance, 'mv_exit_alignment_bonus': mv_exit_alignment_bonus, 'mv_exit_alignment_penalty': mv_exit_alignment_penalty, 'mv_exit_progress_norm': round(mv_exit_progress_norm, 3), 'mv_cellmap_usable': mv_cellmap_usable, 'mv_cellmap_candidate_label': mv_cellmap_candidate_label, 'mv_cellmap_candidate_conf': mv_cellmap_candidate_conf, 'mv_cellmap_open_alignment_bonus': mv_cellmap_open_alignment_bonus, 'mv_cellmap_blocked_risk_penalty': mv_cellmap_blocked_risk_penalty, 'mv_cellmap_neighbor_open_bonus': mv_cellmap_neighbor_open_bonus, 'mv_cellmap_neighbor_blocked_penalty': mv_cellmap_neighbor_blocked_penalty, 'mv_cellmap_neighbor_known': mv_cellmap_neighbor_known, 'mv_cellmap_neighbor_open': mv_cellmap_neighbor_open, 'mv_cellmap_neighbor_blocked': mv_cellmap_neighbor_blocked, 'mv_confidence_scale': round(mv_confidence_scale, 3), 'mv_high_conf_wrong_rate_ema': round(mv_high_conf_wrong_rate_ema, 3), 'mv_high_conf_mismatch_active': 1 if mv_high_conf_mismatch_active else 0, 'mv_input_confidence': round(mv_input_confidence, 3), 'mv_input_accepted': 1 if mv_input_accepted else 0, 'mv_input_rejection_reason': mv_input_rejection_reason, 'mv_input_facts_fit': mv_input_facts_fit, 'mv_low_conf_probe_active': 1 if mv_low_conf_probe_active else 0, 'mv_influence_scale': round(mv_influence_scale, 3), 'mv_trust_ratchet_scale': round(mv_trust_ratchet_scale, 3), 'mv_trust_ratchet_level': round(mv_trust_ratchet_level, 3), 'mv_trust_ratchet_quality_ema': round(mv_trust_ratchet_quality_ema, 3), 'mv_trust_ratchet_promote_streak': mv_trust_ratchet_promote_streak, 'mv_trust_ratchet_demote_streak': mv_trust_ratchet_demote_streak, 'mv_effective_contradiction_budget': round(mv_effective_contradiction_budget, 3), 'mv_contradiction_relief_headroom': round(mv_contradiction_relief_headroom, 3), 'mv_contradiction_debt_rejection_streak': int(getattr(self, 'mv_contradiction_debt_rejection_streak', 0) or 0), 'mv_contradiction_debt_decay': round(float(getattr(self, 'mv_contradiction_debt_last_decay', 0.0) or 0.0), 3), 'mv_perturbation_active': mv_perturbation_active, 'mv_perturbation_type': mv_perturbation_type, 'mv_beam_blackout_active': mv_beam_blackout_active, 'mv_beam_contradiction_active': mv_beam_contradiction_active, 'mv_mv_contradiction_active': mv_mv_contradiction_active, 'mv_beam_credit_mode': mv_beam_credit_mode, 'adaptive_prediction': round(adaptive_prediction, 4), 'adaptive_score_adjustment': adaptive_score_adjustment, 'adaptive_features': adaptive_features, 'move_personality_bias': move_personality_bias, 'decision_noise': decision_noise, 'novelty_reward': novelty_reward, 'known_degree': known_degree, 'unknown_neighbors': unknown_neighbors, 'open_degree': open_degree, 'forced_single_exit': 1 if forced_single_exit else 0, 'prediction_junction_bonus': prediction_junction_bonus, 'prediction_dead_end_penalty': prediction_dead_end_penalty, 'prediction_junction_bonus_raw': raw_prediction_junction_bonus, 'prediction_dead_end_penalty_raw': raw_prediction_dead_end_penalty, 'prediction_contradiction_scale': round(prediction_contradiction_scale, 3), 'prediction_context_trust': round(prediction_context_trust, 3), 'prediction_effective_conf': round(prediction_effective_conf, 3), 'prediction_lookahead_bonus': prediction_lookahead_bonus, 'projection_forward_bonus': projection_forward_bonus, 'projection_backward_penalty': projection_backward_penalty, 'projection_backward_escape_bonus': projection_backward_escape_bonus, 'projection_forward_path_len': len(projection_forward_path), 'projection_forward_path': projection_forward_path, 'projection_forward_progress_signal': round(projection_forward_progress_signal, 3), 'projection_forward_novelty_signal': round(projection_forward_novelty_signal, 3), 'projection_forward_trap_signal': round(projection_forward_trap_signal, 3), 'projection_backward_loop_pressure': round(projection_backward_loop_pressure, 3), 'projection_backward_seen_ratio': round(projection_backward_seen_ratio, 3), 'projection_score_delta_raw': projection_score_delta_raw, 'projection_score_delta_scaled': round(projection_score_delta_scaled, 3), 'projection_score_influence_scale': round(projection_score_influence_scale_effective, 3), 'projection_score_influence_scale_base': round(self.maze_projection_score_influence_scale, 3), 'projection_trust_scale': round(projection_trust_scale, 3), 'projection_trust_score_ema': round(float(self.projection_trust_score_ema), 3), 'projection_wb6_clamp_active': 1 if wb6_projection_clamp_active else 0, 'projection_score_delta': projection_score_delta, 'projection_score_delta_clipped': projection_score_delta_clipped, 'local_contradiction_debt': round(local_contradiction_debt, 3), 'contradiction_probe_bonus': contradiction_probe_bonus, 'stuck_frontier_seek_bonus': stuck_frontier_seek_bonus, 'stuck_uncertainty_probe_bonus': stuck_uncertainty_probe_bonus, 'stuck_dead_end_penalty_relief': stuck_dead_end_penalty_relief, 'stuck_extra_noise': stuck_extra_noise, 'micro_frontier_escape_score_bonus': micro_frontier_escape_score_bonus, 'micro_frontier_loop_score_penalty': micro_frontier_loop_score_penalty, 'prediction_used': 1 if prediction_used else 0, 'candidate_cell': candidate}
 
     def _known_corridor_commitment(self, origin: tuple[int, int], first_move: str) -> int:
         """Estimate how deep this move commits into a known straight corridor."""
@@ -13348,13 +14466,23 @@ class AIAssistantApp:
         self_error_raw = hints.get('self_error', -1)
         self_error = int(self_error_raw if self_error_raw is not None else -1)
         self_error_ready = self_error < 0 or self_error <= int(self.mv_preplan_max_self_error)
-        self_ready = bool(bool(hints.get('self_fresh', False)) and self_source in trusted_sources and (self_conf >= float(self.mv_preplan_self_min_conf)) and self_error_ready)
+        self_pred_raw = hints.get('self_pred_cell', (-1, -1)) or (-1, -1)
+        self_pred_cell = (int(self_pred_raw[0]), int(self_pred_raw[1])) if isinstance(self_pred_raw, (tuple, list)) and len(self_pred_raw) == 2 else (-1, -1)
+        app_player_cell = (int(self.current_player_cell[0]), int(self.current_player_cell[1]))
+        self_truth_match = bool(self_pred_cell == app_player_cell)
+        self_ready = bool(bool(hints.get('self_fresh', False)) and self_source in trusted_sources and (self_conf >= float(self.mv_preplan_self_min_conf)) and self_error_ready and self_truth_match)
         exit_ready = True
         exit_source = str(hints.get('exit_source', 'none') or 'none')
         exit_conf = float(hints.get('exit_conf', 0.0) or 0.0)
-        if self.mv_preplan_require_exit:
-            exit_ready = bool(bool(hints.get('exit_usable', False)) and bool(hints.get('exit_fresh', False)) and (exit_source in trusted_sources) and (exit_conf >= float(self.mv_preplan_exit_min_conf)))
-        status = f"self_ready={(1 if self_ready else 0)} exit_ready={(1 if exit_ready else 0)} self_conf={round(self_conf, 3)} exit_conf={round(exit_conf, 3)} self_err={self_error} self_src={self_source} self_fresh={(1 if bool(hints.get('self_fresh', False)) else 0)} exit_src={exit_source} exit_fresh={(1 if bool(hints.get('exit_fresh', False)) else 0)} exit_usable={(1 if bool(hints.get('exit_usable', False)) else 0)}"
+        exit_pred_raw = hints.get('exit_pred_cell', (-1, -1)) or (-1, -1)
+        exit_pred_cell = (int(exit_pred_raw[0]), int(exit_pred_raw[1])) if isinstance(exit_pred_raw, (tuple, list)) and len(exit_pred_raw) == 2 else (-1, -1)
+        app_exit_cell = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+        exit_truth_match = bool(exit_pred_cell == app_exit_cell)
+        # App truth is authoritative: when exit localization is enabled, require exact MV/player+exit agreement before proceeding.
+        exit_required = bool(self.mv_preplan_require_exit or self.machine_vision_exit_localization_enable)
+        if exit_required:
+            exit_ready = bool(bool(hints.get('exit_usable', False)) and bool(hints.get('exit_fresh', False)) and (exit_source in trusted_sources) and (exit_conf >= float(self.mv_preplan_exit_min_conf)) and exit_truth_match)
+        status = f"self_ready={(1 if self_ready else 0)} exit_ready={(1 if exit_ready else 0)} self_match={(1 if self_truth_match else 0)} exit_match={(1 if exit_truth_match else 0)} self_pred={self_pred_cell} app_player={app_player_cell} exit_pred={exit_pred_cell} app_exit={app_exit_cell} self_conf={round(self_conf, 3)} exit_conf={round(exit_conf, 3)} self_err={self_error} self_src={self_source} self_fresh={(1 if bool(hints.get('self_fresh', False)) else 0)} exit_src={exit_source} exit_fresh={(1 if bool(hints.get('exit_fresh', False)) else 0)} exit_usable={(1 if bool(hints.get('exit_usable', False)) else 0)}"
         if self_ready and exit_ready:
             return (True, f'ready {status}')
         return (False, f'wait {status}')
@@ -13369,11 +14497,46 @@ class AIAssistantApp:
         trusted_sources = {'learned_signature', 'prior_sample_context', 'prior_sample'}
 
         def _exit_locked(local_hints: dict[str, object]) -> bool:
-            if not self.mv_preplan_require_exit:
+            if not (self.mv_preplan_require_exit or self.machine_vision_exit_localization_enable):
                 return True
             exit_source = str(local_hints.get('exit_source', 'none') or 'none')
             exit_conf = float(local_hints.get('exit_conf', 0.0) or 0.0)
-            return bool(bool(local_hints.get('exit_usable', False)) and bool(local_hints.get('exit_fresh', False)) and (exit_source in trusted_sources) and (exit_conf >= float(self.mv_preplan_exit_min_conf)))
+            exit_pred_raw = local_hints.get('exit_pred_cell', (-1, -1)) or (-1, -1)
+            exit_pred_cell = (int(exit_pred_raw[0]), int(exit_pred_raw[1])) if isinstance(exit_pred_raw, (tuple, list)) and len(exit_pred_raw) == 2 else (-1, -1)
+            app_exit_cell = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+            return bool(bool(local_hints.get('exit_usable', False)) and bool(local_hints.get('exit_fresh', False)) and (exit_source in trusted_sources) and (exit_conf >= float(self.mv_preplan_exit_min_conf)) and (exit_pred_cell == app_exit_cell))
+
+        def _soft_fail_open_eligible(local_hints: dict[str, object]) -> tuple[bool, str]:
+            if not self.mv_preplan_soft_fail_open_enable:
+                return (False, 'disabled')
+            if not bool(self.mv_preplan_require_exit or self.machine_vision_exit_localization_enable):
+                return (False, 'exit_not_required')
+            self_source = str(local_hints.get('self_source', 'none') or 'none')
+            self_conf = float(local_hints.get('self_conf', 0.0) or 0.0)
+            self_error_raw = local_hints.get('self_error', -1)
+            self_error = int(self_error_raw if self_error_raw is not None else -1)
+            self_error_ready = self_error < 0 or self_error <= int(self.mv_preplan_max_self_error)
+            self_pred_raw = local_hints.get('self_pred_cell', (-1, -1)) or (-1, -1)
+            self_pred_cell = (int(self_pred_raw[0]), int(self_pred_raw[1])) if isinstance(self_pred_raw, (tuple, list)) and len(self_pred_raw) == 2 else (-1, -1)
+            app_player_cell = (int(self.current_player_cell[0]), int(self.current_player_cell[1]))
+            self_truth_match = bool(self_pred_cell == app_player_cell)
+            self_ready = bool(bool(local_hints.get('self_fresh', False)) and self_source in trusted_sources and (self_conf >= float(self.mv_preplan_self_min_conf)) and self_error_ready and self_truth_match)
+            if not self_ready:
+                return (False, 'self_not_ready')
+            exit_source = str(local_hints.get('exit_source', 'none') or 'none')
+            exit_conf = float(local_hints.get('exit_conf', 0.0) or 0.0)
+            exit_pred_raw = local_hints.get('exit_pred_cell', (-1, -1)) or (-1, -1)
+            exit_pred_cell = (int(exit_pred_raw[0]), int(exit_pred_raw[1])) if isinstance(exit_pred_raw, (tuple, list)) and len(exit_pred_raw) == 2 else (-1, -1)
+            app_exit_cell = (int(self.current_target_cell[0]), int(self.current_target_cell[1]))
+            exit_truth_match = bool(exit_pred_cell == app_exit_cell)
+            exit_usable = bool(local_hints.get('exit_usable', False))
+            exit_fresh = bool(local_hints.get('exit_fresh', False))
+            exit_floor_ok = exit_conf >= float(self.mv_preplan_soft_fail_open_min_exit_conf)
+            strict_conf_missing = exit_conf < float(self.mv_preplan_exit_min_conf)
+            eligible = bool(exit_usable and exit_fresh and (exit_source in trusted_sources) and exit_truth_match and exit_floor_ok and strict_conf_missing)
+            detail = f'exit_conf={round(exit_conf, 3)} floor={round(float(self.mv_preplan_soft_fail_open_min_exit_conf), 3)} strict={round(float(self.mv_preplan_exit_min_conf), 3)} exit_match={(1 if exit_truth_match else 0)} exit_src={exit_source} exit_fresh={(1 if exit_fresh else 0)} exit_usable={(1 if exit_usable else 0)}'
+            return (eligible, detail)
+
         max_sweeps = max(1, int(self.mv_preplan_acquire_max_sweeps))
         sweep_count = 0
         last_look_dirs = ''
@@ -13390,12 +14553,6 @@ class AIAssistantApp:
                 if ready:
                     suffix = f' look={last_look_dirs}' if last_look_dirs else ''
                     return (True, f'{note} sweeps={sweep_count}/{max_sweeps}{suffix}')
-            else:
-                self._mv_preplan_no_sweep_wait_streak += 1
-                if self._mv_preplan_no_sweep_wait_streak < 2:
-                    suffix = f' look={last_look_dirs}' if last_look_dirs else ''
-                    return (False, f'{note} sweeps={sweep_count}/{max_sweeps}{suffix}')
-                self._mv_preplan_no_sweep_wait_streak = 0
         while not ready and sweep_count < max_sweeps:
             look_directions = self._mv_preplan_select_look_directions(hints, acquisition_phase=True)
             if not look_directions:
@@ -13407,8 +14564,59 @@ class AIAssistantApp:
             ready, note = self._mv_preplan_ready_for_sweep(hints)
         if ready:
             self._mv_preplan_no_sweep_wait_streak = 0
+            suffix = f' look={last_look_dirs}' if last_look_dirs else ''
+            return (True, f'{note} sweeps={sweep_count}/{max_sweeps}{suffix}')
+        soft_eligible, soft_detail = _soft_fail_open_eligible(hints)
+        if soft_eligible:
+            self._mv_preplan_no_sweep_wait_streak += 1
+            if self._mv_preplan_no_sweep_wait_streak >= int(self.mv_preplan_soft_fail_open_wait_streak):
+                self._mv_preplan_no_sweep_wait_streak = 0
+                suffix = f' look={last_look_dirs}' if last_look_dirs else ''
+                return (True, f'soft-bypass confidence-only-lock {soft_detail} wait_streak={int(self.mv_preplan_soft_fail_open_wait_streak)} sweeps={sweep_count}/{max_sweeps}{suffix}')
+        else:
+            self._mv_preplan_no_sweep_wait_streak = 0
         suffix = f' look={last_look_dirs}' if last_look_dirs else ''
-        return (ready, f'{note} sweeps={sweep_count}/{max_sweeps}{suffix}')
+        return (False, f'{note} sweeps={sweep_count}/{max_sweeps}{suffix}')
+
+    def _mv_reacquire_after_bad_guess(self, reason: str) -> str:
+        if self._normalized_layout_mode() != 'maze':
+            return 'skip:mode=non-maze'
+        if not self._machine_vision_enabled():
+            return 'skip:mv-disabled'
+        player_row, player_col = (int(self.current_player_cell[0]), int(self.current_player_cell[1]))
+        before_hints = self._machine_vision_kernel_hints()
+        before_pred = tuple(before_hints.get('exit_pred_cell', (-1, -1)) or (-1, -1))
+        before_conf = float(before_hints.get('exit_conf', 0.0) or 0.0)
+        look_used = ''
+        try:
+            if self.machine_vision_player_localization_enable:
+                self._update_machine_vision_localization(player_row, player_col)
+            if self.machine_vision_exit_localization_enable:
+                self._update_machine_vision_exit_localization(player_row, player_col)
+            if self.mv_preplan_sweep_enable:
+                refresh_hints = self._machine_vision_kernel_hints()
+                look_dirs = self._mv_preplan_select_look_directions(refresh_hints, acquisition_phase=True)
+                max_look_dirs = max(1, min(4, int(self.mv_bad_guess_reacquire_max_look_dirs)))
+                look_dirs = look_dirs[:max_look_dirs]
+                if look_dirs:
+                    look_used = ','.join(look_dirs)
+                    self._preview_look_directions_blocking(look_dirs)
+                    if self.machine_vision_player_localization_enable:
+                        self._update_machine_vision_localization(player_row, player_col)
+                    if self.machine_vision_exit_localization_enable:
+                        self._update_machine_vision_exit_localization(player_row, player_col)
+            after_hints = self._machine_vision_kernel_hints()
+            after_pred = tuple(after_hints.get('exit_pred_cell', (-1, -1)) or (-1, -1))
+            after_conf = float(after_hints.get('exit_conf', 0.0) or 0.0)
+            note = f'reason={reason} before={before_pred}@{round(before_conf, 3)} after={after_pred}@{round(after_conf, 3)} look={look_used or "none"}'
+            self._mv_preplan_last_status = f'reacquire:{note}'
+            self._clear_sticky_objective_path()
+            self._append_memory_log(f'[MV-REACQUIRE: {note}]')
+            return note
+        except Exception as exc:
+            error_note = f'reason={reason} error={type(exc).__name__}'
+            self._append_memory_log(f'[MV-REACQUIRE-ERROR: {error_note}]')
+            return error_note
 
     def _preview_look_directions_blocking(self, directions: list[str]) -> None:
         if self._normalized_layout_mode() != 'maze':
