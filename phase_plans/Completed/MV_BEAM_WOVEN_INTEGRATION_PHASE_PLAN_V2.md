@@ -2,6 +2,8 @@
 
 Sequencing note: unified phase ordering is now governed by `phase_plans/UNIFIED_LONG_HORIZON_PHASE_PLAN_V1.md`.
 
+Stabilization fallback note: if WB windows destabilize before WB8/U08 endstate recertification, use `phase_plans/WB_ENDSTATE_STABILIZATION_RECOVERY_PLAN_V1.md` as the recovery overlay before resuming normal WB promotion. For complete beam decoupling recertification, run through RS7.
+
 ## Objective
 
 Evolve machine vision as a tightly coupled companion to beam perception first, then decouple beam fully once MV demonstrates stable standalone reliability.
@@ -20,6 +22,15 @@ Core direction:
   - MV_BEAM_INTEGRATION_MODE
   - MV_BEAM_INTEGRATION_RECENT_EXIT_STEPS
   - mv_beam_integration_mode and mv_beam_anchor_reason in step telemetry.
+
+## Runtime Alignment Note (Current RS Recovery Ladder)
+
+The runtime kernel phase program currently uses RS recovery stage identifiers (`rs0.*` ... `rs7.*`) for WB endstate stabilization and decoupling recertification.
+
+To keep this plan's WB intent aligned with live runtime behavior:
+- `MV_OBJECTIVE_MV_GATE_STAGE_PREFIX` is mapped to `rs0.` (early recovery objective gate activation entry).
+- `MV_BEAM_RETIREMENT_STAGE_PREFIX` is mapped to `rs7.` (full decoupled cutover confirmation entry).
+- Beam-retirement objective-force dampening and projection clamp checks follow `MV_BEAM_RETIREMENT_STAGE_PREFIX`.
 
 ## Non-Negotiable Contracts
 
@@ -218,6 +229,8 @@ Rollback trigger:
 
 - MV_BEAM_INTEGRATION_MODE=woven
 - MV_BEAM_INTEGRATION_RECENT_EXIT_STEPS=64
+- MV_OBJECTIVE_MV_GATE_STAGE_PREFIX=tc0.
+- MV_BEAM_RETIREMENT_STAGE_PREFIX=tc6.
 - MV_PREPLAN_SWEEP_ENABLE=1
 - MV_PREPLAN_REQUIRE_EXIT=1
 - MV_ONLY_CUTOVER_ENABLE=0

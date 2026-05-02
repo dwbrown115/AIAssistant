@@ -38,6 +38,7 @@ def refresh_game_state(app: object) -> None:
 
     mode = app._normalized_layout_mode()
     if mode == "maze":
+        beam_vision_active = not bool(app._mv_full_map_cutover_active())
         app._ensure_machine_vision_cellmap_for_current_maze()
         app._update_maze_known_map(player_row, player_col, radius=1, facing=app.player_facing)
         app._resolve_visible_predictions()
@@ -63,48 +64,66 @@ def refresh_game_state(app: object) -> None:
                     ),
                 )
         app.mental_sweep_cells = app._build_mental_sweep(player_row, player_col)
-        app._draw_fov_overlay(player_row, player_col)
+        if beam_vision_active:
+            app._draw_fov_overlay(player_row, player_col)
+        else:
+            app._clear_fov_overlay()
         app._draw_mental_sweep_overlay(player_row, player_col)
         suppress_wm_preview = bool(getattr(app, "_suppress_wm_snapshot_during_look_preview", False))
         if not suppress_wm_preview:
             app._working_memory_snapshot(current_cell=(player_row, player_col))
             app._store_current_maze_memory_snapshot()
         personality = app.maze_personality or {}
-        visibility_legend_line = (
-            "Legend: P=player, S=visible episode start, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
-            "B=visible blocker/wall, ?=not visible, arrows (^ > v <)=single opening-edge marker side, x=marked-off verified-empty side opening.\n\n"
-            if not app.maze_ascii_visible_only
-            else
-            "Legend: P=player, S=visible episode start, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
-            "B=visible blocker/wall, .=hidden cell omitted/cropped by visibility mode, "
-            "arrows (^ > v <)=single opening-edge marker side, x=marked-off verified-empty side opening.\n\n"
-        )
-        perception_block = (
-            f"Directional FOV status (facing={app.player_facing}, depth={app.maze_fov_depth}, "
-            f"peripheral={app.maze_fov_peripheral}, cone_deg={round(app.maze_fov_cone_degrees, 1)}, "
-            f"lateral_extra_deg={round(app.maze_fov_lateral_extra_degrees, 1)}, "
-            f"lateral_near_depth={round(app.maze_fov_lateral_near_depth, 2)}, "
-            f"lateral_band={round(app.maze_fov_lateral_band_cells, 2)}, "
-            f"lateral_floor+={round(app.maze_fov_lateral_floor_margin, 3)}, "
-            f"falloff={round(app.maze_fov_distance_falloff, 3)}, "
-            f"corner_graze={round(app.maze_fov_corner_graze_factor, 3)}, "
-            f"wedge_dist_scale={round(app.maze_fov_wedge_distance_scale, 3)}, "
-            f"full>={round(app.maze_fov_full_threshold, 3)}, half>={round(app.maze_fov_half_threshold, 3)}, "
-            f"behind=hidden):\n"
-            f"{app._build_local_status_snapshot(player_row, player_col, radius=1, include_render_details=True)}\n"
-            f"{visibility_legend_line}"
-            "Renderable FOV (model-friendly, same visibility source as canvas):\n"
-            f"{app._build_interpretable_fov_snapshot(player_row, player_col)}\n\n"
-            f"Maze personality: {app.maze_personality_name} "
-            f"(dead_end_allowance={int(personality.get('dead_end_allowance', app.dead_end_learning_allowance_base))}, "
-            f"dead_end_learned={app.episode_dead_end_learn_events}, "
-            f"novelty_scale={round(float(personality.get('novelty_reward_scale', 1.0)), 2)}, "
-            f"dead_end_scale={round(float(personality.get('dead_end_penalty_scale', 1.0)), 2)}).\n\n"
-            "Boundary rule: outside the grid is a hard wall (WALL), never unknown/open.\n"
-            f"Immediate move walls/open: {app._boundary_blocked_summary((player_row, player_col))}\n\n"
-            f"Mental directional edge scan (look-around before move):\n"
-            f"{app._mental_edge_scan_summary(player_row, player_col)}"
-        )
+        if beam_vision_active:
+            visibility_legend_line = (
+                "Legend: P=player, S=visible episode start, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
+                "B=visible blocker/wall, ?=not visible, arrows (^ > v <)=single opening-edge marker side, x=marked-off verified-empty side opening.\n\n"
+                if not app.maze_ascii_visible_only
+                else
+                "Legend: P=player, S=visible episode start, E=visible exit, O=full-visible open, H=half-visible open (cone boundary), "
+                "B=visible blocker/wall, .=hidden cell omitted/cropped by visibility mode, "
+                "arrows (^ > v <)=single opening-edge marker side, x=marked-off verified-empty side opening.\n\n"
+            )
+            perception_block = (
+                f"Directional FOV status (facing={app.player_facing}, depth={app.maze_fov_depth}, "
+                f"peripheral={app.maze_fov_peripheral}, cone_deg={round(app.maze_fov_cone_degrees, 1)}, "
+                f"lateral_extra_deg={round(app.maze_fov_lateral_extra_degrees, 1)}, "
+                f"lateral_near_depth={round(app.maze_fov_lateral_near_depth, 2)}, "
+                f"lateral_band={round(app.maze_fov_lateral_band_cells, 2)}, "
+                f"lateral_floor+={round(app.maze_fov_lateral_floor_margin, 3)}, "
+                f"falloff={round(app.maze_fov_distance_falloff, 3)}, "
+                f"corner_graze={round(app.maze_fov_corner_graze_factor, 3)}, "
+                f"wedge_dist_scale={round(app.maze_fov_wedge_distance_scale, 3)}, "
+                f"full>={round(app.maze_fov_full_threshold, 3)}, half>={round(app.maze_fov_half_threshold, 3)}, "
+                f"behind=hidden):\n"
+                f"{app._build_local_status_snapshot(player_row, player_col, radius=1, include_render_details=True)}\n"
+                f"{visibility_legend_line}"
+                "Renderable FOV (model-friendly, same visibility source as canvas):\n"
+                f"{app._build_interpretable_fov_snapshot(player_row, player_col)}\n\n"
+                f"Maze personality: {app.maze_personality_name} "
+                f"(dead_end_allowance={int(personality.get('dead_end_allowance', app.dead_end_learning_allowance_base))}, "
+                f"dead_end_learned={app.episode_dead_end_learn_events}, "
+                f"novelty_scale={round(float(personality.get('novelty_reward_scale', 1.0)), 2)}, "
+                f"dead_end_scale={round(float(personality.get('dead_end_penalty_scale', 1.0)), 2)}).\n\n"
+                "Boundary rule: outside the grid is a hard wall (WALL), never unknown/open.\n"
+                f"Immediate move walls/open: {app._boundary_blocked_summary((player_row, player_col))}\n\n"
+                f"Mental directional edge scan (look-around before move):\n"
+                f"{app._mental_edge_scan_summary(player_row, player_col)}"
+            )
+        else:
+            perception_block = (
+                "Directional beam vision: disabled (full-map MV cutover active).\n"
+                "Renderable FOV view: disabled in cutover mode.\n\n"
+                f"Maze personality: {app.maze_personality_name} "
+                f"(dead_end_allowance={int(personality.get('dead_end_allowance', app.dead_end_learning_allowance_base))}, "
+                f"dead_end_learned={app.episode_dead_end_learn_events}, "
+                f"novelty_scale={round(float(personality.get('novelty_reward_scale', 1.0)), 2)}, "
+                f"dead_end_scale={round(float(personality.get('dead_end_penalty_scale', 1.0)), 2)}).\n\n"
+                "Boundary rule: outside the grid is a hard wall (WALL), never unknown/open.\n"
+                f"Immediate move walls/open: {app._boundary_blocked_summary((player_row, player_col))}\n\n"
+                f"Mental directional edge scan (look-around before move):\n"
+                f"{app._mental_edge_scan_summary(player_row, player_col)}"
+            )
         target_metrics_line = "Target signal hidden. Distance/proximity feedback disabled in maze mode."
         episode_objective_line = "Episode optimal steps hidden in maze mode."
     else:
@@ -184,7 +203,9 @@ def refresh_game_state(app: object) -> None:
         mv_hint_perturbation_type = str(mv_hints.get('mv_perturbation_type', mv_runtime_perturbation_type) or mv_runtime_perturbation_type)
         mv_hint_window_key = str(mv_hints.get('mv_perturbation_window_key', 'none::-1') or 'none::-1')
         beam_vision_state = 'ON'
-        if mv_runtime_credit_mode == 'blackout':
+        if bool(app._mv_full_map_cutover_active()):
+            beam_vision_state = 'DISABLED_FULL_MV'
+        elif mv_runtime_credit_mode == 'blackout':
             beam_vision_state = 'OFF'
         elif mv_runtime_credit_mode == 'invert':
             beam_vision_state = 'INVERTED'

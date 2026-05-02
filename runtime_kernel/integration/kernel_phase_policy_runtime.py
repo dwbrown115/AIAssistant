@@ -9,13 +9,13 @@ DEFAULT_KERNEL_PHASE_CAUSAL_COUNTERFACTUAL_ENABLE = True
 DEFAULT_KERNEL_PHASE_PROGRAM_ENABLE = True
 DEFAULT_KERNEL_PHASE_PROGRAM_KWARGS = {
     "ema_decay": 0.93,
-    "base_promotion_target": 0.62,
+    "base_promotion_target": 0.68,
     "target_adapt_enable": False,
     "target_adapt_rate": 0.08,
     "weight_adapt_rate": 0.06,
     "promotion_target_hard_max": 0.90,
     "early_target_cap_enable": False,
-    "early_target_cap": 0.62,
+    "early_target_cap": 0.68,
     "early_target_cap_phase_count": 1,
     "early_target_cap_micro_max": 3,
     "weight_rebase_enable": True,
@@ -70,7 +70,7 @@ DEFAULT_KERNEL_PHASE_MODE_POLICY_MAP = {
 }
 DEFAULT_KERNEL_PHASE_SAFETY_PROFILE_FLOOR = "BALANCED"
 DEFAULT_KERNEL_PHASE_SR_OBSERVABILITY_ONLY_PHASE_IDS = (
-    "phase_wb8_full_beam_decoupling_operational_cutover",
+    "phase_rs7_full_beam_decoupled_cutover_confirmation",
 )
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_CLAMP_TRIGGER = 0.72
 DEFAULT_KERNEL_PHASE_SR_IMMUNE_COOLDOWN_STEPS = 28

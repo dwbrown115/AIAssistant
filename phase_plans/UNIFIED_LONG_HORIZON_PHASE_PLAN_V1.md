@@ -20,6 +20,9 @@ This unified plan integrates:
 
 The source plans remain valid as detailed reference specs, but phase order is governed by this document.
 
+Stabilization recovery overlay for WB endstate recertification:
+- `WB_ENDSTATE_STABILIZATION_RECOVERY_PLAN_V1`
+
 Operator checklist companion:
 - [UNIFIED_LONG_HORIZON_OPERATOR_CHECKLIST_V1.md](UNIFIED_LONG_HORIZON_OPERATOR_CHECKLIST_V1.md)
 
@@ -38,6 +41,9 @@ Operator checklist companion:
 - Roll back one phase on two consecutive failures.
 - Immediate rollback on safety-critical breach.
 - During major cutover phases (WB6-WB8, MV-D4, RG5+), freeze further promotion until root cause closure after any catastrophic breach.
+
+If WB progression loses stability and requires recertification before U08 continuation, invoke:
+- `phase_plans/WB_ENDSTATE_STABILIZATION_RECOVERY_PLAN_V1.md`
 
 ## Master Sequence
 
@@ -84,6 +90,7 @@ Operator checklist companion:
 
 #### Phase U08 (WB8): Full Beam Decoupling Operational Cutover
 - MV-only operational path with emergency rollback switch.
+- Beam is fully decoupled from routine live policy authority.
 - Exit: three consecutive mixed windows pass all gates.
 
 ### Block B: SC Sensorimotor Enrichment Bridge
@@ -265,3 +272,5 @@ After each window:
 - Use this unified sequence for all future promotion decisions.
 - Do not begin Block B until U08 is formally complete.
 - Do not begin Block E until U32 is formally complete.
+- If WB gates are unstable for two consecutive windows, pause forward promotion and run the WB stabilization recovery overlay until RS6 exit criteria pass.
+- If full beam decoupling must be re-validated after instability, continue overlay execution through RS7 before treating U08 as complete.

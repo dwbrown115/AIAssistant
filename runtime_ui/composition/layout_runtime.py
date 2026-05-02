@@ -208,7 +208,7 @@ def build_ui(app: object) -> None:
 
     app.mv_route_mode_checkbutton = tk.Checkbutton(
         toggle_row,
-        text="MV Route Mode (Deprecated)",
+        text="MV Route Mode",
         variable=app.mv_route_planning_mode_var,
         command=app._on_mv_route_mode_toggled,
         anchor="w",

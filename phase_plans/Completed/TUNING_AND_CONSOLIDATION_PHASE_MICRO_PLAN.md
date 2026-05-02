@@ -146,14 +146,75 @@ Frozen during consolidation (unless rollback emergency):
 ## Phase Plan
 
 Execution order for this document:
-- `TR0 -> TC0 -> TC1 -> TC2 -> TC3 -> TC4`
+- `TR0 -> TC0 -> TC1 -> TC2 -> TC3 -> TC4 -> TC5 -> TC6 -> TC7`
 
-## Phase TC0: Baseline Lock
+## Phase TC0: Baseline Signal Reacquisition
 
 Stage ids:
-- tc0.m1_baseline_manifest
-- tc0.m2_metric_gate_lock
-- tc0.m3_seed_protocol_lock
+- tc0.m1_baseline_anchor_refresh
+- tc0.m2_stability_floor_rebuild
+- tc0.m3_transfer_floor_recheck
+
+Actions:
+- Reacquire stable baseline signal quality after TR0 parity recovery.
+- Verify stability/safety/transfer floors with fixed protocol runs.
+- Keep tuning narrow to baseline recovery surfaces only.
+
+TC0.m2+ stabilization guardrails:
+- From `tc0.m2_stability_floor_rebuild` onward, treat unresolved verification waiting as a first-class blocker.
+- Hold at current micro stage if either metric exceeds threshold in a run:
+  - `unresolved_wait_rate > 0.10`
+  - `guard_override_rate > 0.015`
+- If two consecutive runs violate either threshold, roll back one micro stage (default rollback target: `tc0.m1_baseline_anchor_refresh`) and re-run fixed protocol.
+- During TC0.m2+ hold/rollback windows, use widened beam recency anchoring (`MV_TC0M2_PLUS_RECENT_EXIT_STEPS`) to reduce `beam_not_recent` suppression churn.
+
+Exit:
+- Baseline signal floors are stable across two windows.
+- No new MV wait/deadlock signatures introduced.
+- TC0.m2+ guardrail thresholds pass for two consecutive windows before promotion to TC1.
+
+## Phase TC1: Baseline Safety Rebalance
+
+Stage ids:
+- tc1.m1_override_budget_normalize
+- tc1.m2_unresolved_objective_quieting
+- tc1.m3_intervention_rate_reduction
+
+Actions:
+- Rebalance override pressure to baseline-friendly levels.
+- Suppress unresolved objective forcing spikes without widening change budget.
+- Reduce intervention pressure while preserving route integrity.
+- Keep TC0.m2+ guardrail thresholds in-force throughout TC1.
+
+Exit:
+- Override/intervention pressure trends hold inside expected recovery band.
+- Safety and integrity checks stay clean under repeated batches.
+- No guardrail threshold breach across final two TC1 validation windows.
+
+## Phase TC2: Baseline Parity Certification
+
+Stage ids:
+- tc2.m1_parity_gate_probe
+- tc2.m2_parity_hold_verification
+- tc2.m3_baseline_certification
+
+Actions:
+- Probe parity gates against the fixed previous-phase cohort.
+- Confirm hold behavior over consecutive matched windows.
+- Certify readiness to enter full consolidation flow.
+- Preserve TC0.m2+ guardrails while certifying parity.
+
+Exit:
+- Recovery + parity hold gates are satisfied over two consecutive windows.
+- Baseline certification recorded for consolidation entry.
+- Guardrail thresholds remain within limits during both certification windows.
+
+## Phase TC3: Baseline Lock
+
+Stage ids:
+- tc3.m1_baseline_manifest
+- tc3.m2_metric_gate_lock
+- tc3.m3_seed_protocol_lock
 
 Actions:
 - Record baseline env profile and active run protocol.
@@ -164,12 +225,12 @@ Exit:
 - Baseline manifest committed.
 - Gate thresholds explicitly documented and used by all reviews.
 
-## Phase TC1: Stabilization Sweep
+## Phase TC4: Stabilization Sweep
 
 Stage ids:
-- tc1.m1_repeatability_check
-- tc1.m2_pressure_watch
-- tc1.m3_regression_triage
+- tc4.m1_repeatability_check
+- tc4.m2_pressure_watch
+- tc4.m3_regression_triage
 
 Actions:
 - Run repeated hard/very-hard batches under fixed protocol.
@@ -180,12 +241,12 @@ Exit:
 - Two clean cycles with no MV wait regression.
 - Pressure metrics inside target or clearly improving.
 
-## Phase TC2: Narrow Retuning
+## Phase TC5: Narrow Retuning
 
 Stage ids:
-- tc2.m1_objective_pressure_retune
-- tc2.m2_verification_margin_retune
-- tc2.m3_guard_margin_retune
+- tc5.m1_objective_pressure_retune
+- tc5.m2_verification_margin_retune
+- tc5.m3_guard_margin_retune
 
 Actions:
 - Apply one small knob family change at a time.
@@ -196,12 +257,12 @@ Exit:
 - At least one pressure metric improvement without safety regression.
 - No increase in deadlock signature markers.
 
-## Phase TC3: Consolidation Hardening
+## Phase TC6: Consolidation Hardening
 
 Stage ids:
-- tc3.m1_multi_batch_confirmation
-- tc3.m2_report_unification
-- tc3.m3_rollback_readiness
+- tc6.m1_multi_batch_confirmation
+- tc6.m2_report_unification
+- tc6.m3_rollback_readiness
 
 Actions:
 - Confirm behavior on multiple fresh batches.
@@ -212,12 +273,12 @@ Exit:
 - Two consecutive cycles satisfy all success criteria.
 - Consolidated settings marked as candidate defaults.
 
-## Phase TC4: Promotion Readiness
+## Phase TC7: Promotion Readiness
 
 Stage ids:
-- tc4.m1_final_signoff
-- tc4.m2_default_profile_tag
-- tc4.m3_next_phase_handoff
+- tc7.m1_final_signoff
+- tc7.m2_default_profile_tag
+- tc7.m3_next_phase_handoff
 
 Actions:
 - Verify strict/relaxed gate outcomes on newest runs.
@@ -233,30 +294,43 @@ Exit:
 Run this loop continuously until success criteria are met for two consecutive cycles.
 
 ## Cycle Step 0: Recovery parity precheck
-- Run TR0 parity checks against fixed previous-phase cohort before normal consolidation looping.
+- Run TR0 parity checks against fixed previous-phase cohort before entering TC0 baseline phases.
 - If recovery gate fails, continue TR0 clamp iterations and do not enter TC0 yet.
 
-## Cycle Step 1: Baseline lock
-- Lock current env and run protocol.
+## Cycle Step 1: Baseline signal reacquisition
+- Run TC0 stages to restore baseline signal quality.
+- Keep changes constrained to recovery-safe surfaces.
+- Apply TC0.m2+ hold/rollback guardrails before allowing promotion beyond TC0.
+
+## Cycle Step 2: Baseline safety rebalance
+- Run TC1 stages to pull override/intervention pressure back down.
+- Recheck safety and shortest-route integrity after each micro transition.
+
+## Cycle Step 3: Baseline parity certification
+- Run TC2 stages and verify parity hold over matched windows.
+- Certify baseline parity before promotion into lock/sweep flow.
+
+## Cycle Step 4: Baseline lock
+- Run TC3 baseline lock stages and freeze run/gate protocol.
 - Capture newest baseline metrics from recent runs.
 
-## Cycle Step 2: Validation pass
+## Cycle Step 5: Validation pass
 - Run the standard hard/very-hard sequence.
 - Evaluate all core gates and alert bands.
 
-## Cycle Step 3: Drift triage (only if needed)
+## Cycle Step 6: Drift triage (only if needed)
 - If any pressure metric drifts, perform targeted marker triage.
 - Identify exactly one tuning family for the next pass.
 
-## Cycle Step 4: Narrow retune
+## Cycle Step 7: Narrow retune
 - Apply one small change set.
 - Re-run matched validation sequence.
 
-## Cycle Step 5: Keep-or-revert decision
+## Cycle Step 8: Keep-or-revert decision
 - Keep only if pressure improves without safety/stall regression.
 - Otherwise rollback immediately to last clean profile.
 
-## Cycle Step 6: Consolidation check
+## Cycle Step 9: Consolidation check
 - When two consecutive cycles pass all criteria, mark profile as consolidated.
 - Publish final summary, rollback notes, and handoff items.
 

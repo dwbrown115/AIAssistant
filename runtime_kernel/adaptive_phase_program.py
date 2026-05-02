@@ -744,11 +744,13 @@ class AdaptiveKernelPhaseProgram:
             return True
         rows = self._snapshot_phase_rows(payload)
         if not rows:
-            return False
+            phases = payload.get("phases")
+            return isinstance(phases, list) and any((isinstance(row, dict) for row in phases))
         for phase_id in rows.keys():
             if phase_id in self.phase_state:
                 return True
-        return False
+        # Allow cross-plan restore by progress-ratio mapping when IDs no longer match.
+        return True
 
     def restore_snapshot(self, payload: dict[str, object]) -> bool:
         if not isinstance(payload, dict):
@@ -784,24 +786,13 @@ class AdaptiveKernelPhaseProgram:
             except Exception:
                 return float(default)
 
-        snapshot_rows = self._snapshot_phase_rows(payload)
-        phase_rows: dict[str, dict[str, object]] = {
-            phase_id: row
-            for phase_id, row in snapshot_rows.items()
-            if phase_id in self.phase_state
-        }
-
-        if not phase_rows:
-            return False
-
-        for phase_id in self.phase_order:
-            state = self.phase_state[phase_id]
-            row = phase_rows.get(phase_id)
-            if row is None:
-                continue
-            spec = self.phase_spec_by_id[phase_id]
+        def _restore_state_from_row(
+            *,
+            state: AdaptivePhaseRuntime,
+            spec: AdaptivePhaseSpec,
+            row: dict[str, object],
+        ) -> None:
             max_index = max(0, len(spec.micro_stages) - 1)
-
             restored_micro = _as_int(row.get("micro_index", state.micro_index), state.micro_index)
             state.micro_index = max(0, min(restored_micro, max_index))
             state.completed = _as_bool(row.get("completed", state.completed), state.completed)
@@ -822,6 +813,99 @@ class AdaptiveKernelPhaseProgram:
                 self.base_promotion_target,
                 self.promotion_target_hard_max,
             )
+
+        snapshot_rows = self._snapshot_phase_rows(payload)
+        phase_rows: dict[str, dict[str, object]] = {
+            phase_id: row
+            for phase_id, row in snapshot_rows.items()
+            if phase_id in self.phase_state
+        }
+
+        if not phase_rows:
+            payload_rows = [row for row in phases if isinstance(row, dict)]
+            if not payload_rows:
+                return False
+
+            source_completed_micro_total = max(
+                0,
+                _as_int(payload.get("completed_micro_total", 0), 0),
+            )
+            source_total_micro = 0
+            for row in payload_rows:
+                src_micro_index = max(0, _as_int(row.get("micro_index", 0), 0))
+                src_completed = _as_bool(row.get("completed", False), False)
+                source_total_micro += src_micro_index + (1 if src_completed else 0)
+            source_total_micro = max(1, int(source_total_micro))
+
+            if source_completed_micro_total > 0:
+                progress_ratio = _clamp(
+                    float(source_completed_micro_total) / float(source_total_micro),
+                    0.0,
+                    1.0,
+                )
+            else:
+                source_completed_phase_count = max(
+                    0,
+                    _as_int(payload.get("completed_phase_count", 0), 0),
+                )
+                source_phase_count = max(1, len(payload_rows))
+                progress_ratio = _clamp(
+                    float(source_completed_phase_count) / float(source_phase_count),
+                    0.0,
+                    1.0,
+                )
+
+            destination_total_micro = sum(
+                max(1, len(spec.micro_stages)) for spec in self.phase_specs
+            )
+            remaining_completed_micro = max(
+                0,
+                int(round(progress_ratio * float(max(1, destination_total_micro)))),
+            )
+
+            source_last_index = max(0, len(payload_rows) - 1)
+            destination_last_index = max(0, len(self.phase_order) - 1)
+
+            for destination_index, phase_id in enumerate(self.phase_order):
+                state = self.phase_state[phase_id]
+                spec = self.phase_spec_by_id[phase_id]
+                if destination_last_index > 0:
+                    mapped_index = int(
+                        round(
+                            (float(destination_index) / float(destination_last_index))
+                            * float(source_last_index)
+                        )
+                    )
+                else:
+                    mapped_index = 0
+                mapped_index = max(0, min(source_last_index, mapped_index))
+                mapped_row = payload_rows[mapped_index]
+                _restore_state_from_row(state=state, spec=spec, row=mapped_row)
+
+                stage_count = max(1, len(spec.micro_stages))
+                if remaining_completed_micro >= stage_count:
+                    state.completed = True
+                    state.micro_index = max(0, stage_count - 1)
+                    remaining_completed_micro -= stage_count
+                else:
+                    state.completed = False
+                    state.micro_index = max(0, min(remaining_completed_micro, stage_count - 1))
+                    remaining_completed_micro = 0
+
+                state.promotion_target = _clamp(
+                    self.base_promotion_target,
+                    self.base_promotion_target,
+                    self.promotion_target_hard_max,
+                )
+
+        else:
+            for phase_id in self.phase_order:
+                state = self.phase_state[phase_id]
+                row = phase_rows.get(phase_id)
+                if row is None:
+                    continue
+                spec = self.phase_spec_by_id[phase_id]
+                _restore_state_from_row(state=state, spec=spec, row=row)
 
         adaptive_weights = payload.get("adaptive_weights")
         if isinstance(adaptive_weights, dict):
@@ -1257,6 +1341,881 @@ def build_trust_lift_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
     return build_mv_input_transition_phase_specs()
 
 
+def build_tuning_and_consolidation_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+    """Program phases aligned to phase_plans/TUNING_AND_CONSOLIDATION_PHASE_MICRO_PLAN.md."""
+
+    def _stage(
+        stage_id: str,
+        label: str,
+        *,
+        mode: str,
+        module_targets: tuple[str, ...],
+        objective_signals: tuple[str, ...],
+        min_observations: int,
+    ) -> MicroStageSpec:
+        return MicroStageSpec(
+            stage_id=str(stage_id),
+            label=str(label),
+            mode=str(mode),
+            module_targets=tuple(module_targets),
+            objective_signals=tuple(objective_signals),
+            min_observations=max(16, int(min_observations)),
+        )
+
+    shared_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "organism_control",
+        "maze_agent",
+    )
+    retune_targets = shared_targets + ("causal_counterfactual_planner",)
+
+    return (
+        AdaptivePhaseSpec(
+            phase_id="phase_tr0_baseline_parity_recovery",
+            label="Phase TR0 - Baseline Parity Recovery",
+            capability="recover prior stable override/intervention parity before entering consolidation",
+            module_id="tr0_baseline_parity_recovery",
+            micro_stages=(
+                _stage(
+                    "tr0.m1_cohort_anchor_lock",
+                    "TR0.1 Cohort anchor lock",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety", "introspection_gain"),
+                    min_observations=84,
+                ),
+                _stage(
+                    "tr0.m2_override_pressure_clamp",
+                    "TR0.2 Override pressure clamp",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=96,
+                ),
+                _stage(
+                    "tr0.m3_parity_confirmation",
+                    "TR0.3 Parity confirmation",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "transfer", "safety"),
+                    min_observations=108,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc0_baseline_signal_reacquisition",
+            label="Phase TC0 - Baseline Signal Reacquisition",
+            capability="reacquire stable baseline signal quality before formal lock-in",
+            module_id="tc0_baseline_signal_reacquisition",
+            micro_stages=(
+                _stage(
+                    "tc0.m1_baseline_anchor_refresh",
+                    "TC0.1 Baseline anchor refresh",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=88,
+                ),
+                _stage(
+                    "tc0.m2_stability_floor_rebuild",
+                    "TC0.2 Stability floor rebuild",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "tc0.m3_transfer_floor_recheck",
+                    "TC0.3 Transfer floor recheck",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=136,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc1_baseline_safety_rebalance",
+            label="Phase TC1 - Baseline Safety Rebalance",
+            capability="rebalance override pressure and safety gating back to baseline",
+            module_id="tc1_baseline_safety_rebalance",
+            micro_stages=(
+                _stage(
+                    "tc1.m1_override_budget_normalize",
+                    "TC1.1 Override budget normalize",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=144,
+                ),
+                _stage(
+                    "tc1.m2_unresolved_objective_quieting",
+                    "TC1.2 Unresolved objective quieting",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=152,
+                ),
+                _stage(
+                    "tc1.m3_intervention_rate_reduction",
+                    "TC1.3 Intervention rate reduction",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=160,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc2_baseline_parity_certification",
+            label="Phase TC2 - Baseline Parity Certification",
+            capability="certify parity hold before entering consolidation lock workflows",
+            module_id="tc2_baseline_parity_certification",
+            micro_stages=(
+                _stage(
+                    "tc2.m1_parity_gate_probe",
+                    "TC2.1 Parity gate probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=156,
+                ),
+                _stage(
+                    "tc2.m2_parity_hold_verification",
+                    "TC2.2 Parity hold verification",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=168,
+                ),
+                _stage(
+                    "tc2.m3_baseline_certification",
+                    "TC2.3 Baseline certification",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "introspection_gain"),
+                    min_observations=180,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc3_baseline_lock",
+            label="Phase TC3 - Baseline Lock",
+            capability="lock baseline manifest, gate definitions, and seed protocol for comparability",
+            module_id="tc3_baseline_lock",
+            micro_stages=(
+                _stage(
+                    "tc3.m1_baseline_manifest",
+                    "TC3.1 Baseline manifest",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=80,
+                ),
+                _stage(
+                    "tc3.m2_metric_gate_lock",
+                    "TC3.2 Metric gate lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=92,
+                ),
+                _stage(
+                    "tc3.m3_seed_protocol_lock",
+                    "TC3.3 Seed protocol lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "transfer", "introspection_gain"),
+                    min_observations=104,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc4_stabilization_sweep",
+            label="Phase TC4 - Stabilization Sweep",
+            capability="verify repeatability while monitoring pressure drift and triaging regressions",
+            module_id="tc4_stabilization_sweep",
+            micro_stages=(
+                _stage(
+                    "tc4.m1_repeatability_check",
+                    "TC4.1 Repeatability check",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=112,
+                ),
+                _stage(
+                    "tc4.m2_pressure_watch",
+                    "TC4.2 Pressure watch",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=124,
+                ),
+                _stage(
+                    "tc4.m3_regression_triage",
+                    "TC4.3 Regression triage",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "introspection_gain", "safety"),
+                    min_observations=136,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc5_narrow_retuning",
+            label="Phase TC5 - Narrow Retuning",
+            capability="retune one constrained knob family at a time under matched comparisons",
+            module_id="tc5_narrow_retuning",
+            micro_stages=(
+                _stage(
+                    "tc5.m1_objective_pressure_retune",
+                    "TC5.1 Objective pressure retune",
+                    mode="control_integrate",
+                    module_targets=retune_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "tc5.m2_verification_margin_retune",
+                    "TC5.2 Verification margin retune",
+                    mode="control_integrate",
+                    module_targets=retune_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=140,
+                ),
+                _stage(
+                    "tc5.m3_guard_margin_retune",
+                    "TC5.3 Guard margin retune",
+                    mode="control_integrate",
+                    module_targets=retune_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=152,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc6_consolidation_hardening",
+            label="Phase TC6 - Consolidation Hardening",
+            capability="confirm multi-batch stability and keep rollback readiness hot",
+            module_id="tc6_consolidation_hardening",
+            micro_stages=(
+                _stage(
+                    "tc6.m1_multi_batch_confirmation",
+                    "TC6.1 Multi-batch confirmation",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=144,
+                ),
+                _stage(
+                    "tc6.m2_report_unification",
+                    "TC6.2 Report unification",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "introspection_gain", "transfer"),
+                    min_observations=156,
+                ),
+                _stage(
+                    "tc6.m3_rollback_readiness",
+                    "TC6.3 Rollback readiness",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=168,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_tc7_promotion_readiness",
+            label="Phase TC7 - Promotion Readiness",
+            capability="final signoff and stable baseline tagging for next-phase handoff",
+            module_id="tc7_promotion_readiness",
+            micro_stages=(
+                _stage(
+                    "tc7.m1_final_signoff",
+                    "TC7.1 Final signoff",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=160,
+                ),
+                _stage(
+                    "tc7.m2_default_profile_tag",
+                    "TC7.2 Default profile tag",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "introspection_gain", "stability"),
+                    min_observations=172,
+                ),
+                _stage(
+                    "tc7.m3_next_phase_handoff",
+                    "TC7.3 Next-phase handoff",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "transfer", "introspection_gain"),
+                    min_observations=184,
+                ),
+            ),
+        ),
+    )
+
+
+def build_wb_endstate_stabilization_recovery_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+    """Program phases aligned to phase_plans/WB_ENDSTATE_STABILIZATION_RECOVERY_PLAN_V1.md."""
+
+    def _stage(
+        stage_id: str,
+        label: str,
+        *,
+        mode: str,
+        module_targets: tuple[str, ...],
+        objective_signals: tuple[str, ...],
+        min_observations: int,
+    ) -> MicroStageSpec:
+        return MicroStageSpec(
+            stage_id=str(stage_id),
+            label=str(label),
+            mode=str(mode),
+            module_targets=tuple(module_targets),
+            objective_signals=tuple(objective_signals),
+            min_observations=max(16, int(min_observations)),
+        )
+
+    shared_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "organism_control",
+        "maze_agent",
+    )
+
+    return (
+        AdaptivePhaseSpec(
+            phase_id="phase_rs0_recovery_lock_and_evidence_freeze",
+            label="Phase RS0 - Recovery Lock and Evidence Freeze",
+            capability="freeze run recipe and metrics contract before stabilization actions",
+            module_id="rs0_recovery_lock_and_evidence_freeze",
+            micro_stages=(
+                _stage(
+                    "rs0.m1_recipe_lock",
+                    "RS0.1 Recipe lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "introspection_gain"),
+                    min_observations=64,
+                ),
+                _stage(
+                    "rs0.m2_metric_contract_lock",
+                    "RS0.2 Metric contract lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability"),
+                    min_observations=72,
+                ),
+                _stage(
+                    "rs0.m3_baseline_snapshot_lock",
+                    "RS0.3 Baseline snapshot lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=80,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs1_unresolved_wait_pressure_stabilization",
+            label="Phase RS1 - Unresolved Wait Pressure Stabilization",
+            capability="reduce unresolved verification waiting pressure to recovery-safe levels",
+            module_id="rs1_unresolved_wait_pressure_stabilization",
+            micro_stages=(
+                _stage(
+                    "rs1.m1_wait_source_bucketing",
+                    "RS1.1 Wait source bucketing",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=88,
+                ),
+                _stage(
+                    "rs1.m2_objective_wait_suppression",
+                    "RS1.2 Objective wait suppression",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=96,
+                ),
+                _stage(
+                    "rs1.m3_wait_recheck_hold",
+                    "RS1.3 Wait recheck hold",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=104,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs2_guard_override_normalization",
+            label="Phase RS2 - Guard Override Normalization",
+            capability="normalize override pressure while preserving non-bypassable safety veto pathways",
+            module_id="rs2_guard_override_normalization",
+            micro_stages=(
+                _stage(
+                    "rs2.m1_override_reason_partition",
+                    "RS2.1 Override reason partition",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "introspection_gain"),
+                    min_observations=104,
+                ),
+                _stage(
+                    "rs2.m2_override_budget_rebalance",
+                    "RS2.2 Override budget rebalance",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=112,
+                ),
+                _stage(
+                    "rs2.m3_override_floor_recheck",
+                    "RS2.3 Override floor recheck",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=120,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs3_beam_anchor_and_objective_gate_coherence",
+            label="Phase RS3 - Beam Anchor and Objective Gate Coherence",
+            capability="restore anchor and objective-gate coherence before cutover rehearsal",
+            module_id="rs3_beam_anchor_and_objective_gate_coherence",
+            micro_stages=(
+                _stage(
+                    "rs3.m1_anchor_reason_audit",
+                    "RS3.1 Anchor reason audit",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "introspection_gain"),
+                    min_observations=112,
+                ),
+                _stage(
+                    "rs3.m2_not_recent_suppression_control",
+                    "RS3.2 Not-recent suppression control",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=120,
+                ),
+                _stage(
+                    "rs3.m3_gate_reason_normalization",
+                    "RS3.3 Gate reason normalization",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=128,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs4_stability_hold_and_variance_compression",
+            label="Phase RS4 - Stability Hold and Variance Compression",
+            capability="hold stabilized settings and compress variance before WB6-WB8 rehearsal",
+            module_id="rs4_stability_hold_and_variance_compression",
+            micro_stages=(
+                _stage(
+                    "rs4.m1_consecutive_pass_hold",
+                    "RS4.1 Consecutive pass hold",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "safety"),
+                    min_observations=120,
+                ),
+                _stage(
+                    "rs4.m2_variance_band_check",
+                    "RS4.2 Variance band check",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "rs4.m3_regression_tripwire_check",
+                    "RS4.3 Regression tripwire check",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "introspection_gain"),
+                    min_observations=136,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs5_wb6_wb8_readiness_rehearsal",
+            label="Phase RS5 - WB6-WB8 Readiness Rehearsal",
+            capability="rehearse attenuation, shadow disagreement, and cutover guards before endstate recertification",
+            module_id="rs5_wb6_wb8_readiness_rehearsal",
+            micro_stages=(
+                _stage(
+                    "rs5.m1_attenuation_readiness_probe",
+                    "RS5.1 Attenuation readiness probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "rs5.m2_shadow_disagreement_probe",
+                    "RS5.2 Shadow disagreement probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=136,
+                ),
+                _stage(
+                    "rs5.m3_cutover_guard_probe",
+                    "RS5.3 Cutover guard probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=144,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs6_endstate_recertification_and_handoff",
+            label="Phase RS6 - Endstate Recertification and Handoff",
+            capability="recertify U08 contract surfaces and publish exact WB resume decision",
+            module_id="rs6_endstate_recertification_and_handoff",
+            micro_stages=(
+                _stage(
+                    "rs6.m1_u08_contract_recheck",
+                    "RS6.1 U08 contract recheck",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=136,
+                ),
+                _stage(
+                    "rs6.m2_resume_point_confirm",
+                    "RS6.2 Resume point confirm",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "transfer", "introspection_gain"),
+                    min_observations=144,
+                ),
+                _stage(
+                    "rs6.m3_handoff_publish",
+                    "RS6.3 Handoff publish",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "introspection_gain"),
+                    min_observations=152,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs7_full_beam_decoupled_cutover_confirmation",
+            label="Phase RS7 - Full Beam-Decoupled Cutover Confirmation",
+            capability="confirm stable MV-only cutover with beam fully decoupled from routine live policy authority",
+            module_id="rs7_full_beam_decoupled_cutover_confirmation",
+            micro_stages=(
+                _stage(
+                    "rs7.m1_decoupled_profile_apply",
+                    "RS7.1 Decoupled profile apply",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=148,
+                ),
+                _stage(
+                    "rs7.m2_decoupled_window_validation",
+                    "RS7.2 Decoupled window validation",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=156,
+                ),
+                _stage(
+                    "rs7.m3_decoupled_handoff_freeze",
+                    "RS7.3 Decoupled handoff freeze",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer", "introspection_gain"),
+                    min_observations=164,
+                ),
+            ),
+        ),
+    )
+
+
+def build_rs_post_recovery_stability_lock_mini_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
+    """Expanded post-recovery lock progression aligned with RS_POST_RECOVERY_STABILITY_LOCK_MINI_PHASE_PLAN_V1."""
+
+    def _stage(
+        stage_id: str,
+        label: str,
+        *,
+        mode: str,
+        module_targets: tuple[str, ...],
+        objective_signals: tuple[str, ...],
+        min_observations: int,
+    ) -> MicroStageSpec:
+        return MicroStageSpec(
+            stage_id=str(stage_id),
+            label=str(label),
+            mode=str(mode),
+            module_targets=tuple(module_targets),
+            objective_signals=tuple(objective_signals),
+            min_observations=max(16, int(min_observations)),
+        )
+
+    shared_targets = (
+        "governance_orchestrator",
+        "parallel_reasoning_engine",
+        "adaptive_controller",
+        "learned_autonomy_controller",
+        "organism_control",
+        "maze_agent",
+    )
+
+    # Keep the terminal end-state phase/stages unchanged for cutover continuity.
+    endstate_phase = build_wb_endstate_stabilization_recovery_phase_specs()[-1]
+
+    return (
+        AdaptivePhaseSpec(
+            phase_id="phase_rs0_recovery_lock_and_evidence_freeze",
+            label="Phase RS0 - Recovery Lock and Evidence Freeze",
+            capability="freeze recipe and metrics before short stabilization lock windows",
+            module_id="rs0_recovery_lock_and_evidence_freeze",
+            micro_stages=(
+                _stage(
+                    "rs0.m1_recipe_lock",
+                    "RS0.1 Recipe lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "introspection_gain"),
+                    min_observations=64,
+                ),
+                _stage(
+                    "rs0.m2_metric_contract_lock",
+                    "RS0.2 Metric contract lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability"),
+                    min_observations=72,
+                ),
+                _stage(
+                    "rs0.m3_baseline_snapshot_lock",
+                    "RS0.3 Baseline snapshot lock",
+                    mode="integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=80,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs1_guard_override_stability_lock",
+            label="Phase RS1 - Guard Override Stability Lock",
+            capability="stabilize guard override pressure and cap volatility spikes",
+            module_id="rs1_guard_override_stability_lock",
+            micro_stages=(
+                _stage(
+                    "rs1.m1_guard_budget_normalization",
+                    "RS1.1 Guard budget normalization",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=88,
+                ),
+                _stage(
+                    "rs1.m2_guard_spike_cap_enforcement",
+                    "RS1.2 Guard spike-cap enforcement",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=96,
+                ),
+                _stage(
+                    "rs1.m3_guard_window_hold",
+                    "RS1.3 Guard window hold",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=104,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs2_unresolved_objective_stability_lock",
+            label="Phase RS2 - Unresolved Objective Stability Lock",
+            capability="suppress unresolved objective overrides while preserving safety gates",
+            module_id="rs2_unresolved_objective_stability_lock",
+            micro_stages=(
+                _stage(
+                    "rs2.m1_unresolved_objective_suppression",
+                    "RS2.1 Unresolved objective suppression",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=96,
+                ),
+                _stage(
+                    "rs2.m2_unresolved_override_floor_recheck",
+                    "RS2.2 Unresolved override floor recheck",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=104,
+                ),
+                _stage(
+                    "rs2.m3_unresolved_window_hold",
+                    "RS2.3 Unresolved window hold",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=112,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs3_warning_free_hard_window_lock",
+            label="Phase RS3 - Warning-Free Hard-Window Lock",
+            capability="require three consecutive warning-free hard windows before handoff",
+            module_id="rs3_warning_free_hard_window_lock",
+            micro_stages=(
+                _stage(
+                    "rs3.m1_warning_free_window_1",
+                    "RS3.1 Warning-free hard window 1",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=112,
+                ),
+                _stage(
+                    "rs3.m2_warning_free_window_2",
+                    "RS3.2 Warning-free hard window 2",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=120,
+                ),
+                _stage(
+                    "rs3.m3_warning_free_window_3",
+                    "RS3.3 Warning-free hard window 3",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer", "introspection_gain"),
+                    min_observations=128,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs4_stability_hold_and_variance_compression",
+            label="Phase RS4 - Stability Hold and Variance Compression",
+            capability="hold warning-free behavior and compress variance before readiness rehearsal",
+            module_id="rs4_stability_hold_and_variance_compression",
+            micro_stages=(
+                _stage(
+                    "rs4.m1_consecutive_pass_hold",
+                    "RS4.1 Consecutive pass hold",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=120,
+                ),
+                _stage(
+                    "rs4.m2_variance_band_check",
+                    "RS4.2 Variance band check",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "stability", "transfer"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "rs4.m3_regression_tripwire_check",
+                    "RS4.3 Regression tripwire check",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "introspection_gain"),
+                    min_observations=136,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs5_wb6_wb8_readiness_rehearsal",
+            label="Phase RS5 - WB6-WB8 Readiness Rehearsal",
+            capability="rehearse attenuation and cutover guard behavior before recertification",
+            module_id="rs5_wb6_wb8_readiness_rehearsal",
+            micro_stages=(
+                _stage(
+                    "rs5.m1_attenuation_readiness_probe",
+                    "RS5.1 Attenuation readiness probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=128,
+                ),
+                _stage(
+                    "rs5.m2_shadow_disagreement_probe",
+                    "RS5.2 Shadow disagreement probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "transfer"),
+                    min_observations=136,
+                ),
+                _stage(
+                    "rs5.m3_cutover_guard_probe",
+                    "RS5.3 Cutover guard probe",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "transfer"),
+                    min_observations=144,
+                ),
+            ),
+        ),
+        AdaptivePhaseSpec(
+            phase_id="phase_rs6_endstate_recertification_and_handoff",
+            label="Phase RS6 - Endstate Recertification and Handoff",
+            capability="recertify lock outcomes and publish RS7 handoff decision",
+            module_id="rs6_endstate_recertification_and_handoff",
+            micro_stages=(
+                _stage(
+                    "rs6.m1_u08_contract_recheck",
+                    "RS6.1 U08 contract recheck",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability"),
+                    min_observations=136,
+                ),
+                _stage(
+                    "rs6.m2_resume_point_confirm",
+                    "RS6.2 Resume point confirm",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "transfer", "introspection_gain"),
+                    min_observations=144,
+                ),
+                _stage(
+                    "rs6.m3_handoff_publish",
+                    "RS6.3 Handoff publish",
+                    mode="control_integrate",
+                    module_targets=shared_targets,
+                    objective_signals=("integration_quality", "safety", "stability", "introspection_gain"),
+                    min_observations=152,
+                ),
+            ),
+        ),
+        endstate_phase,
+    )
+
+
 def build_default_kernel_phase_specs() -> tuple[AdaptivePhaseSpec, ...]:
-    """Compatibility alias kept for existing callers in the runtime bootstrap path."""
-    return build_mv_input_transition_phase_specs()
+    """Default runtime progression for expanded RS post-recovery lock with RS7 end-state continuity."""
+    return build_rs_post_recovery_stability_lock_mini_phase_specs()

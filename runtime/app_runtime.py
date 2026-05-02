@@ -388,15 +388,17 @@ class AIAssistantApp:
         self.status_var = tk.StringVar(value='Ready')
         self.score_var = tk.StringVar(value='Targets reached: 0')
         self.micro_progress_header_var = tk.StringVar(value='Phase --/-- | Micro --/--')
-        self.kernel_phase_program_status_var = tk.StringVar(value='MV beam-woven phase program: disabled')
-        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
+        self.kernel_phase_program_status_var = tk.StringVar(value='RS post-recovery stability lock phase program: disabled')
+        self.kernel_phase_program_owner_var = tk.StringVar(value='Progression owner: kernel runtime integration (RS Post-Recovery Stability Lock Mini Phase Plan V1)')
         self.kernel_phase_program_current_var = tk.StringVar(value='Current: --')
         self.kernel_phase_program_details_var = tk.StringVar(value='Stage: --')
         self.kernel_phase_program_modules_var = tk.StringVar(value='Module targets: --')
+        self.kernel_phase_ui_controls_enable = os.getenv('KERNEL_PHASE_UI_CONTROLS_ENABLE', '1') == '1'
         self.kernel_phase_autostep_var = tk.BooleanVar(value=False)
         self.kernel_phase_observation_floor_text_var = tk.StringVar(value='')
         self.kernel_phase_toggle_vars: dict[str, tk.BooleanVar] = {}
         self.kernel_phase_toggle_buttons: dict[str, tk.Checkbutton] = {}
+        self.kernel_phase_row_labels: dict[str, tk.Label] = {}
         self.kernel_phase_advance_micro_button = None
         self.kernel_phase_regress_micro_button = None
         self.kernel_phase_advance_phase_button = None
@@ -686,7 +688,7 @@ class AIAssistantApp:
         self.machine_vision_kernel_hint_enable = bool(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_HINT_ENABLE'])
         self.machine_vision_kernel_hint_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_HINT_MIN_CONF'])))
         self.machine_vision_kernel_exit_bias_weight = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_KERNEL_EXIT_BIAS_WEIGHT']))
-        self.mv_routing_deprecated = True
+        self.mv_routing_deprecated = False
         self.mv_bootstrap_route_requested = os.getenv('MV_BOOTSTRAP_ROUTE_ENABLE', '1') == '1'
         self.mv_bootstrap_route_enable = False
         self.mv_bootstrap_self_min_conf = min(1.0, max(0.0, float(os.getenv('MV_BOOTSTRAP_SELF_MIN_CONF', '0.9'))))
@@ -713,8 +715,11 @@ class AIAssistantApp:
         self.machine_vision_cellmap_kernel_min_conf = min(1.0, max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_MIN_CONF'])))
         self.machine_vision_cellmap_kernel_bias_weight = max(0.0, float(_WAVE7_PERCEPTION_ENDOCRINE_DEFAULTS['MACHINE_VISION_CELLMAP_KERNEL_BIAS_WEIGHT']))
         self.mv_route_planning_mode_requested = os.getenv('MV_ROUTE_PLANNING_MODE_ENABLE', '0') == '1'
-        self.mv_route_planning_mode_enable = False
-        self.mv_route_planning_mode_var = tk.BooleanVar(value=False)
+        self.mv_route_planning_mode_enable = bool(self.mv_route_planning_mode_requested)
+        self.mv_route_planning_mode_var = tk.BooleanVar(value=bool(self.mv_route_planning_mode_enable))
+        self.machine_vision_cellmap_kernel_relaxed_enable = os.getenv('MACHINE_VISION_CELLMAP_KERNEL_RELAXED_ENABLE', '1') == '1'
+        self.machine_vision_cellmap_kernel_relaxed_min_accuracy = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_KERNEL_RELAXED_MIN_ACCURACY', '0.55'))))
+        self.machine_vision_cellmap_kernel_relaxed_min_confident_ratio = min(1.0, max(0.0, float(os.getenv('MACHINE_VISION_CELLMAP_KERNEL_RELAXED_MIN_CONFIDENT_RATIO', '0.55'))))
         self.mv_primary_mode_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_PRIMARY_MODE_ENABLE']) == '1'
         self.mv_confidence_trust_threshold = min(1.0, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_CONFIDENCE_TRUST_THRESHOLD']))))
         self.mv_facts_fit_required = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_FACTS_FIT_REQUIRED']) == '1'
@@ -746,10 +751,11 @@ class AIAssistantApp:
         self.mv_only_emergency_fallback_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS['MV_ONLY_EMERGENCY_FALLBACK_ENABLE']) == '1'
         self.mv_beam_integration_mode = self._normalize_mv_beam_integration_mode(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_INTEGRATION_MODE', 'woven')))
         self.mv_beam_integration_recent_exit_steps = max(0, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_INTEGRATION_RECENT_EXIT_STEPS', '64'))))
+        self.mv_tc0m2_plus_recent_exit_steps = max(self.mv_beam_integration_recent_exit_steps, int(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_TC0M2_PLUS_RECENT_EXIT_STEPS', '96'))))
         self.mv_beam_equivalent_stage_taper_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_EQUIVALENT_STAGE_TAPER_ENABLE', '1')) == '1'
-        self.mv_beam_retirement_stage_prefix = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_RETIREMENT_STAGE_PREFIX', 'wb6.') or '').strip().lower()
+        self.mv_beam_retirement_stage_prefix = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_RETIREMENT_STAGE_PREFIX', 'rs7.') or '').strip().lower()
         self.mv_objective_mv_gate_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_ENABLE', '1')) == '1'
-        self.mv_objective_mv_gate_stage_prefix = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_STAGE_PREFIX', 'wb1.') or '').strip().lower()
+        self.mv_objective_mv_gate_stage_prefix = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_STAGE_PREFIX', 'rs0.') or '').strip().lower()
         self.mv_objective_mv_gate_allow_low_conf_probe = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_OBJECTIVE_MV_GATE_ALLOW_LOW_CONF_PROBE', '1')) == '1'
         self.mv_beam_blackout_enable = str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_ENABLE', '0')) == '1'
         self.mv_beam_blackout_rate = min(0.5, max(0.0, float(str(_WAVE8_MAZE_POLICY_DEFAULTS.get('MV_BEAM_BLACKOUT_RATE', '0.05')))))
@@ -1745,6 +1751,31 @@ class AIAssistantApp:
         active_stage = str(stage_id or self._kernel_phase_active_stage_id() or '').strip().lower()
         return bool(active_stage and active_stage.startswith(prefix_token))
 
+    def _kernel_phase_tc0_m2_or_later_active(self, *, stage_id: str='') -> bool:
+        active_stage = str(stage_id or self._kernel_phase_active_stage_id() or '').strip().lower()
+        if not active_stage.startswith(('tc', 'rs')):
+            return False
+        stage_head = active_stage.split('_', 1)[0]
+        if '.m' not in stage_head:
+            return False
+        phase_token, micro_token = stage_head.split('.m', 1)
+        if not phase_token.startswith(('tc', 'rs')):
+            return False
+        try:
+            phase_index = int(phase_token[2:])
+            micro_index = int(micro_token or '0')
+        except Exception:
+            return False
+        if phase_index > 0:
+            return True
+        return bool((phase_index == 0) and (micro_index >= 2))
+
+    def _mv_beam_recent_exit_steps_effective(self, *, stage_id: str='') -> int:
+        base_steps = max(0, int(self.mv_beam_integration_recent_exit_steps))
+        if self._kernel_phase_tc0_m2_or_later_active(stage_id=stage_id):
+            return max(base_steps, int(self.mv_tc0m2_plus_recent_exit_steps))
+        return base_steps
+
     def _mv_objective_mv_gate_active(self, *, stage_id: str='') -> bool:
         if not self.mv_objective_mv_gate_enable:
             return False
@@ -1756,16 +1787,18 @@ class AIAssistantApp:
             return 'legacy'
         return 'woven'
 
-    def _mv_beam_anchor_ready(self, *, exit_visible_now: bool, target_known_in_episode: bool) -> tuple[bool, str]:
+    def _mv_beam_anchor_ready(self, *, exit_visible_now: bool, target_known_in_episode: bool, stage_id: str='') -> tuple[bool, str]:
         if self.mv_beam_integration_mode == 'legacy':
             return (True, 'legacy')
+        if self._mv_full_map_cutover_active(stage_id=stage_id):
+            return (False, 'beam_disabled_full_mv')
         if exit_visible_now:
             return (True, 'beam_visible')
         if self.spatial_memory_enable and self.spatial_exit_recall_enable:
             last_seen_step = int(getattr(self, 'spatial_exit_last_seen_step', -10000) or -10000)
             if last_seen_step >= 0:
                 age = max(0, int(self.memory_step_index) - last_seen_step)
-                if age <= int(self.mv_beam_integration_recent_exit_steps):
+                if age <= int(self._mv_beam_recent_exit_steps_effective(stage_id=stage_id)):
                     return (True, f'beam_recent:{age}')
             return (False, 'beam_not_recent')
         if target_known_in_episode:
@@ -1796,39 +1829,39 @@ class AIAssistantApp:
 
     def _mv_perturbation_stage_profile(self, *, stage_id: str='') -> dict[str, object]:
         stage_token = str(stage_id or self._kernel_phase_active_stage_id() or '').strip().lower()
-        is_wb5 = stage_token.startswith('wb5.')
+        is_wb5_or_tc5 = stage_token.startswith('wb5.') or stage_token.startswith('tc5.')
         blackout_rate = float(self.mv_beam_blackout_rate)
         blackout_burst_max = int(self.mv_beam_blackout_burst_max_steps)
         blackout_cooldown = int(self.mv_beam_blackout_cooldown_steps)
         beam_contradiction_rate = float(self.mv_beam_contradiction_rate)
         mv_contradiction_rate = float(self.mv_mv_contradiction_rate)
         mv_contradiction_enabled = False
-        if stage_token.startswith('wb5.m2_'):
+        if stage_token.startswith(('wb5.m2_', 'tc5.m2_')):
             blackout_rate = min(0.12, max(0.08, blackout_rate))
             blackout_burst_max = max(5, blackout_burst_max)
-        elif stage_token.startswith('wb5.m3_'):
+        elif stage_token.startswith(('wb5.m3_', 'tc5.m3_')):
             blackout_rate = min(0.10, max(0.05, blackout_rate))
             blackout_burst_max = max(3, min(5, blackout_burst_max))
-        if stage_token.startswith('wb5.m1_'):
+        if stage_token.startswith(('wb5.m1_', 'tc5.m1_')):
             beam_contradiction_rate = min(0.05, max(0.0, beam_contradiction_rate))
             mv_contradiction_enabled = False
-        elif stage_token.startswith('wb5.m2_'):
+        elif stage_token.startswith(('wb5.m2_', 'tc5.m2_')):
             beam_contradiction_rate = min(0.05, max(0.03, beam_contradiction_rate))
             mv_contradiction_enabled = bool(self.mv_mv_contradiction_inject_enable)
             mv_contradiction_rate = min(0.02, max(0.0, mv_contradiction_rate))
-        elif stage_token.startswith('wb5.m3_'):
+        elif stage_token.startswith(('wb5.m3_', 'tc5.m3_')):
             beam_contradiction_rate = min(0.05, max(0.03, beam_contradiction_rate))
             mv_contradiction_enabled = bool(self.mv_mv_contradiction_inject_enable)
             mv_contradiction_rate = min(0.03, max(0.0, mv_contradiction_rate))
         return {
             'stage_id': stage_token,
-            'blackout_enabled': bool(is_wb5 and self.mv_beam_blackout_enable),
+            'blackout_enabled': bool(is_wb5_or_tc5 and self.mv_beam_blackout_enable),
             'blackout_rate': float(max(0.0, min(0.5, blackout_rate))),
             'blackout_burst_max': int(max(1, min(16, blackout_burst_max))),
             'blackout_cooldown': int(max(0, min(120, blackout_cooldown))),
-            'beam_contradiction_enabled': bool(is_wb5 and self.mv_beam_contradiction_inject_enable),
+            'beam_contradiction_enabled': bool(is_wb5_or_tc5 and self.mv_beam_contradiction_inject_enable),
             'beam_contradiction_rate': float(max(0.0, min(0.5, beam_contradiction_rate))),
-            'mv_contradiction_enabled': bool(is_wb5 and mv_contradiction_enabled),
+            'mv_contradiction_enabled': bool(is_wb5_or_tc5 and mv_contradiction_enabled),
             'mv_contradiction_rate': float(max(0.0, min(0.5, mv_contradiction_rate))),
         }
 
@@ -1861,6 +1894,31 @@ class AIAssistantApp:
         cache = dict(getattr(self, '_mv_perturbation_step_cache', {}) or {})
         if cache and int(cache.get('step_index', -99999)) == step_index and str(cache.get('stage_id', '')) == stage_token:
             return cache
+        if self._mv_full_map_cutover_active(stage_id=stage_token):
+            window_key = (str(stage_token), int(getattr(self, 'current_maze_episode_id', -1) or -1))
+            self._mv_perturbation_window_key = window_key
+            self._mv_perturbation_window_beam_blackout_events = 0
+            self._mv_perturbation_window_contradiction_events = 0
+            self._mv_beam_blackout_remaining_steps = 0
+            self._mv_beam_blackout_cooldown_remaining = 0
+            context = {
+                'step_index': int(step_index),
+                'stage_id': str(stage_token),
+                'beam_blackout_active': False,
+                'beam_contradiction_active': False,
+                'mv_contradiction_active': False,
+                'beam_visibility_flip': False,
+                'beam_credit_mode': 'disabled',
+                'perturbation_active': 0,
+                'perturbation_type': 'none',
+                'beam_blackout_seed': int(self.mv_beam_blackout_seed),
+                'contradiction_seed': int(self.mv_contradiction_seed),
+                'window_key': f'{window_key[0]}::{window_key[1]}',
+                'window_blackout_events': 0,
+                'window_contradiction_events': 0,
+            }
+            self._mv_perturbation_step_cache = dict(context)
+            return context
         profile = self._mv_perturbation_stage_profile(stage_id=stage_token)
         window_key = (str(stage_token), int(getattr(self, 'current_maze_episode_id', -1) or -1))
         if window_key != getattr(self, '_mv_perturbation_window_key', None):
@@ -2031,7 +2089,7 @@ class AIAssistantApp:
     def _build_kernel_phase_toggle_panel(self, parent: tk.Widget) -> None:
         if not hasattr(self, 'kernel_phase_program_status_var'):
             return
-        panel = tk.LabelFrame(parent, text='MV Beam-Woven Progression (WB V2)', padx=6, pady=4)
+        panel = tk.LabelFrame(parent, text='RS Post-Recovery Stability Lock Progression', padx=6, pady=4)
         panel.pack(fill=tk.X, pady=(0, 6))
         self.kernel_phase_program_panel = panel
         tk.Label(panel, textvariable=self.kernel_phase_program_status_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
@@ -2039,9 +2097,10 @@ class AIAssistantApp:
         tk.Label(panel, textvariable=self.kernel_phase_program_current_var, anchor='w', justify=tk.LEFT).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
         tk.Label(panel, textvariable=self.kernel_phase_program_details_var, anchor='w', justify=tk.LEFT, wraplength=560).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
         tk.Label(panel, textvariable=self.kernel_phase_program_modules_var, anchor='w', justify=tk.LEFT, wraplength=560).pack(fill=tk.X, padx=(0, 2), pady=(0, 4))
+        controls_enabled = bool(getattr(self, 'kernel_phase_ui_controls_enable', False))
         controls_row = tk.Frame(panel)
         controls_row.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(controls_row, text='Manual override').pack(side=tk.LEFT)
+        tk.Label(controls_row, text=('Manual override' if controls_enabled else 'Manual override (disabled)')).pack(side=tk.LEFT)
         self.kernel_phase_regress_phase_button = tk.Button(controls_row, text='Phase -', command=self._on_kernel_phase_regress_phase)
         self.kernel_phase_regress_phase_button.pack(side=tk.LEFT, padx=(8, 4))
         self.kernel_phase_advance_phase_button = tk.Button(controls_row, text='Phase +', command=self._on_kernel_phase_advance_phase)
@@ -2052,7 +2111,7 @@ class AIAssistantApp:
         self.kernel_phase_advance_micro_button.pack(side=tk.LEFT)
         runtime_row = tk.Frame(panel)
         runtime_row.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(runtime_row, text='Runtime override').pack(side=tk.LEFT)
+        tk.Label(runtime_row, text=('Runtime override' if controls_enabled else 'Runtime override (disabled)')).pack(side=tk.LEFT)
         self.kernel_phase_autostep_checkbutton = tk.Checkbutton(runtime_row, text='Autostep override', variable=self.kernel_phase_autostep_var, command=self._on_kernel_phase_autostep_toggle)
         self.kernel_phase_autostep_checkbutton.pack(side=tk.LEFT, padx=(8, 8))
         tk.Label(runtime_row, text='Obs floor override').pack(side=tk.LEFT)
@@ -2060,6 +2119,14 @@ class AIAssistantApp:
         self.kernel_phase_observation_floor_entry.pack(side=tk.LEFT, padx=(4, 4))
         self.kernel_phase_observation_floor_apply_button = tk.Button(runtime_row, text='Apply', command=self._on_kernel_phase_observation_floor_apply)
         self.kernel_phase_observation_floor_apply_button.pack(side=tk.LEFT)
+        if not controls_enabled:
+            self.kernel_phase_regress_phase_button.config(state=tk.DISABLED)
+            self.kernel_phase_advance_phase_button.config(state=tk.DISABLED)
+            self.kernel_phase_regress_micro_button.config(state=tk.DISABLED)
+            self.kernel_phase_advance_micro_button.config(state=tk.DISABLED)
+            self.kernel_phase_autostep_checkbutton.config(state=tk.DISABLED)
+            self.kernel_phase_observation_floor_entry.config(state=tk.DISABLED)
+            self.kernel_phase_observation_floor_apply_button.config(state=tk.DISABLED)
         toggle_container = tk.Frame(panel)
         toggle_container.pack(fill=tk.BOTH, expand=True)
         toggle_canvas = tk.Canvas(toggle_container, height=176, highlightthickness=0, borderwidth=0)
@@ -2072,6 +2139,7 @@ class AIAssistantApp:
 
         self.kernel_phase_toggle_vars = {}
         self.kernel_phase_toggle_buttons = {}
+        self.kernel_phase_row_labels = {}
 
         def _sync_toggle_canvas_layout(_event: tk.Event | None = None) -> None:
             try:
@@ -2079,8 +2147,8 @@ class AIAssistantApp:
                 toggle_canvas.itemconfigure(toggle_window_id, width=width)
                 toggle_canvas.configure(scrollregion=toggle_canvas.bbox('all'))
                 wraplength = max(180, width - 26)
-                for button in self.kernel_phase_toggle_buttons.values():
-                    button.config(wraplength=wraplength, justify=tk.LEFT)
+                for row_label in self.kernel_phase_row_labels.values():
+                    row_label.config(wraplength=wraplength, justify=tk.LEFT)
             except Exception:
                 pass
 
@@ -2088,9 +2156,9 @@ class AIAssistantApp:
         toggle_canvas.bind('<Configure>', _sync_toggle_canvas_layout)
 
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            tk.Label(toggle_grid, text='MV beam-woven phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
-            self.kernel_phase_program_status_var.set('MV beam-woven phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
+            tk.Label(toggle_grid, text='RS post-recovery stability lock phase program disabled', anchor='w', justify=tk.LEFT).pack(fill=tk.X)
+            self.kernel_phase_program_status_var.set('RS post-recovery stability lock phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (RS Post-Recovery Stability Lock Mini Phase Plan V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -2098,12 +2166,9 @@ class AIAssistantApp:
         toggle_grid.grid_columnconfigure(0, weight=1)
         for idx, spec in enumerate(self.kernel_phase_specs):
             phase_id = str(spec.phase_id)
-            is_enabled = phase_id not in set(self.kernel_phase_disable_list)
-            var = tk.BooleanVar(value=is_enabled)
-            self.kernel_phase_toggle_vars[phase_id] = var
-            button = tk.Checkbutton(toggle_grid, text=str(spec.label), variable=var, anchor='w', justify=tk.LEFT, command=lambda pid=phase_id: self._on_kernel_phase_toggle(pid))
-            button.grid(row=idx, column=0, sticky='ew', padx=(0, 8), pady=(0, 3))
-            self.kernel_phase_toggle_buttons[phase_id] = button
+            row_label = tk.Label(toggle_grid, text=str(spec.label), anchor='w', justify=tk.LEFT)
+            row_label.grid(row=idx, column=0, sticky='ew', padx=(0, 8), pady=(0, 3))
+            self.kernel_phase_row_labels[phase_id] = row_label
         _sync_toggle_canvas_layout()
         self._refresh_kernel_phase_toggle_controls()
 
@@ -2146,24 +2211,25 @@ class AIAssistantApp:
 
     def _refresh_kernel_phase_toggle_controls(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
-            self.kernel_phase_program_status_var.set('MV beam-woven phase program: disabled')
-            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
+            self.kernel_phase_program_status_var.set('RS post-recovery stability lock phase program: disabled')
+            self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (RS Post-Recovery Stability Lock Mini Phase Plan V1)')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
             return
-        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (MV Beam-Woven Plan V2)')
+        controls_enabled = bool(getattr(self, 'kernel_phase_ui_controls_enable', False))
+        self.kernel_phase_program_owner_var.set('Progression owner: kernel runtime integration (RS Post-Recovery Stability Lock Mini Phase Plan V1)')
         self.kernel_phase_autostep_var.set(bool(getattr(self, 'kernel_phase_autostep_enable', False)))
         active_floor_value = getattr(self, 'kernel_phase_observation_floor_override', None)
         active_floor_text = str(int(active_floor_value)) if isinstance(active_floor_value, int) and active_floor_value >= 0 else ''
         focus_widget = self.root.focus_get() if hasattr(self, 'root') else None
         if (self.kernel_phase_observation_floor_entry is None) or (focus_widget is not self.kernel_phase_observation_floor_entry):
             self.kernel_phase_observation_floor_text_var.set(active_floor_text)
-        runtime_controls_state = tk.NORMAL
+        runtime_controls_state = tk.NORMAL if controls_enabled else tk.DISABLED
         snapshot = self.kernel_phase_program.snapshot()
         phases = snapshot.get('phases', [])
         if not isinstance(phases, list) or not phases:
-            self.kernel_phase_program_status_var.set('MV beam-woven phase program: no phases loaded')
+            self.kernel_phase_program_status_var.set('RS post-recovery stability lock phase program: no phases loaded')
             self.kernel_phase_program_current_var.set('Current: --')
             self.kernel_phase_program_details_var.set('Stage: --')
             self.kernel_phase_program_modules_var.set('Module targets: --')
@@ -2222,12 +2288,11 @@ class AIAssistantApp:
                 label = f'{label} (integrated)'
             elif not is_reached:
                 label = f'{label} (pending)'
-            button = self.kernel_phase_toggle_buttons.get(phase_id)
-            var = self.kernel_phase_toggle_vars.get(phase_id)
-            if var is not None:
-                var.set(is_enabled)
-            if button is not None:
-                button.config(text=label, state=(tk.NORMAL if is_reached else tk.DISABLED))
+            row_label = self.kernel_phase_row_labels.get(phase_id)
+            if not is_enabled:
+                label = f'{label} (disabled)'
+            if row_label is not None:
+                row_label.config(text=label)
         disabled_count = sum((1 for phase in phases if not bool(phase.get('enabled', 1))))
         target_text = 'complete'
         if isinstance(active_target, (tuple, list)) and len(active_target) == 2:
@@ -2243,7 +2308,7 @@ class AIAssistantApp:
         challenge_active = bool(challenge_state.get('active', False))
         challenge_remaining = int(challenge_state.get('remaining_steps', 0) or 0)
         runtime_controls_text = f'runtime: autostep={runtime_autostep_text},obs_floor={runtime_floor_text},clamp={(1 if clamp_active else 0)}/{clamp_cooldown_remaining},challenge={(1 if challenge_active else 0)}/{challenge_remaining}'
-        self.kernel_phase_program_status_var.set(f'MV beam-woven phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
+        self.kernel_phase_program_status_var.set(f'RS post-recovery stability lock phase program: {completed_count}/{total_count} integrated | target={target_text} | disabled={disabled_count}')
         if active_phase_id and active_micro_id and active_phase_id in spec_map:
             active_spec = spec_map[active_phase_id]
             micro_label = active_micro_id
@@ -2314,13 +2379,13 @@ class AIAssistantApp:
             can_advance_micro = bool((not is_completed) and active_micro_index <= (len(active_spec.micro_stages) - 1))
             can_advance_phase = not is_completed
         if self.kernel_phase_advance_micro_button is not None:
-            self.kernel_phase_advance_micro_button.config(state=(tk.NORMAL if can_advance_micro else tk.DISABLED))
+            self.kernel_phase_advance_micro_button.config(state=(tk.NORMAL if (controls_enabled and can_advance_micro) else tk.DISABLED))
         if self.kernel_phase_regress_micro_button is not None:
-            self.kernel_phase_regress_micro_button.config(state=(tk.NORMAL if can_regress_micro else tk.DISABLED))
+            self.kernel_phase_regress_micro_button.config(state=(tk.NORMAL if (controls_enabled and can_regress_micro) else tk.DISABLED))
         if self.kernel_phase_advance_phase_button is not None:
-            self.kernel_phase_advance_phase_button.config(state=(tk.NORMAL if can_advance_phase else tk.DISABLED))
+            self.kernel_phase_advance_phase_button.config(state=(tk.NORMAL if (controls_enabled and can_advance_phase) else tk.DISABLED))
         if self.kernel_phase_regress_phase_button is not None:
-            self.kernel_phase_regress_phase_button.config(state=(tk.NORMAL if can_regress_phase else tk.DISABLED))
+            self.kernel_phase_regress_phase_button.config(state=(tk.NORMAL if (controls_enabled and can_regress_phase) else tk.DISABLED))
         if self.kernel_phase_autostep_checkbutton is not None:
             self.kernel_phase_autostep_checkbutton.config(state=runtime_controls_state)
         if self.kernel_phase_observation_floor_entry is not None:
@@ -2345,6 +2410,9 @@ class AIAssistantApp:
     def _on_kernel_phase_toggle(self, phase_id: str) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
             return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
+            return
         phase_key = str(phase_id or '').strip()
         if not phase_key:
             return
@@ -2366,6 +2434,9 @@ class AIAssistantApp:
     def _on_kernel_phase_autostep_toggle(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
             return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
+            return
         self.kernel_phase_autostep_enable = bool(self.kernel_phase_autostep_var.get())
         self._apply_kernel_phase_runtime_integration()
         self._schedule_kernel_phase_controls_refresh()
@@ -2385,6 +2456,9 @@ class AIAssistantApp:
 
     def _on_kernel_phase_observation_floor_apply(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
             return
         raw_value = str(self.kernel_phase_observation_floor_text_var.get() or '').strip()
         floor_value: int | None = None
@@ -2457,11 +2531,17 @@ class AIAssistantApp:
     def _on_kernel_phase_advance_micro(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
             return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
+            return
         transition = self.kernel_phase_program.manual_advance_micro()
         self._handle_kernel_phase_manual_transition(action='advance_micro', transition=transition)
 
     def _on_kernel_phase_regress_micro(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
             return
         transition = self.kernel_phase_program.manual_regress_micro()
         self._handle_kernel_phase_manual_transition(action='regress_micro', transition=transition)
@@ -2469,11 +2549,17 @@ class AIAssistantApp:
     def _on_kernel_phase_advance_phase(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
             return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
+            return
         transition = self.kernel_phase_program.manual_advance_phase()
         self._handle_kernel_phase_manual_transition(action='advance_phase', transition=transition)
 
     def _on_kernel_phase_regress_phase(self) -> None:
         if (not self.kernel_phase_program_enable) or self.kernel_phase_program is None:
+            return
+        if not bool(getattr(self, 'kernel_phase_ui_controls_enable', False)):
+            self._schedule_kernel_phase_controls_refresh()
             return
         transition = self.kernel_phase_program.manual_regress_phase()
         self._handle_kernel_phase_manual_transition(action='regress_phase', transition=transition)
@@ -3962,13 +4048,48 @@ class AIAssistantApp:
         if not self.machine_vision_cellmap_ready:
             refined_passes = self._refine_machine_vision_cellmap_predictions(self.machine_vision_cellmap_refine_passes_per_check)
             self._refresh_machine_vision_cellmap_grade_if_needed()
-        total = int(self.grid_cells) * int(self.grid_cells)
-        ready = bool(self.machine_vision_cellmap_ready and len(self.machine_vision_cellmap_predictions) == total)
+        ready, readiness_reason = self._machine_vision_cellmap_kernel_feed_ready(strict=False)
         prefix = 'ready' if ready else 'wait'
         status = self.machine_vision_cellmap_status or 'no-status'
         if refined_passes > 0:
-            return (ready, f'{prefix} refined={refined_passes} {status}')
-        return (ready, f'{prefix} {status}')
+            return (ready, f'{prefix} refined={refined_passes} {readiness_reason} {status}')
+        return (ready, f'{prefix} {readiness_reason} {status}')
+
+    def _machine_vision_cellmap_kernel_feed_ready(self, *, strict: bool=False) -> tuple[bool, str]:
+        total = max(1, int(self.grid_cells) * int(self.grid_cells))
+        known = int(len(self.machine_vision_cellmap_predictions))
+        grade = self.machine_vision_cellmap_grade or {}
+        accuracy = max(0.0, min(1.0, float(grade.get('accuracy', 0.0) or 0.0)))
+        confident = max(0, int(grade.get('confident', 0) or 0))
+        confident_ratio = max(0.0, min(1.0, float(confident) / float(total)))
+        strict_ready = bool(self.machine_vision_cellmap_ready and known == total)
+        if strict or (not self.machine_vision_cellmap_kernel_relaxed_enable):
+            return (
+                strict_ready,
+                (
+                    f'strict_ready={(1 if strict_ready else 0)} '
+                    f'known={known}/{total} acc={round(accuracy, 3)} conf_ratio={round(confident_ratio, 3)}'
+                ),
+            )
+        relaxed_ready = bool(
+            (known == total)
+            and (accuracy >= float(self.machine_vision_cellmap_kernel_relaxed_min_accuracy))
+            and (
+                confident_ratio
+                >= float(self.machine_vision_cellmap_kernel_relaxed_min_confident_ratio)
+            )
+        )
+        return (
+            bool(strict_ready or relaxed_ready),
+            (
+                f'strict_ready={(1 if strict_ready else 0)} '
+                f'relaxed_ready={(1 if relaxed_ready else 0)} '
+                f'known={known}/{total} acc={round(accuracy, 3)} '
+                f'conf_ratio={round(confident_ratio, 3)} '
+                f'min_acc={round(float(self.machine_vision_cellmap_kernel_relaxed_min_accuracy), 3)} '
+                f'min_conf_ratio={round(float(self.machine_vision_cellmap_kernel_relaxed_min_confident_ratio), 3)}'
+            ),
+        )
 
     def _machine_vision_cellmap_status_line(self) -> str:
         if self._normalized_layout_mode() != 'maze':
@@ -4000,7 +4121,8 @@ class AIAssistantApp:
             return {'usable': 0, 'candidate_label': 'unknown', 'candidate_conf': 0.0, 'open_alignment_bonus': 0, 'blocked_risk_penalty': 0, 'neighbor_open_bonus': 0, 'neighbor_blocked_penalty': 0, 'neighbor_known': 0, 'neighbor_open': 0, 'neighbor_blocked': 0}
         self._ensure_machine_vision_cellmap_for_current_maze()
         self._refresh_machine_vision_cellmap_grade_if_needed()
-        if not self.machine_vision_cellmap_ready:
+        kernel_feed_ready, _kernel_feed_reason = self._machine_vision_cellmap_kernel_feed_ready(strict=False)
+        if not kernel_feed_ready:
             return {'usable': 0, 'candidate_label': 'unknown', 'candidate_conf': 0.0, 'open_alignment_bonus': 0, 'blocked_risk_penalty': 0, 'neighbor_open_bonus': 0, 'neighbor_blocked_penalty': 0, 'neighbor_known': 0, 'neighbor_open': 0, 'neighbor_blocked': 0}
         min_conf = float(self.machine_vision_cellmap_kernel_min_conf)
         bias_weight = float(self.machine_vision_cellmap_kernel_bias_weight)
@@ -4177,10 +4299,25 @@ class AIAssistantApp:
     def _machine_vision_enabled(self) -> bool:
         return bool(self.machine_vision_master_enable)
 
-    def _mv_route_mode_active(self) -> bool:
-        if bool(getattr(self, 'mv_routing_deprecated', False)):
+    def _mv_beam_retirement_stage_active(self, *, stage_id: str='') -> bool:
+        if not self._machine_vision_enabled():
             return False
-        return bool(self._machine_vision_enabled() and self.mv_route_planning_mode_enable)
+        return bool(self._kernel_phase_stage_prefix_active(self.mv_beam_retirement_stage_prefix, stage_id=stage_id))
+
+    def _mv_route_mode_active(self) -> bool:
+        if not self._machine_vision_enabled():
+            return False
+        if self.mv_route_planning_mode_enable:
+            return True
+        # At retirement-stage cutover, route authority is forced on.
+        return self._mv_beam_retirement_stage_active()
+
+    def _mv_full_map_cutover_active(self, *, stage_id: str='') -> bool:
+        if not self._machine_vision_enabled():
+            return False
+        if not self._mv_beam_retirement_stage_active(stage_id=stage_id):
+            return False
+        return bool(self._mv_route_mode_active() or self.mv_only_cutover_enable)
 
     def _machine_vision_exit_signature(self) -> str:
         mode = self._normalized_layout_mode()
@@ -6714,7 +6851,11 @@ class AIAssistantApp:
                     recent_objective_verification_hold_flags.clear()
                     self._maze_timeout_reset_pulse = False
                 _target_row, _target_col = self.current_target_cell
+                kernel_stage_id_now = self._kernel_phase_active_stage_id()
+                mv_full_map_cutover_active = self._mv_full_map_cutover_active(stage_id=kernel_stage_id_now)
                 exit_visible_now = self.maze_known_cells.get(self.current_target_cell, '') == 'E' and self._is_local_cell_visible(self.current_player_cell[0], self.current_player_cell[1], _target_row, _target_col, facing=self.player_facing)
+                if mv_full_map_cutover_active:
+                    exit_visible_now = False
                 fully_mapped_now = self._maze_episode_fully_mapped() or (_known_open_now > 0 and _unknown_now <= 0 and (_frontier_now <= 0))
                 fully_mapped_context = fully_mapped_now
                 map_doubt_active = self.maze_map_doubt_enable and map_doubt_cooldown > 0
@@ -6754,8 +6895,7 @@ class AIAssistantApp:
                 mv_route_mode_path_len = 0
                 mv_route_mode_note = ''
                 mv_exit_beam_equivalent = False
-                kernel_stage_id_now = self._kernel_phase_active_stage_id()
-                mv_beam_equivalent_stage_taper_active = bool(self.mv_beam_equivalent_stage_taper_enable and self._kernel_phase_stage_prefix_active(self.mv_beam_retirement_stage_prefix, stage_id=kernel_stage_id_now))
+                mv_beam_equivalent_stage_taper_active = bool(mv_full_map_cutover_active or (self.mv_beam_equivalent_stage_taper_enable and self._kernel_phase_stage_prefix_active(self.mv_beam_retirement_stage_prefix, stage_id=kernel_stage_id_now)))
                 mv_objective_gate_stage_active = bool(self._mv_objective_mv_gate_active(stage_id=kernel_stage_id_now))
                 mv_objective_gate_breakdown_cache: dict[str, dict[str, object]] = {}
                 mv_beam_equivalent_gate_ok = True
@@ -6769,7 +6909,10 @@ class AIAssistantApp:
                 mv_self_error_now = int(mv_self_error_now_raw if mv_self_error_now_raw is not None else -1)
                 mv_exit_conf_now = float(mv_hints_now.get('exit_conf', 0.0) or 0.0)
                 mv_exit_source_now = str(mv_hints_now.get('exit_source', 'none') or 'none')
-                if mv_objective_gate_stage_active and target_path_now:
+                if mv_full_map_cutover_active:
+                    mv_beam_equivalent_gate_ok = False
+                    mv_beam_equivalent_gate_reason = 'beam_disabled_full_mv'
+                elif mv_objective_gate_stage_active and target_path_now:
                     mv_beam_equivalent_gate_ok, mv_beam_equivalent_gate_reason = self._mv_objective_input_gate_passed(target_path_now[0], stage_id=kernel_stage_id_now, breakdown_cache=mv_objective_gate_breakdown_cache)
                 elif mv_objective_gate_stage_active:
                     mv_beam_equivalent_gate_reason = 'no_target_path'
@@ -6777,11 +6920,13 @@ class AIAssistantApp:
                     mv_beam_equivalent_gate_reason = 'gate_inactive'
                 mv_beam_equivalent_candidate = bool(bool(mv_hints_now.get('enabled', False)) and bool(mv_hints_now.get('exit_usable', False)) and bool(mv_hints_now.get('exit_fresh', False)) and (mv_exit_pred_cell == self.current_target_cell) and (mv_exit_source_now in {'learned_signature', 'prior_sample_context'}) and (mv_exit_conf_now >= float(self.machine_vision_beam_equivalent_min_conf)) and (0 <= mv_self_error_now <= int(self.machine_vision_beam_equivalent_max_self_error)) and bool(target_path_now))
                 if mv_beam_equivalent_candidate:
-                    mv_beam_anchor_ok, mv_beam_anchor_reason = self._mv_beam_anchor_ready(exit_visible_now=bool(exit_visible_now), target_known_in_episode=bool(target_known_in_episode))
+                    mv_beam_anchor_ok, mv_beam_anchor_reason = self._mv_beam_anchor_ready(exit_visible_now=bool(exit_visible_now), target_known_in_episode=bool(target_known_in_episode), stage_id=kernel_stage_id_now)
                 if (not self._mv_route_mode_active()) and (not mv_beam_equivalent_stage_taper_active):
                     mv_exit_beam_equivalent = bool(mv_beam_equivalent_candidate and mv_beam_equivalent_gate_ok and mv_beam_anchor_ok)
                 if mv_beam_equivalent_candidate and (not mv_exit_beam_equivalent):
-                    if mv_beam_equivalent_stage_taper_active:
+                    if mv_full_map_cutover_active:
+                        mv_beam_equivalent_suppressed_note = f'[MV-BEAM-EQUIV-SUPPRESSED: stage={kernel_stage_id_now or "none"} reason=full_mv_cutover conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
+                    elif mv_beam_equivalent_stage_taper_active:
                         mv_beam_equivalent_suppressed_note = f'[MV-BEAM-EQUIV-SUPPRESSED: stage={kernel_stage_id_now or "none"} reason=stage_taper conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
                     elif not mv_beam_equivalent_gate_ok:
                         mv_beam_equivalent_suppressed_note = f'[MV-BEAM-EQUIV-SUPPRESSED: stage={kernel_stage_id_now or "none"} reason=mv_gate({mv_beam_equivalent_gate_reason}) conf={round(mv_exit_conf_now, 3)} src={mv_exit_source_now}]'
@@ -7033,7 +7178,7 @@ class AIAssistantApp:
                 if objective_move and objective_verification_unresolved and (not fully_mapped_now) and (not mv_bootstrap_route_active) and (not mv_route_mode_active) and (not mv_capture_ready) and (not mv_exit_beam_equivalent):
                     objective_candidates = [(move, self._neighbor_for_move(self.current_player_cell, move)) for move in ['UP', 'DOWN', 'LEFT', 'RIGHT'] if self._is_valid_traversal_move(move)]
                     objective_margin_effective = max(0, int(self.objective_unresolved_force_score_margin) - int(self.objective_unresolved_force_score_margin_reduction))
-                    wb6_force_damp_active = bool(self.wb6_objective_force_damp_enable and self._kernel_phase_stage_prefix_active('wb6.', stage_id=kernel_stage_id_now))
+                    wb6_force_damp_active = bool(self.wb6_objective_force_damp_enable and self._kernel_phase_stage_prefix_active(self.mv_beam_retirement_stage_prefix, stage_id=kernel_stage_id_now))
                     if wb6_force_damp_active:
                         objective_margin_effective += int(self.wb6_objective_force_margin_boost)
                     objective_force_allowed, objective_force_reason = self._frontier_forced_move_score_guard(objective_move, objective_candidates, margin_override=objective_margin_effective)
@@ -7819,25 +7964,21 @@ class AIAssistantApp:
             if saved_difficulty in {'easy', 'medium', 'hard', 'very hard'}:
                 self.maze_difficulty.set(saved_difficulty)
             saved_mv_route_mode = payload.get('mv_route_planning_mode_enable')
-            if not bool(getattr(self, 'mv_routing_deprecated', False)):
-                if isinstance(saved_mv_route_mode, bool):
-                    self.mv_route_planning_mode_enable = saved_mv_route_mode
-                    self.mv_route_planning_mode_var.set(saved_mv_route_mode)
-                elif isinstance(saved_mv_route_mode, (int, float)):
-                    parsed = bool(saved_mv_route_mode)
-                    self.mv_route_planning_mode_enable = parsed
-                    self.mv_route_planning_mode_var.set(parsed)
-                elif isinstance(saved_mv_route_mode, str):
-                    parsed_text = saved_mv_route_mode.strip().lower()
-                    if parsed_text in {'1', 'true', 'yes', 'on'}:
-                        self.mv_route_planning_mode_enable = True
-                        self.mv_route_planning_mode_var.set(True)
-                    elif parsed_text in {'0', 'false', 'no', 'off'}:
-                        self.mv_route_planning_mode_enable = False
-                        self.mv_route_planning_mode_var.set(False)
-            else:
-                self.mv_route_planning_mode_enable = False
-                self.mv_route_planning_mode_var.set(False)
+            if isinstance(saved_mv_route_mode, bool):
+                self.mv_route_planning_mode_enable = saved_mv_route_mode
+                self.mv_route_planning_mode_var.set(saved_mv_route_mode)
+            elif isinstance(saved_mv_route_mode, (int, float)):
+                parsed = bool(saved_mv_route_mode)
+                self.mv_route_planning_mode_enable = parsed
+                self.mv_route_planning_mode_var.set(parsed)
+            elif isinstance(saved_mv_route_mode, str):
+                parsed_text = saved_mv_route_mode.strip().lower()
+                if parsed_text in {'1', 'true', 'yes', 'on'}:
+                    self.mv_route_planning_mode_enable = True
+                    self.mv_route_planning_mode_var.set(True)
+                elif parsed_text in {'0', 'false', 'no', 'off'}:
+                    self.mv_route_planning_mode_enable = False
+                    self.mv_route_planning_mode_var.set(False)
             saved_mv_master = payload.get('machine_vision_master_enable')
             parsed_mv_master: bool | None = None
             if isinstance(saved_mv_master, bool):
@@ -7994,7 +8135,7 @@ class AIAssistantApp:
             payload = {'geometry': self.root.winfo_geometry()}
             payload['layout_mode'] = self._normalized_layout_mode()
             payload['maze_difficulty'] = self._normalized_maze_difficulty()
-            payload['mv_route_planning_mode_enable'] = bool((not self.mv_routing_deprecated) and self.mv_route_planning_mode_enable)
+            payload['mv_route_planning_mode_enable'] = bool(self.mv_route_planning_mode_enable)
             payload['mv_routing_deprecated'] = int(bool(self.mv_routing_deprecated))
             payload['machine_vision_master_enable'] = bool(self.machine_vision_master_enable)
             payload['fast_mode_enabled'] = bool(self.fast_mode_enabled)
@@ -10064,7 +10205,8 @@ class AIAssistantApp:
             return blocked_cells
         self._ensure_machine_vision_cellmap_for_current_maze()
         self._refresh_machine_vision_cellmap_grade_if_needed()
-        if not self.machine_vision_cellmap_ready:
+        kernel_feed_ready, _kernel_feed_reason = self._machine_vision_cellmap_kernel_feed_ready(strict=False)
+        if not kernel_feed_ready:
             return blocked_cells
         min_conf = max(0.5, float(self.machine_vision_cellmap_kernel_min_conf))
         for row in range(self.grid_cells):
@@ -13178,6 +13320,15 @@ class AIAssistantApp:
         mv_beam_contradiction_active = int(mv_hints.get('mv_beam_contradiction_active', 0) or 0)
         mv_mv_contradiction_active = int(mv_hints.get('mv_mv_contradiction_active', 0) or 0)
         mv_beam_credit_mode = str(mv_hints.get('mv_beam_credit_mode', getattr(self, '_mv_runtime_beam_credit_mode', 'normal')) or 'normal')
+        kernel_stage_id_now = self._kernel_phase_active_stage_id()
+        mv_full_map_cutover_active = self._mv_full_map_cutover_active(stage_id=kernel_stage_id_now)
+        if mv_full_map_cutover_active:
+            mv_beam_credit_mode = 'disabled'
+            mv_perturbation_active = 0
+            mv_perturbation_type = 'none'
+            mv_beam_blackout_active = 0
+            mv_beam_contradiction_active = 0
+            mv_mv_contradiction_active = 0
         if self.adaptive_controller_enable and self.adaptive_disable_mv_hints:
             mv_exit_usable = False
             mv_exit_hint_strength = 0.0
@@ -13316,7 +13467,7 @@ class AIAssistantApp:
             if max_open_width >= 4:
                 visible_open_decision += 1
         beam_visual_traversal_credit_raw = self._beam_progress_credit(frontier_distance, edge_scan)
-        if mv_beam_credit_mode == 'blackout':
+        if mv_beam_credit_mode in {'blackout', 'disabled'}:
             beam_visual_traversal_credit_raw = 0
         elif mv_beam_credit_mode == 'invert':
             if beam_visual_traversal_credit_raw == 0:
@@ -13325,7 +13476,7 @@ class AIAssistantApp:
                 beam_visual_traversal_credit_raw = -max(1, abs(int(round(float(beam_visual_traversal_credit_raw) * 0.7))))
         visual_traversal_credit = beam_visual_traversal_credit_raw
         if self.mv_primary_mode_enable:
-            if self.mv_only_cutover_enable:
+            if self.mv_only_cutover_enable or mv_full_map_cutover_active:
                 if (not mv_input_accepted) and (not mv_low_conf_probe_active) and self.mv_only_emergency_fallback_enable:
                     visual_traversal_credit = min(1, beam_visual_traversal_credit_raw)
                     if mv_input_rejection_reason == 'mv_signal_missing':
@@ -13948,7 +14099,7 @@ class AIAssistantApp:
         projection_score_influence_scale_effective = float(self.maze_projection_score_influence_scale) * float(projection_trust_scale)
         wb6_projection_clamp_active = False
         kernel_stage_id_now = self._kernel_phase_active_stage_id()
-        if self.wb6_projection_scale_clamp_enable and self._kernel_phase_stage_prefix_active('wb6.', stage_id=kernel_stage_id_now):
+        if self.wb6_projection_scale_clamp_enable and self._kernel_phase_stage_prefix_active(self.mv_beam_retirement_stage_prefix, stage_id=kernel_stage_id_now):
             projection_trust_ema_now = float(self.projection_trust_score_ema)
             low_projection_trust = projection_trust_ema_now <= float(self.wb6_projection_scale_clamp_trust_ema_max)
             if low_projection_trust or mv_high_conf_mismatch_active:
@@ -14657,6 +14808,8 @@ class AIAssistantApp:
         self._clear_fov_overlay()
         if self._normalized_layout_mode() != 'maze':
             return
+        if self._mv_full_map_cutover_active():
+            return
         self._prune_verified_empty_opening_edges()
         self._prune_loop_risk_opening_edges()
         marked_off_edges = {(row, col, side) for row, col, side in self.verified_empty_opening_edges if 0 <= row < self.grid_cells and 0 <= col < self.grid_cells}
@@ -14947,6 +15100,11 @@ class AIAssistantApp:
             return
         canvas = self.pseudo3d_canvas
         canvas.delete('all')
+        if self._mv_full_map_cutover_active():
+            canvas.create_rectangle(0, 0, float(self.pseudo3d_width), float(self.pseudo3d_height), fill='#0f1220', outline='')
+            canvas.create_text(8, 8, anchor=tk.NW, fill='#a6b5e5', font=('Helvetica', 9, 'bold'), text='Beam visualizer retired')
+            canvas.create_text(8, 24, anchor=tk.NW, fill='#7f93d1', font=('Helvetica', 8), text='Full-map MV cutover active')
+            return
         w = float(self.pseudo3d_width)
         h = float(self.pseudo3d_height)
         horizon = h * 0.42
@@ -15458,31 +15616,32 @@ class AIAssistantApp:
         if mode == 'maze':
             self._sync_maze_start_number_to_current()
             route_suffix = ''
-            if (not self.mv_routing_deprecated) and self._mv_route_mode_active():
+            if self._mv_route_mode_active():
                 route_suffix = ' [MV route mode ON]'
             mv_suffix = ' [MV OFF]' if not self._machine_vision_enabled() else ''
             self.status_var.set(f'Mode set to maze ({difficulty}, {self.grid_cells}x{self.grid_cells}, algo={self.current_maze_algorithm}){route_suffix}{mv_suffix}')
         else:
             grid_note = ''
-            if (not self.mv_routing_deprecated) and self.mv_route_planning_mode_enable:
+            if self.mv_route_planning_mode_enable:
                 grid_note = ' [MV route mode ON for maze]'
             mv_note = ' [MV OFF]' if not self._machine_vision_enabled() else ''
             self.status_var.set(f'Mode set to grid ({self.grid_cells}x{self.grid_cells}){grid_note}{mv_note}')
 
     def _sync_machine_vision_toggle_controls(self) -> None:
-        if self.mv_routing_deprecated:
-            self.mv_route_planning_mode_enable = False
-            if self.mv_route_planning_mode_var.get():
-                self.mv_route_planning_mode_var.set(False)
         if not self._machine_vision_enabled():
             self.mv_route_planning_mode_enable = False
             if self.mv_route_planning_mode_var.get():
                 self.mv_route_planning_mode_var.set(False)
+        full_mv_cutover = self._mv_full_map_cutover_active()
+        if self._machine_vision_enabled() and full_mv_cutover:
+            self.mv_route_planning_mode_enable = True
+            if not self.mv_route_planning_mode_var.get():
+                self.mv_route_planning_mode_var.set(True)
         if hasattr(self, 'mv_route_mode_checkbutton'):
-            if self.mv_routing_deprecated:
+            if (not self._machine_vision_enabled()) or full_mv_cutover:
                 self.mv_route_mode_checkbutton.config(state=tk.DISABLED)
             else:
-                self.mv_route_mode_checkbutton.config(state=tk.NORMAL if self._machine_vision_enabled() else tk.DISABLED)
+                self.mv_route_mode_checkbutton.config(state=tk.NORMAL)
         if not self._machine_vision_enabled():
             self._mv_preplan_last_status = 'disabled:mv-master-off'
         elif self._mv_preplan_last_status == 'disabled:mv-master-off':
@@ -15677,23 +15836,20 @@ class AIAssistantApp:
             self.status_var.set('Machine vision disabled')
 
     def _on_mv_route_mode_toggled(self) -> None:
-        if self.mv_routing_deprecated:
-            self.mv_route_planning_mode_enable = False
-            if self.mv_route_planning_mode_var.get():
-                self.mv_route_planning_mode_var.set(False)
-            self._sync_machine_vision_toggle_controls()
-            self._save_window_geometry()
-            self.status_var.set('MV route planning mode is deprecated and disabled (MV localization remains active)')
-            return
         enabled = bool(self.mv_route_planning_mode_var.get())
+        if self._machine_vision_enabled() and self._mv_beam_retirement_stage_active() and (not enabled):
+            enabled = True
+            self.mv_route_planning_mode_var.set(True)
         self.mv_route_planning_mode_enable = enabled
         self._sync_machine_vision_toggle_controls()
         self._save_window_geometry()
         if self._normalized_layout_mode() == 'maze':
-            if enabled and (not self._machine_vision_enabled()):
+            if self._mv_full_map_cutover_active():
+                self.status_var.set('MV full-map cutover active (route mode locked ON; beam vision retired)')
+            elif enabled and (not self._machine_vision_enabled()):
                 self.status_var.set('MV route planning mode queued (enable MV to activate)')
             elif enabled:
-                self.status_var.set('MV route planning mode enabled (beam-equivalent objective routing disabled)')
+                self.status_var.set('MV route planning mode enabled (kernel accepts full-map MV route feed)')
             else:
                 self.status_var.set('MV route planning mode disabled (beam-equivalent objective routing enabled)')
         elif enabled:

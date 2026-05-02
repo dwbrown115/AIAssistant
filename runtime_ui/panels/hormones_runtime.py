@@ -85,9 +85,17 @@ def hormone_monitor_text(app: object) -> str:
             else:
                 target_text = "complete"
             active_phase_row = None
+            active_phase_micro_total = 0
             phases_payload = phase_snapshot.get("phases", [])
             if isinstance(active_target, (tuple, list)) and len(active_target) >= 1 and isinstance(phases_payload, list):
                 active_phase_id = str(active_target[0] or "").strip()
+                for spec in phase_specs:
+                    if str(getattr(spec, "phase_id", "") or "").strip() == active_phase_id:
+                        try:
+                            active_phase_micro_total = max(1, len(tuple(getattr(spec, "micro_stages", ()) or ())))
+                        except Exception:
+                            active_phase_micro_total = 0
+                        break
                 for row in phases_payload:
                     if not isinstance(row, dict):
                         continue
@@ -115,7 +123,7 @@ def hormone_monitor_text(app: object) -> str:
                         "promotion_tracker: "
                         f"phase={completed_phase_count}/{max(0, total_phase_count)} "
                         f"micro={completed_micro_total}/{max(0, total_micro_count)} "
-                        f"active_micro={micro_index + 1}/4 "
+                        f"active_micro={micro_index + 1}/{max(1, active_phase_micro_total)} "
                         f"gate_ready={gate_ready} "
                         f"gate_met={gate_met} "
                         f"obs_gap={obs_gap} "
